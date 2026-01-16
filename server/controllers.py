@@ -61,18 +61,29 @@ def queryTextHashInfo(textHash: int, langs: 'list[int]', sourceLangCode: int, qu
 
 
 def getTranslateObj(keyword: str, langCode: int):
-    # 找出目标语言的textMap包含keyword的文本
+    # 找出包含 keyword 的结果
+    # 注意：这里假设 databaseHelper.selectTextMapFromKeyword 已经被修改为
+    # 返回混合列表，其中包含普通文本的 tuple 和书籍/字幕的 dict
+
     ans = []
-
-    contents = databaseHelper.selectTextMapFromKeyword(keyword, langCode)
-
     langs = config.getResultLanguages()
     sourceLangCode = config.getSourceLanguage()
 
-    for content in contents:
-        obj = queryTextHashInfo(content[0], langs, sourceLangCode)
-        ans.append(obj)
-
+    raw_results = databaseHelper.selectTextMapFromKeyword(keyword, langCode)
+    
+    for item in raw_results:
+        if isinstance(item, dict):
+            # 如果是书籍或字幕（字典），直接添加到结果中
+            # 因为我们在 databaseHelper 里已经设置好了 'origin'，前端会直接显示它
+            ans.append(item)
+        else:
+            # 普通文本（元组），走原有逻辑，最后可能得到 origin="其他文本"
+            textHash = item[0]
+            obj = queryTextHashInfo(textHash, langs, sourceLangCode)
+            if len(item) > 1:
+                 obj['content'] = item[1]
+            ans.append(obj)
+            
     return ans
 
 
