@@ -160,20 +160,6 @@ create unique index manualTextMap_textMapId_uindex
     on manualTextMap (textMapId);
 
 
--- 书籍主表（存储书籍ID）
-create table readable
-(
-    id          integer
-        constraint readable_pk
-            primary key autoincrement,
-    readableId  integer
-        constraint readable_pk_2
-            unique
-);
-
-create index readable_readableId_index
-    on readable (readableId);
-
 -- 书籍主表 (用于索引ID)
 create table readable
 (
