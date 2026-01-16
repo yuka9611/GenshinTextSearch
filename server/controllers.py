@@ -7,7 +7,7 @@ import placeholderHandler
 
 
 def selectVoicePathFromTextHash(textHash: int):
-    voicePath: str = databaseHelper.selectVoicePathFromTextHashInDialogue(textHash)
+    voicePath: str | None = databaseHelper.selectVoicePathFromTextHashInDialogue(textHash)
     if voicePath is not None:
         return voicePath
 
@@ -62,22 +62,27 @@ def queryTextHashInfo(textHash: int, langs: 'list[int]', sourceLangCode: int, qu
 
 def getTranslateObj(keyword: str, langCode: int):
     # 找出包含 keyword 的结果
-    # 注意：这里假设 databaseHelper.selectTextMapFromKeyword 已经被修改为
-    # 返回混合列表，其中包含普通文本的 tuple 和书籍/字幕的 dict
+    raw_results = databaseHelper.selectTextMapFromKeyword(keyword, langCode)
 
     ans = []
     langs = config.getResultLanguages()
     sourceLangCode = config.getSourceLanguage()
 
-    raw_results = databaseHelper.selectTextMapFromKeyword(keyword, langCode)
-    
     for item in raw_results:
         if isinstance(item, dict):
-            # 如果是书籍或字幕（字典），直接添加到结果中
-            # 因为我们在 databaseHelper 里已经设置好了 'origin'，前端会直接显示它
-            ans.append(item)
+            # --- 修复核心：将书籍/字幕字典封装成前端兼容的标准对象 ---
+            obj = {
+                # 前端依靠 translates 字段遍历显示。
+                # key 是语言代码(int)，value 是内容(str)。
+                'translates': { langCode: item['content'] }, 
+                'voicePaths': [],
+                'hash': item['id'], # 使用 id 作为 hash，确保唯一性
+                'isTalk': False,
+                'origin': item['origin'] # 之前在 databaseHelper 里设置好的标题/文件名
+            }
+            ans.append(obj)
         else:
-            # 普通文本（元组），走原有逻辑，最后可能得到 origin="其他文本"
+            # 普通文本（元组），走原有逻辑
             textHash = item[0]
             obj = queryTextHashInfo(textHash, langs, sourceLangCode)
             if len(item) > 1:
@@ -92,7 +97,7 @@ def getTalkFromHash(textHash: int):
     # 先查到文本所属的talk，然后查询对话所属的任务的标题，然后查询对话所有的内容，对于每一句话，查询多语言翻译、说话者
     talkInfo = databaseHelper.getTalkInfo(textHash)
     if talkInfo is None:
-        raise "内容不属于任何对话！"
+        raise ValueError("内容不属于任何对话！")
 
     langs = config.getResultLanguages()
     sourceLangCode = config.getSourceLanguage()
@@ -105,6 +110,9 @@ def getTalkFromHash(textHash: int):
 
     rawDialogues = databaseHelper.getTalkContent(talkId, coopQuestId)
     dialogues = []
+
+    if rawDialogues is None:
+        rawDialogues = []
 
     for rawDialogue in rawDialogues:
         textHash, talkerType, talkerId, dialogueId = rawDialogue
