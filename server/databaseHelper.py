@@ -1,21 +1,68 @@
 import sqlite3
 from contextlib import closing
-import os
 
 # 没人会给一个词典搞高并发吧？
-conn = sqlite3.connect(os.path.join(os.path.dirname(__file__), "data.db"), check_same_thread=False)
+conn = sqlite3.connect(r".\data.db", check_same_thread=False)
 
 
 def selectTextMapFromKeyword(keyWord: str, langCode: int):
-    # [hash] 反正最后还得去数据库查一遍目标语言，不如不查content
+    # 初始化结果列表
+    matches = []
+    
     with closing(conn.cursor()) as cursor:
-        sql1 = "select hash, content from textMap where lang=? and content like ? limit 200"
-        cursor.execute(sql1, (langCode, '%{}%'.format(keyWord)))
-        matches = cursor.fetchall()
-        return matches
+        # 1. 查询普通游戏文本 (保持原有逻辑)
+        sql_text = "select hash, content from textMap where lang=? and content like ? limit 100"
+        cursor.execute(sql_text, (langCode, '%{}%'.format(keyWord)))
+        matches.extend(cursor.fetchall())
+
+        # 2. 书籍 (Readable) 查询
+        sql_readable = """
+            SELECT 
+                rc.readableId, 
+                rc.content, 
+                tm.content as title
+            FROM readableContent rc
+            JOIN readable r ON rc.readableId = r.readableId
+            LEFT JOIN textMap tm ON r.titleTextMapHash = tm.hash AND tm.lang = ?
+            WHERE rc.lang = ? AND rc.content LIKE ?
+            LIMIT 50
+        """
+        cursor.execute(sql_readable, (langCode, langCode, '%{}%'.format(keyWord)))
+        
+        for row in cursor.fetchall():
+            title = row[2] if row[2] else f"Book {row[0]}"
+            matches.append({
+                'type': 'readable',
+                'id': row[0],
+                'content': row[1],
+                'title': title,
+                'origin': title  # <--- 关键修改：将书名赋值给 origin 字段
+            })
+
+        # 3. 字幕 (Subtitle) 查询
+        sql_subtitle = """
+            SELECT id, fileName, startTime, endTime, content
+            FROM subtitle
+            WHERE lang = ? AND content LIKE ?
+            LIMIT 50
+        """
+        cursor.execute(sql_subtitle, (langCode, '%{}%'.format(keyWord)))
+        
+        for row in cursor.fetchall():
+            matches.append({
+                'type': 'subtitle',
+                'id': row[0],
+                'fileName': row[1],
+                'startTime': row[2],
+                'endTime': row[3],
+                'content': row[4],
+                'origin': row[1]  # <--- 关键修改：将字幕文件名赋值给 origin 字段
+            })
+
+    return matches
 
 
-def selectTextMapFromTextHash(textHash: int, langs: list[int] = None):
+def selectTextMapFromTextHash(textHash: int, langs: list[int] | None = None):
     # [text, langCode]
 
     with closing(conn.cursor()) as cursor:
