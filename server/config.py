@@ -3,11 +3,11 @@ import os.path
 
 config = {
     "resultLanguages": [
-        1, 4
+        1, 4, 9
     ],
 
-    "defaultSearchLanguage": 4,
-    "assetDir": "",
+    "defaultSearchLanguage": 1,
+    "assetDir": "D:\\Program Files\\Genshin Impact\\Genshin Impact game\\GenshinImpact_Data",
     "sourceLanguage": 1,
     "isMale": False
 }

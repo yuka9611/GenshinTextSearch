@@ -3,7 +3,7 @@
         <h1 class="pageTitle">关键词检索</h1>
         <div class="helpText">
             <p>使用关键词对游戏的指定语言的文本进行检索。</p>
-            <p>检索结果中,可能有对应配音的结果会被排序在前面。</p>
+            <p>检索结果中，可能有对应配音的结果会被排序在前面。</p>
         </div>
 
 
@@ -116,7 +116,14 @@ const onQueryButtonClicked = async () =>{
     // 去重，合并相同的语音条目
     let resultMap = new Map()
     for(let item of ans.contents){
+        // 原逻辑：let key = item.translates[queryLanguages[0]]
+        // 新逻辑：如果首选语言不存在（例如搜英文书时没有中文），则使用 hash 或第一种可用语言的内容作为 key
         let key = item.translates[queryLanguages[0]]
+        if (!key) {
+             // 尝试取翻译列表里的第一个内容，或者直接用 hash (ID)
+             // 对于书籍/字幕，每个 ID 都是独立的，使用 hash (即 id) 作为 key 最安全
+             key = item.hash || Object.values(item.translates)[0]
+        }
         if(!resultMap.has(key)){
             resultMap.set(key, item)
             continue
