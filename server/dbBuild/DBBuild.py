@@ -284,55 +284,74 @@ def load_readable_mappings():
     2. title_map: 280084 -> 1234567 (titleTextMapHash)
     """
     print("Loading Readable mappings...")
-    
+
+    filename_to_id = {}
+    id_to_title = {}
+
+    def normalize_readable_name(name: str) -> str:
+        stem = os.path.splitext(name)[0]
+        for lang_key in LANG_MAP.keys():
+            suffix = f"_{lang_key}"
+            if stem.endswith(suffix):
+                return stem[:-len(suffix)]
+        return stem
+
+    def register_filename(readable_id: int, raw_name: str):
+        if not readable_id or not raw_name:
+            return
+        normalized = normalize_readable_name(raw_name)
+        filename_to_id.setdefault(normalized, readable_id)
+
+    def walk_values(value):
+        if isinstance(value, dict):
+            for child in value.values():
+                yield from walk_values(child)
+        elif isinstance(value, list):
+            for child in value:
+                yield from walk_values(child)
+        elif isinstance(value, str):
+            yield value
+
+    def register_paths_from_item(item_id: int, item: dict):
+        for val in walk_values(item):
+            if "Readable" not in val:
+                continue
+            base_name = os.path.basename(val)
+            if not base_name:
+                continue
+            register_filename(item_id, base_name)
+
     # 1. 加载 Localization 建立 文件名 -> ID 映射
     # 路径: ExcelBinOutput/LocalizationExcelConfigData.json
     loc_path = os.path.join(DATA_PATH, "ExcelBinOutput", "LocalizationExcelConfigData.json")
-    filename_to_id = {}
-    
+
     if os.path.exists(loc_path):
         try:
             loc_data = json.load(open(loc_path, encoding='utf-8'))
             for item in loc_data:
-                item_id = item.get('id')
+                item_id = item.get('id') or item.get('documentId')
                 if not item_id:
                     continue
-                
-                # 遍历所有可能的路径键，提取文件名
-                # 示例: "enPath": "ART/UI/Readable/EN/Relic10008_4_EN"
-                # 注意：有些文件名带有语言后缀 (Relic10008_4_EN)，有些没有 (Relic10008_4)。
-                # 既然我们遍历的是 txt 文件，我们需要匹配去除了路径和语言后缀的核心名称，或者建立多对一映射。
-                
-                # 策略：收集该 ID 对应的所有可能的文件名标识
-                # 通常 Localization 里的路径最后一部分是文件名
-                
-                for key, val in item.items():
-                    if key.endswith('Path') and isinstance(val, str) and 'Readable' in val:
-                        # val example: "ART/UI/Readable/EN/Relic10008_4_EN"
-                        fname = os.path.basename(val) # "Relic10008_4_EN"
-                        filename_to_id[fname] = item_id
-                        
-                        # 为了稳健，如果文件名包含语言后缀（如 _EN, _CHS），也可以尝试存储去除后缀的版本
-                        # 但实际上读取 txt 时，我们可以拿 txt 的文件名去匹配这里记录的 fname
-                        
+                register_paths_from_item(item_id, item)
         except Exception as e:
             print(f"Error loading Localization config: {e}")
     else:
         print("LocalizationExcelConfigData.json not found!")
 
-    # 2. 加载 Document 建立 ID -> TitleHash 映射
+    # 2. 加载 Document 建立 ID -> TitleHash 映射 + 备用的文件名映射
     # 路径: ExcelBinOutput/DocumentExcelConfigData.json
     doc_path = os.path.join(DATA_PATH, "ExcelBinOutput", "DocumentExcelConfigData.json")
-    id_to_title = {}
-    
+
     if os.path.exists(doc_path):
         try:
             doc_data = json.load(open(doc_path, encoding='utf-8'))
             for item in doc_data:
-                doc_id = item.get('id')
+                doc_id = item.get('id') or item.get('documentId')
                 title_hash = item.get('titleTextMapHash')
                 if doc_id and title_hash:
                     id_to_title[doc_id] = title_hash
+                if doc_id:
+                    register_paths_from_item(doc_id, item)
         except Exception as e:
             print(f"Error loading Document config: {e}")
     else:
@@ -356,49 +375,50 @@ def importReadables():
     # 缓存已插入的 readableId，避免重复插入主表
     inserted_readable_ids = set()
 
+    def normalize_readable_name(name: str) -> str:
+        stem = os.path.splitext(name)[0]
+        for lang_key in LANG_MAP.keys():
+            suffix = f"_{lang_key}"
+            if stem.endswith(suffix):
+                return stem[:-len(suffix)]
+        return stem
+
     for lang_name, lang_id in LANG_MAP.items():
         lang_path = os.path.join(readable_root, lang_name)
         if not os.path.exists(lang_path):
             continue
-            
-        files = os.listdir(lang_path)
-        print(f"Importing Readable {lang_name}...")
-        
-        for file_name in tqdm(files):
-            if not file_name.endswith(".txt"):
-                continue
-            
-            # 匹配文件名
-            # 文件名: "Relic10008_4.txt" -> 核心名 "Relic10008_4"
-            # 或者是 "Relic10008_4_CHS.txt" -> "Relic10008_4_CHS"
-            # 我们需要拿这个名字去 filename_to_id 查找
-            
-            name_stem = os.path.splitext(file_name)[0]
+
+        readable_files = []
+        for root, _, files in os.walk(lang_path):
+            for file_name in files:
+                if file_name.endswith(".txt"):
+                    readable_files.append(os.path.join(root, file_name))
+
+        print(f"Importing Readable {lang_name} ({len(readable_files)} files)...")
+
+        for full_path in tqdm(readable_files):
+            file_name = os.path.basename(full_path)
+            name_stem = normalize_readable_name(file_name)
             readable_id = filename_to_id.get(name_stem)
-            
-            # 如果直接匹配不到，尝试去除可能的语言后缀匹配 (例如文件名是 Relic_CHS，但字典里只存了 Relic)
-            # 或者字典里存了 Relic_CHS，但文件名是 Relic
-            # 这里根据您提供的 JSON 例子，Map 里存的是带路径的完整字符串，我们之前 basename 处理过了。
-            # 假设 Localization 里是 "Relic10008_4_CHS"，而文件也是 "Relic10008_4_CHS.txt"，则能直接匹配。
-            
+
             if not readable_id:
-                # 尝试 fuzzy match logic if needed, or simply skip
                 continue
-            
+
             # 1. 插入/更新 Readable 主表 (如果还没处理过这个ID)
             if readable_id not in inserted_readable_ids:
                 title_hash = id_to_title.get(readable_id)
                 # 使用 INSERT OR REPLACE 确保更新 titleHash
-                cursor.execute("INSERT OR REPLACE INTO readable(readableId, titleTextMapHash) VALUES (?, ?)", 
-                               (readable_id, title_hash))
+                cursor.execute(
+                    "INSERT OR REPLACE INTO readable(readableId, titleTextMapHash) VALUES (?, ?)",
+                    (readable_id, title_hash)
+                )
                 inserted_readable_ids.add(readable_id)
-            
+
             # 2. 插入内容表
             try:
-                full_path = os.path.join(lang_path, file_name)
                 with open(full_path, 'r', encoding='utf-8', errors='ignore') as f:
                     content = f.read()
-                
+
                 cursor.execute(
                     "INSERT INTO readableContent(readableId, lang, content) VALUES (?,?,?)",
                     (readable_id, lang_id, content)
@@ -436,17 +456,21 @@ def importSubtitles():
         lang_path = os.path.join(subtitle_root, lang_name)
         if not os.path.exists(lang_path):
             continue
-            
-        files = os.listdir(lang_path)
-        print(f"  Processing {lang_name} ({len(files)} files)...")
 
-        for fileName in tqdm(files):
-            if not fileName.endswith(".srt"):
-                continue
+        subtitle_files = []
+        for root, _, files in os.walk(lang_path):
+            for file_name in files:
+                if file_name.endswith(".srt"):
+                    subtitle_files.append(os.path.join(root, file_name))
 
-            # 文件名作为标识符 (去除后缀)
-            cleanFileName = os.path.splitext(fileName)[0]
-            full_path = os.path.join(lang_path, fileName)
+        print(f"  Processing {lang_name} ({len(subtitle_files)} files)...")
+
+        for full_path in tqdm(subtitle_files):
+            file_name = os.path.basename(full_path)
+
+            # 文件名作为标识符 (去除后缀)，保留子目录以避免重名冲突
+            rel_path = os.path.relpath(full_path, lang_path)
+            cleanFileName = os.path.splitext(rel_path)[0].replace(os.sep, "/")
 
             try:
                 with open(full_path, 'r', encoding='utf-8', errors='ignore') as f:
@@ -457,20 +481,19 @@ def importSubtitles():
                 # 1
                 # 00:00:00,490 --> 00:00:02,630
                 # 文本内容...
-                
-                blocks = re.split(r'\n\s*\n', content.strip())
+                blocks = re.split(r'\r?\n\s*\r?\n', content.strip())
                 for block in blocks:
-                    lines = [l.strip() for l in block.split('\n') if l.strip()]
+                    lines = [line.strip() for line in block.splitlines() if line.strip()]
                     if len(lines) < 2:
                         continue
-                    
+
                     # 查找包含 '-->' 的时间行
                     time_line_idx = -1
                     for idx, line in enumerate(lines):
                         if '-->' in line:
                             time_line_idx = idx
                             break
-                    
+
                     if time_line_idx == -1:
                         continue
 
@@ -478,19 +501,22 @@ def importSubtitles():
                     time_parts = lines[time_line_idx].split('-->')
                     if len(time_parts) != 2:
                         continue
-                        
+
                     start_time = parse_srt_time(time_parts[0].strip())
                     end_time = parse_srt_time(time_parts[1].strip())
 
                     # 获取文本内容 (时间行之后的所有行)
-                    text_lines = lines[time_line_idx+1:]
+                    text_lines = lines[time_line_idx + 1:]
                     text_content = "\n".join(text_lines)
 
                     if text_content:
-                        cursor.execute(sql_insert, (cleanFileName, lang_id, start_time, end_time, text_content))
+                        cursor.execute(
+                            sql_insert,
+                            (cleanFileName, lang_id, start_time, end_time, text_content)
+                        )
 
             except Exception as e:
-                print(f"Error processing {fileName} in {lang_name}: {e}")
+                print(f"Error processing {file_name} in {lang_name}: {e}")
 
     cursor.close()
     conn.commit()
