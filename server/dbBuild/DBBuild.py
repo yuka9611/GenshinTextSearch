@@ -288,19 +288,34 @@ def load_readable_mappings():
     filename_to_id = {}
     id_to_title = {}
 
+    def normalize_id(value):
+        if value is None:
+            return None
+        if isinstance(value, int):
+            return value
+        if isinstance(value, str) and value.isdigit():
+            return int(value)
+        return value
+
     def normalize_readable_name(name: str) -> str:
-        stem = os.path.splitext(name)[0]
+        clean_name = name.replace("\\", "/")
+        stem = os.path.splitext(clean_name)[0]
         for lang_key in LANG_MAP.keys():
             suffix = f"_{lang_key}"
             if stem.endswith(suffix):
-                return stem[:-len(suffix)]
+                stem = stem[:-len(suffix)]
+                break
         return stem
 
     def register_filename(readable_id: int, raw_name: str):
+        readable_id = normalize_id(readable_id)
         if not readable_id or not raw_name:
             return
         normalized = normalize_readable_name(raw_name)
         filename_to_id.setdefault(normalized, readable_id)
+        base_name = os.path.basename(raw_name)
+        if base_name:
+            filename_to_id.setdefault(normalize_readable_name(base_name), readable_id)
 
     def walk_values(value):
         if isinstance(value, dict):
@@ -314,12 +329,10 @@ def load_readable_mappings():
 
     def register_paths_from_item(item_id: int, item: dict):
         for val in walk_values(item):
-            if "Readable" not in val:
+            val_lower = val.lower()
+            if "readable" not in val_lower and not val_lower.endswith(".txt"):
                 continue
-            base_name = os.path.basename(val)
-            if not base_name:
-                continue
-            register_filename(item_id, base_name)
+            register_filename(item_id, val)
 
     # 1. 加载 Localization 建立 文件名 -> ID 映射
     # 路径: ExcelBinOutput/LocalizationExcelConfigData.json
@@ -329,7 +342,7 @@ def load_readable_mappings():
         try:
             loc_data = json.load(open(loc_path, encoding='utf-8'))
             for item in loc_data:
-                item_id = item.get('id') or item.get('documentId')
+                item_id = normalize_id(item.get('id') or item.get('documentId'))
                 if not item_id:
                     continue
                 register_paths_from_item(item_id, item)
@@ -346,12 +359,18 @@ def load_readable_mappings():
         try:
             doc_data = json.load(open(doc_path, encoding='utf-8'))
             for item in doc_data:
-                doc_id = item.get('id') or item.get('documentId')
+                doc_id = normalize_id(item.get('id') or item.get('documentId'))
                 title_hash = item.get('titleTextMapHash')
                 if doc_id and title_hash:
                     id_to_title[doc_id] = title_hash
                 if doc_id:
                     register_paths_from_item(doc_id, item)
+                quest_ids = item.get('questIDList') or []
+                if title_hash and isinstance(quest_ids, list):
+                    for quest_id in quest_ids:
+                        quest_id = normalize_id(quest_id)
+                        if quest_id:
+                            id_to_title.setdefault(quest_id, title_hash)
         except Exception as e:
             print(f"Error loading Document config: {e}")
     else:
@@ -376,11 +395,13 @@ def importReadables():
     inserted_readable_ids = set()
 
     def normalize_readable_name(name: str) -> str:
-        stem = os.path.splitext(name)[0]
+        clean_name = name.replace("\\", "/")
+        stem = os.path.splitext(clean_name)[0]
         for lang_key in LANG_MAP.keys():
             suffix = f"_{lang_key}"
             if stem.endswith(suffix):
-                return stem[:-len(suffix)]
+                stem = stem[:-len(suffix)]
+                break
         return stem
 
     for lang_name, lang_id in LANG_MAP.items():
@@ -398,21 +419,33 @@ def importReadables():
 
         for full_path in tqdm(readable_files):
             file_name = os.path.basename(full_path)
+            rel_path = os.path.relpath(full_path, lang_path).replace(os.sep, "/")
             name_stem = normalize_readable_name(file_name)
-            readable_id = filename_to_id.get(name_stem)
+            rel_stem = normalize_readable_name(rel_path)
+            readable_id = filename_to_id.get(rel_stem) or filename_to_id.get(name_stem)
 
+            if not readable_id:
+                digits = re.findall(r'\d+', name_stem)
+                if digits:
+                    candidate_id = int(''.join(digits))
+                    if candidate_id in id_to_title:
+                        readable_id = candidate_id
             if not readable_id:
                 continue
 
             # 1. 插入/更新 Readable 主表 (如果还没处理过这个ID)
+            title_hash = id_to_title.get(readable_id)
             if readable_id not in inserted_readable_ids:
-                title_hash = id_to_title.get(readable_id)
-                # 使用 INSERT OR REPLACE 确保更新 titleHash
                 cursor.execute(
                     "INSERT OR REPLACE INTO readable(readableId, titleTextMapHash) VALUES (?, ?)",
                     (readable_id, title_hash)
                 )
                 inserted_readable_ids.add(readable_id)
+            elif title_hash:
+                cursor.execute(
+                    "UPDATE readable SET titleTextMapHash = COALESCE(titleTextMapHash, ?) WHERE readableId = ?",
+                    (title_hash, readable_id)
+                )
 
             # 2. 插入内容表
             try:

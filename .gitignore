@@ -3,3 +3,4 @@
 vgm
 .idea
 .DS_Store
+*.pyc

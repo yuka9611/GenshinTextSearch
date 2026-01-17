@@ -120,9 +120,8 @@ const onQueryButtonClicked = async () =>{
         // 新逻辑：如果首选语言不存在（例如搜英文书时没有中文），则使用 hash 或第一种可用语言的内容作为 key
         let key = item.translates[queryLanguages[0]]
         if (!key) {
-             // 尝试取翻译列表里的第一个内容，或者直接用 hash (ID)
-             // 对于书籍/字幕，每个 ID 都是独立的，使用 hash (即 id) 作为 key 最安全
-             key = item.hash || Object.values(item.translates)[0]
+             // 优先使用 hash (后端生成的 crc32 或 id)，如果没有则尝试取第一个可用的翻译内容
+             key = item.hash || item.id || Object.values(item.translates)[0]
         }
         if(!resultMap.has(key)){
             resultMap.set(key, item)

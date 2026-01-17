@@ -13,7 +13,11 @@ const textWrapper = ref(null)
 const loweredKeyword = ref("")
 
 const getLines = (translate) => {
-    return translate.split("\\n")
+    if (!translate) {
+        return []
+    }
+    const normalized = translate.replace(/\\n/g, "\n")
+    return normalized.split(/\r?\n/)
 }
 
 /**
