@@ -19,11 +19,13 @@ def selectTextMapFromKeyword(keyWord: str, langCode: int):
         sql_readable = """
             SELECT 
                 rc.readableId, 
-                rc.content, 
-                tm.content as title
+                rc.content,
+                COALESCE(
+                    (SELECT content FROM textMap WHERE hash = r.titleTextMapHash AND lang = ? LIMIT 1),
+                    (SELECT content FROM textMap WHERE hash = r.titleTextMapHash LIMIT 1)
+                ) as title
             FROM readableContent rc
             JOIN readable r ON rc.readableId = r.readableId
-            LEFT JOIN textMap tm ON r.titleTextMapHash = tm.hash AND tm.lang = ?
             WHERE rc.lang = ? AND rc.content LIKE ?
             LIMIT 50
         """
@@ -31,12 +33,13 @@ def selectTextMapFromKeyword(keyWord: str, langCode: int):
         
         for row in cursor.fetchall():
             title = row[2] if row[2] else f"Book {row[0]}"
+            origin = title
             matches.append({
                 'type': 'readable',
                 'id': row[0],
                 'content': row[1],
                 'title': title,
-                'origin': title  # <--- 关键修改：将书名赋值给 origin 字段
+                'origin': origin  # <--- 关键修改：显示 titleTextMapHash 对应的书名
             })
 
         # 3. 字幕 (Subtitle) 查询
