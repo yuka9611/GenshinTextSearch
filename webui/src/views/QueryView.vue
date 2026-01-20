@@ -30,7 +30,7 @@
 
 
         <div>
-            <TranslateDisplay v-for="translate in queryResult" :translate-obj="translate" class="translate" @onVoicePlay="onVoicePlay" :keyword="keywordLast" />
+            <TranslateDisplay v-for="translate in queryResult" :translate-obj="translate" class="translate" @onVoicePlay="onVoicePlay" :keyword="keywordLast" :search-lang="searchLangLast" />
         </div>
     </div>
 
@@ -77,6 +77,7 @@ const queryResult = ref([])
 const selectedInputLanguage = ref(global.config.defaultSearchLanguage + '')
 const keyword = ref("")
 const keywordLast = ref("")
+const searchLangLast = ref(0)
 const supportedInputLanguage = ref({})
 const searchSummary = ref("")
 
@@ -112,63 +113,73 @@ const onQueryButtonClicked = async () =>{
         return
     }
 
-    let mergedCount = 0
-    // 去重，合并相同的语音条目
-    let resultMap = new Map()
-    for(let item of ans.contents){
-        // 原逻辑：let key = item.translates[queryLanguages[0]]
-        // 新逻辑：如果首选语言不存在（例如搜英文书时没有中文），则使用 hash 或第一种可用语言的内容作为 key
-        let key = item.translates[queryLanguages[0]]
-        if (!key) {
-             // 优先使用 hash (后端生成的 crc32 或 id)，如果没有则尝试取第一个可用的翻译内容
-             key = item.hash || item.id || Object.values(item.translates)[0]
-        }
-        if(!resultMap.has(key)){
-            resultMap.set(key, item)
-            continue
-        }
-        mergedCount++;
+    // let mergedCount = 0
+    // // 去重，合并相同的语音条目
+    // let resultMap = new Map()
+    // for(let item of ans.contents){
+    //     let key = item.translates[queryLanguages[0]]
+    //     if(!resultMap.has(key)){
+    //         resultMap.set(key, item)
+    //         continue
+    //     }
+    //     mergedCount++;
+    //
+    //     let oldItem = resultMap.get(key)
+    //     let voicePathsToAdd = []
+    //     for(let newVoicePath of item.voicePaths){
+    //         let found = false
+    //         for(let oldVoicePath of oldItem.voicePaths){
+    //             if(oldVoicePath === newVoicePath){
+    //                 found = false
+    //                 break
+    //             }
+    //         }
+    //         if(!found){
+    //             voicePathsToAdd.push(newVoicePath)
+    //         }
+    //     }
+    //     if(voicePathsToAdd.length > 0){
+    //         oldItem.voicePaths.push(...voicePathsToAdd)
+    //
+    //     }
+    // }
+    // // 重排序，把有语音的条目拉到上面
+    // queryResult.value.length = 0
+    // let noVoiceEntries = []
+    //
+    // resultMap.forEach((item, key, _)=>{
+    //     if(item.voicePaths.length > 0){
+    //         queryResult.value.push(item)
+    //     }else{
+    //         noVoiceEntries.push(item)
+    //     }
+    // })
+    //
+    //
+    // queryResult.value.push(...noVoiceEntries)
 
-        let oldItem = resultMap.get(key)
-        let voicePathsToAdd = []
-        for(let newVoicePath of item.voicePaths){
-            let found = false
-            for(let oldVoicePath of oldItem.voicePaths){
-                if(oldVoicePath === newVoicePath){
-                    found = false
-                    break
-                }
-            }
-            if(!found){
-                voicePathsToAdd.push(newVoicePath)
-            }
-        }
-        if(voicePathsToAdd.length > 0){
-            oldItem.voicePaths.push(...voicePathsToAdd)
+    // 不合并了
+    queryResult.value = ans.contents;
+    // 把有语音的排在前面
+    queryResult.value.sort((a, b) => {
+      const aHasVoice = a.voicePaths && a.voicePaths.length > 0;
+      const bHasVoice = b.voicePaths && b.voicePaths.length > 0;
+      if (aHasVoice && !bHasVoice) return -1;
+      if (!aHasVoice && bHasVoice) return 1;
+      return 0;
+    });
 
-        }
-    }
-    // 重排序，把有语音的条目拉到上面
-    queryResult.value.length = 0
-    let noVoiceEntries = []
-
-    resultMap.forEach((item, key, _)=>{
-        if(item.voicePaths.length > 0){
-            queryResult.value.push(item)
-        }else{
-            noVoiceEntries.push(item)
-        }
-    })
-
-
-    queryResult.value.push(...noVoiceEntries)
     keywordLast.value = keyword.value
+    searchLangLast.value = parseInt(selectedInputLanguage.value)
 
-    if(mergedCount > 0){
-        searchSummaryTmp += `，已合并 ${mergedCount} 条重复结果。`
-    }else{
-        searchSummaryTmp += '。'
-    }
+    // if(mergedCount > 0){
+    //     searchSummaryTmp += `，已合并 ${mergedCount} 条重复结果。`
+    // }else{
+    //     searchSummaryTmp += '。'
+    // }
+
+    // 不合并了
+    searchSummaryTmp += '。'
     searchSummary.value = searchSummaryTmp
 }
 

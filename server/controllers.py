@@ -65,7 +65,9 @@ def getTranslateObj(keyword: str, langCode: int):
     raw_results = databaseHelper.selectTextMapFromKeyword(keyword, langCode)
 
     ans = []
-    langs = config.getResultLanguages()
+    langs = config.getResultLanguages().copy()
+    if langCode not in langs:
+        langs.append(langCode)
     sourceLangCode = config.getSourceLanguage()
 
     for item in raw_results:
