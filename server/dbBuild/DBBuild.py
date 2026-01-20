@@ -27,14 +27,20 @@ def importTalk(fileName: str):
         talkRoleTypeKey = 'type'
         talkRoleIdKey = '_id'
         talkContentTextMapHashKey = 'talkContentTextMapHash'
-    elif 'FEOACBMDCKJ' in obj:
-        talkIdKey = 'FEOACBMDCKJ'
-        dialogueListKey = 'AAOAAFLLOJI'
-        dialogueIdKey = 'CCFPGAKINNB'
-        talkRoleKey = 'HJLEMJIGNFE'
+    # elif 'FEOACBMDCKJ' in obj:
+    elif 'ADHLLDAPKCM' in obj:
+        # talkIdKey = 'FEOACBMDCKJ'
+        talkIdKey = 'ADHLLDAPKCM'
+        # dialogueListKey = 'AAOAAFLLOJI'
+        dialogueListKey = 'MOEOFGCKILF'
+        # dialogueIdKey = 'CCFPGAKINNB'
+        dialogueIdKey = 'ILHDNJDDEOP'
+        # talkRoleKey = 'HJLEMJIGNFE'
+        talkRoleKey = 'LCECPDILLEE'
         talkRoleTypeKey = '_type'
         talkRoleIdKey = '_id'
-        talkContentTextMapHashKey = 'BDOKCLNNDGN'
+        # talkContentTextMapHashKey = 'BDOKCLNNDGN'
+        talkContentTextMapHashKey = 'GABLFFECBDO'
     else:
         print("Skipping " + fileName)
         return
@@ -109,148 +115,79 @@ def importFetters():
 
 
 def importChapters():
-    print("Importing Chapters from ExcelBinOutput...")
     cursor = conn.cursor()
-    
-    # 路径指向 ExcelBinOutput/ChapterExcelConfigData.json
-    path = os.path.join(DATA_PATH, "ExcelBinOutput", "ChapterExcelConfigData.json")
-    
-    if not os.path.exists(path):
-        print(f"Chapter config not found at: {path}")
-        return
+    chapters = json.load(open(DATA_PATH + "\\ExcelBinOutput\\ChapterExcelConfigData.json", encoding='utf-8'))
+    sql1 = "insert into chapter(chapterId, chapterTitleTextMapHash, chapterNumTextMapHash) values (?,?,?)"
 
-    try:
-        chapters = json.load(open(path, encoding='utf-8'))
-        
-        # 插入语句
-        sql = "insert or replace into chapter(chapterId, chapterTitleTextMapHash, chapterNumTextMapHash) values (?,?,?)"
+    for chapter in chapters:
+        cursor.execute(sql1,(chapter['id'], chapter['chapterTitleTextMapHash'], chapter['chapterNumTextMapHash']))
 
-        for chapter in chapters:
-            # 兼容不同版本的 Key (通常是 id)
-            c_id = chapter.get('id')
-            # 尝试获取标题哈希
-            c_title = chapter.get('chapterTitleTextMapHash')
-            # 尝试获取章节编号哈希
-            c_num = chapter.get('chapterNumTextMapHash')
-            
-            if c_id is not None:
-                cursor.execute(sql, (c_id, c_title, c_num))
-                
-        cursor.close()
-        conn.commit()
-        print(f"Imported {len(chapters)} chapters.")
-        
-    except Exception as e:
-        print(f"Error importing chapters: {e}")
-
-
-def importQuestMeta():
-    """
-    第一步：从 ExcelBinOutput 导入任务的元数据 (标题, 章节ID)
-    """
-    cursor = conn.cursor()
-    # 使用 MainQuestExcelConfigData 获取最全的任务信息
-    path = os.path.join(DATA_PATH, "ExcelBinOutput", "MainQuestExcelConfigData.json")
-    
-    if not os.path.exists(path):
-        # 备选：如果 MainQuest 不存在，尝试 QuestExcelConfigData (通常用于子任务，但有时混用)
-        path = os.path.join(DATA_PATH, "ExcelBinOutput", "QuestExcelConfigData.json")
-    
-    if not os.path.exists(path):
-        print("Quest Excel config not found.")
-        return
-
-    print(f"Importing Quest Metadata from {os.path.basename(path)}...")
-    
-    try:
-        quests = json.load(open(path, encoding='utf-8'))
-        sql = "insert or replace into quest(questId, titleTextMapHash, chapterId) values (?,?,?)"
-        
-        count = 0
-        for q in quests:
-            q_id = q.get('id') or q.get('MainId')
-            # 任务标题
-            q_title = q.get('titleTextMapHash')
-            # 章节ID
-            q_chapter = q.get('chapterId')
-            
-            if q_id is not None:
-                cursor.execute(sql, (q_id, q_title, q_chapter))
-                count += 1
-                
-        cursor.close()
-        conn.commit()
-        print(f"Imported metadata for {count} quests.")
-        
-    except Exception as e:
-        print(f"Error importing quest meta: {e}")
-
-
-def importQuestTalks():
-    """
-    第二步：从 BinOutput/Quest 递归导入任务与对话的关联 (Quest -> Talk)
-    """
-    cursor = conn.cursor()
-    quest_root = os.path.join(DATA_PATH, "BinOutput", "Quest")
-    
-    if not os.path.exists(quest_root):
-        print(f"BinOutput/Quest folder not found at: {quest_root}")
-        return
-
-    print("Scanning BinOutput/Quest for dialogues...")
-    
-    sql = "insert or ignore into questTalk(questId, talkId) values (?,?)"
-    
-    # 使用 os.walk 递归查找所有 .json 文件，解决文件夹结构变化问题
-    files_to_process = []
-    for root, dirs, files in os.walk(quest_root):
-        for f in files:
-            if f.endswith(".json"):
-                files_to_process.append(os.path.join(root, f))
-    
-    print(f"Found {len(files_to_process)} Quest flow files. Processing...")
-    
-    for file_path in tqdm(files_to_process):
-        try:
-            with open(file_path, 'r', encoding='utf-8') as f:
-                obj = json.load(f)
-            
-            # 获取 Quest ID (通常在根节点的 id 字段)
-            quest_id = obj.get('id') or obj.get('mainId') or obj.get('MainId')
-            
-            if not quest_id:
-                # 尝试从文件名获取 (例如 1001.json -> 1001)
-                base_name = os.path.basename(file_path)
-                name_match = re.match(r'^(\d+)\.json$', base_name)
-                if name_match:
-                    quest_id = int(name_match.group(1))
-            
-            if not quest_id:
-                continue
-
-            # 获取 talks 列表
-            # 结构通常是 "talks": [ {"id": 123, ...}, ... ]
-            talks = obj.get('talks')
-            if talks and isinstance(talks, list):
-                for talk in talks:
-                    talk_id = talk.get('id')
-                    if talk_id:
-                        cursor.execute(sql, (quest_id, talk_id))
-                        
-        except Exception as e:
-            # 忽略个别文件读取错误，避免中断整个流程
-            # print(f"Skipping {file_path}: {e}")
-            pass
-            
     cursor.close()
     conn.commit()
+    
+
+def importQuest(fileName: str):
+    cursor = conn.cursor()
+    obj = json.load(open(DATA_PATH + "\\BinOutput\\Quest\\" + fileName, encoding='utf-8'))
+
+    sql1 = 'insert into quest(questId, titleTextMapHash, chapterId) VALUES (?,?,?)'
+    sql2 = 'insert into questTalk(questId, talkId) values (?,?)'
+
+    if 'id' in obj:
+        keyQuestId = 'id'
+        keyTitleTextMapHash = 'titleTextMapHash'
+        keyChapterId = 'chapterId'
+        keyTalks = 'talks'
+        keyTalkId = 'id'
+    elif 'ILHDNJDDEOP' in obj:
+        # keyQuestId = 'CCFPGAKINNB'
+        keyQuestId = 'ILHDNJDDEOP'
+        # keyTitleTextMapHash = 'HLAINHJACPJ'
+        keyTitleTextMapHash = 'MMOEEOFGHHG'
+        # keyChapterId = 'FLCLAPBOOHF'
+        keyChapterId = 'IBNCKLKHAKG'
+        # keyTalks = 'PCNNNPLAEAI'
+        keyTalks = 'IBEGAHMEABP'
+        # keyTalkId = 'CCFPGAKINNB'
+        keyTalkId = 'ILHDNJDDEOP'
+    else:
+        print("Skipping " + fileName)
+        return
+
+    questId = obj[keyQuestId]
+
+    if keyTitleTextMapHash in obj:
+        titleTextMapHash = obj[keyTitleTextMapHash]
+    else:
+        titleTextMapHash = None
+        print("questId {} don't have TitleTextMapHash!".format(questId))
+
+    if keyChapterId in obj:
+        chapterId = obj[keyChapterId]
+    else:
+        chapterId = None
+
+    cursor.execute(sql1, (questId, titleTextMapHash, chapterId))
+
+    if keyTalks not in obj:
+        print("questId {} don't have talk!".format(questId))
+    else:
+
+        for talk in obj[keyTalks]:
+            talkId = talk[keyTalkId]
+            cursor.execute(sql2, (questId, talkId))
+            pass
+
+    cursor.close()
 
 
 def importAllQuests():
-    # 替代原本的循环逻辑，改为分步导入
-    importQuestMeta()   # 先填 quest 表
-    importQuestTalks()  # 再填 questTalk 表
-    print("Quest import finished.")
+    files = os.listdir(DATA_PATH + "\\BinOutput\\Quest\\")
+    n = len(files)
+    for val, fileName in tqdm(enumerate(files), total=len(files)):
+        # print("Now: {} {}/{}".format(fileName, val, n))
+        importQuest(fileName)
+    conn.commit()
 
 
 def importNPCs():

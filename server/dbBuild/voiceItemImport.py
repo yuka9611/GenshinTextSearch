@@ -19,43 +19,62 @@ def loadAvatars():
         if avatarId >= 11000000:
             continue
 
-        avatarName = avatar['iconName'][14:].lower()
+        avatarName = avatar['iconName'][14:]
 
-        avatarMappings[avatarName] = avatarId
+        # 从角色对应的ConfigAvatar里拿实际在角色语音使用的名字字段
+        configAvatarFileName = f"ConfigAvatar_{avatarName}.json"
+        configAvatarPath = os.path.join(DATA_PATH, "BinOutput", "Avatar", configAvatarFileName)
+
+        if os.path.exists(configAvatarPath):
+            avatarConfig = json.load(open(configAvatarPath, encoding='utf-8'))
+
+            internalName = avatarConfig['PLJBIDOIHEA']['KDKDKOMMCOB']['GLMJHDNIGID'].lower()
+
+            avatarMappings[internalName] = avatarId
+        else:
+            print(f"Error loading {configAvatarFileName} for {avatarName}")
 
 
 
 def getAvatarIdFromVoiceItemAvatarName(avatarNameFromVoiceItem: str):
-    rawName = avatarNameFromVoiceItem[7:].lower()
+    rawName = avatarNameFromVoiceItem.lower()
     # GCG的怪物语音就不要了~
-    if rawName.startswith("gcg"):
+    if rawName.startswith("switch_gcg") or rawName.startswith("gcg"):
         return 0
 
     rawNameTranslate = {
-        'hero': 'playerboy',
-        'heroine': 'playergirl',
-        "tartaglia_melee": 'tartaglia',
-        "alhaitham": "alhatham",
-        'baizhu': 'baizhuer',
-        'heizou': 'heizo',
-        'kirara': 'momoka',
-        'kujousara': 'sara',
-        'lynette': 'linette',
-        'lyney': 'liney',
-        'raidenshogun': 'shougun',
-        'thoma': 'tohma',
-        'yaemiko': 'yae',
-        'yanfei': 'feiyan',
-        'xianyun': 'liuyun',
-        'emelie': 'emilie'
+        "switch_tartaglia_melee": 'switch_tartaglia'
     }
     if rawName in rawNameTranslate:
         rawName = rawNameTranslate[rawName]
 
+    # rawNameTranslate = {
+    #     'hero': 'playerboy',
+    #     'heroine': 'playergirl',
+    #     "tartaglia_melee": 'tartaglia',
+    #     "alhaitham": "alhatham",
+    #     'baizhu': 'baizhuer',
+    #     'heizou': 'heizo',
+    #     'kirara': 'momoka',
+    #     'kujousara': 'sara',
+    #     'lynette': 'linette',
+    #     'lyney': 'liney',
+    #     'raidenshogun': 'shougun',
+    #     'thoma': 'tohma',
+    #     'yaemiko': 'yae',
+    #     'yanfei': 'feiyan',
+    #     'xianyun': 'liuyun',
+    #     'emelie': 'emilie'
+    # }
+    # if rawName in rawNameTranslate:
+    #     rawName = rawNameTranslate[rawName]
+
     if rawName in avatarMappings:
         return avatarMappings[rawName]
 
-    raise Exception("AVATAR NOT FOUND! {}".format(rawName))
+    # raise Exception("AVATAR NOT FOUND! {}".format(rawName))
+    print(f"Warning: Avatar not found in mapping: {rawName}")
+    return 0
 
 
 def importVoiceItem(fileName: str):
@@ -84,19 +103,29 @@ def importVoiceItem(fileName: str):
             p4 = 'GameTrigger'
             guidKeyName = 'Guid'
 
-        elif 'JFNDAOJCHPO' in content:
-            p1 = 'FMHLBONJKPJ'
-            p2 = 'OFEEIPOMNKD'
-            p3 = 'CBGLAJNLFCB'
-            p4 = 'BFKCDJLLGNJ'
-            guidKeyName = 'JFNDAOJCHPO'
+        # elif 'JFNDAOJCHPO' in content:
+        elif 'ABAEBGLPCIK' in content:
+            # p1 = 'FMHLBONJKPJ'
+            p1 = 'MEDGFBMLDDK'
+            # p2 = 'OFEEIPOMNKD'
+            p2 = 'JKDJFGBGOEB'
+            # p3 = 'CBGLAJNLFCB'
+            p3 = 'DCIHFJLBLAP'
+            # p4 = 'BFKCDJLLGNJ'
+            p4 = 'BHOKINENJBN'
+            guidKeyName = 'ABAEBGLPCIK'
 
-        elif 'HLGGFCENLPA' in content:
-            p1 = 'FFDHLEAFBLM'
-            p2 = 'EIKJKDICKMJ'
-            p3 = 'HLGOMILNFNK'
-            p4 = 'BEHKGKMMAPD'
-            guidKeyName = 'HLGGFCENLPA'
+        # elif 'HLGGFCENLPA' in content:
+        elif 'NDLOFEPMEMO' in content:
+            # p1 = 'FFDHLEAFBLM'
+            p1 = 'HEKJMGHIJBM'
+            # p2 = 'EIKJKDICKMJ'
+            p2 = 'JKHGLBHOKIC'
+            # p3 = 'HLGOMILNFNK'
+            p3 = 'BJDAJEKPCFP'
+            # p4 = 'BEHKGKMMAPD'
+            p4 = 'HPIPCKOOMLL'
+            guidKeyName = 'NDLOFEPMEMO'
 
         if p2 not in content or p1 not in content:
             continue
@@ -110,8 +139,9 @@ def importVoiceItem(fileName: str):
 
             avatarId = 0
             # 没啥好办法，通过avatarName获得角色名称，再转换为角色id
-            if guidKeyName in content and voice['avatarName'] != '':
-                avatarId = getAvatarIdFromVoiceItemAvatarName(voice['avatarName'])
+            current_avatar_name = voice.get('avatarName') or voice.get('GDIJGLOHHFM', '')
+            if guidKeyName in content and current_avatar_name != '':
+                avatarId = getAvatarIdFromVoiceItemAvatarName(current_avatar_name)
                 # print(voice['avatarName'], avatarId)
 
             cursor.execute(sql1, (dialogueId, voicePath, gameTrigger, avatarId))
@@ -128,9 +158,8 @@ def importAllVoiceItems():
         try:
             importVoiceItem(fileName)
         except Exception as e:
-            print(e)
-            print(fileName)
-            return
+            print(f"Error processing file {fileName}: {e}")
+            continue
 
 
 if __name__ == "__main__":
