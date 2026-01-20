@@ -17,7 +17,4 @@ READABLE_PATH = os.path.join(DATA_PATH, 'Readable')
 # Dim的解包数据的Subtitle文件夹位置
 SUBTITLE_PATH = os.path.join(DATA_PATH, 'Subtitle')
 
-# 导入/生成的数据库的位置，默认为../data.db，如果要新建从头建立数据库建议选一个其他位置
-conn = sqlite3.connect(r"../data.db")
-
 # 所有数据库相关的操作请在dbBuild目录下运行脚本！
