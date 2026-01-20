@@ -90,15 +90,29 @@ def getTranslateObj(keyword: str, langCode: int):
         # Reverse map for result construction
         strToLangId = {v: k for k, v in langMap.items()}
 
+        prefix_labels = {
+            "Book": "书籍",
+            "Costume": "衣装",
+            "Relic": "圣遗物",
+            "Weapon": "武器",
+            "Wings": "风之翼",
+        }
+
         for fileName, content, titleTextMapHash, readableId in readableContents:
             # Generate a stable hash for the filename
             fileHash = zlib.crc32(fileName.encode('utf-8'))
             
-            origin = f"阅读物: {fileName}"
+            origin_label = "阅读物"
+            for prefix, label in prefix_labels.items():
+                if fileName.startswith(prefix):
+                    origin_label = label
+                    break
+
+            origin = f"{origin_label}: {fileName}"
             if titleTextMapHash:
                 title = databaseHelper.getTextMapContent(titleTextMapHash, sourceLangCode)
                 if title:
-                    origin = f"阅读物: {fileName} ({title})"
+                    origin = f"{origin_label}: {fileName} ({title})"
 
             obj = {
                 'translates': {},
