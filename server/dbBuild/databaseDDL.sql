@@ -159,55 +159,44 @@ create table manualTextMap
 create unique index manualTextMap_textMapId_uindex
     on manualTextMap (textMapId);
 
-
--- 书籍主表 (用于索引ID)
 create table readable
 (
-    id               integer
+    id       integer
         constraint readable_pk
             primary key autoincrement,
-    readableId       integer
-        constraint readable_pk_2
-            unique,
-    titleTextMapHash integer
+    fileName text,
+    lang     text,
+    content  text,
+    titleTextMapHash integer,
+    readableId integer,
+    constraint readable_pk_2
+        unique (fileName, lang)
 );
+
+create index readable_fileName_index
+    on readable (fileName);
 
 create index readable_readableId_index
     on readable (readableId);
 
--- 书籍内容表 (存储各语言的文本)
-create table readableContent
-(
-    id          integer
-        constraint readableContent_pk
-            primary key autoincrement,
-    readableId  integer,
-    lang        integer, -- 对应 langCode 表的 id
-    content     TEXT
-);
-
-create index readableContent_readableId_index
-    on readableContent (readableId);
-
--- 字幕表 (存储 SRT 解析后的数据)
 create table subtitle
 (
-    id          integer
+    id        integer
         constraint subtitle_pk
             primary key autoincrement,
-    fileName    TEXT,    -- 对应字幕文件名 (通常是 Cutscene ID)
-    lang        integer, -- 对应 langCode 表的 id
-    startTime   REAL,    -- 开始时间 (秒)
-    endTime     REAL,    -- 结束时间 (秒)
-    content     TEXT
+    fileName  text,
+    lang      integer,
+    startTime real,
+    endTime   real,
+    content   text,
+    subtitleId integer
 );
 
 create index subtitle_fileName_index
     on subtitle (fileName);
 
-create index subtitle_content_index
-    on subtitle (content);
-
+create index subtitle_subtitleId_index
+    on subtitle (subtitleId);
 
 INSERT INTO langCode (id, codeName, displayName, imported) VALUES (1, 'TextMapCHS.json', '简体中文', 0);
 INSERT INTO langCode (id, codeName, displayName, imported) VALUES (2, 'TextMapCHT.json', '繁體中文', 0);
@@ -224,4 +213,3 @@ INSERT INTO langCode (id, codeName, displayName, imported) VALUES (12, 'TextMapR
 INSERT INTO langCode (id, codeName, displayName, imported) VALUES (13, 'TextMapTH.json', 'ภาษาไทย', 0);
 INSERT INTO langCode (id, codeName, displayName, imported) VALUES (14, 'TextMapTR.json', 'Türkçe', 0);
 INSERT INTO langCode (id, codeName, displayName, imported) VALUES (15, 'TextMapVI.json', 'Tiếng Việt', 0);
-

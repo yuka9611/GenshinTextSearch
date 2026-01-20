@@ -52,7 +52,7 @@ def loadLangPackages():
 
 def getAudioBin(path: str, langCode: int):
     if langCode not in langCodes:
-        raise "No voice-over for this language!"
+        raise Exception("No voice-over for this language!")
     langStr = langCodes[langCode]
     hashVal = fnv_hash_64((langStr + "\\" + path).lower())
     # TODO 多语言支持，要检测是否安装了这个语言
@@ -68,7 +68,7 @@ def getAudioBin(path: str, langCode: int):
 
 def checkAudioBin(path: str, langCode: int):
     if langCode not in langPackages:
-        raise "No voice-over for this language!"
+        raise Exception("No voice-over for this language!")
     langStr = langCodes[langCode]
     hashVal = fnv_hash_64((langStr + "\\" + path).lower())
     voicePack = langPackages[langCode]

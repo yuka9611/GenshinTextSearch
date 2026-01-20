@@ -135,7 +135,7 @@ def importVoiceItem(fileName: str):
         for voice in content[p2]:
             voicePath = voice[p3]
             if dialogueId is None or voicePath is None or gameTrigger is None:
-                raise "ERROR!"
+                raise Exception("ERROR!")
 
             avatarId = 0
             # 没啥好办法，通过avatarName获得角色名称，再转换为角色id

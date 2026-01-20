@@ -1,7 +1,7 @@
 class MyDomElement:
     def __init__(self):
-        self.tagName = None
-        self.tagValue = {}
+        self.tagName: str | None = None
+        self.tagValue: str = ""
         self.children: 'list[MyDomElement | str]' = []
 
 

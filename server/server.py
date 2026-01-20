@@ -72,8 +72,8 @@ def getTalkFromHash():
         start = time.time()
         contents = controllers.getTalkFromHash(textHash)
         end = time.time()
-    except str as e:
-        return buildResponse(code=114, msg=e)
+    except Exception as e:
+        return buildResponse(code=114, msg=str(e))
 
     return buildResponse({
         'contents': contents,
