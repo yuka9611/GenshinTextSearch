@@ -10,12 +10,14 @@ def replace(textMap: str, playerIsMale: bool, lang: int):
     text1 = re.sub(r'\{M#(.*?)}\{F#(.*?)}', '\\1' if playerIsMale else '\\2', textMap)
     text1 = re.sub(r'\{F#(.*?)}\{M#(.*?)}', '\\2' if playerIsMale else '\\1', text1)
 
-    def replaceSexPro(match: 're.Match'):
+    def replaceSexPro(match: 're.Match') -> str:
         isMate = match.group(1) == "MATE"
         if isMate == playerIsMale:
-            return databaseHelper.getManualTextMap(match.group(3), lang)
+            result = databaseHelper.getManualTextMap(match.group(3), lang)
+            return result if result is not None else ""
         else:
-            return databaseHelper.getManualTextMap(match.group(2), lang)
+            result = databaseHelper.getManualTextMap(match.group(2), lang)
+            return result if result is not None else ""
 
     text2 = re.sub(r'\{(.*?)AVATAR#SEXPRO\[(.*?)\|(.*?)]}', replaceSexPro, text1)
 

@@ -1,68 +1,18 @@
 import sqlite3
 from contextlib import closing
+import re
 
 # 没人会给一个词典搞高并发吧？
 conn = sqlite3.connect(r".\data.db", check_same_thread=False)
 
 
 def selectTextMapFromKeyword(keyWord: str, langCode: int):
-    # 初始化结果列表
-    matches = []
-    
+    # [hash] 反正最后还得去数据库查一遍目标语言，不如不查content
     with closing(conn.cursor()) as cursor:
-        # 1. 查询普通游戏文本 (保持原有逻辑)
-        sql_text = "select hash, content from textMap where lang=? and content like ? limit 100"
-        cursor.execute(sql_text, (langCode, '%{}%'.format(keyWord)))
-        matches.extend(cursor.fetchall())
-
-        # 2. 书籍 (Readable) 查询
-        sql_readable = """
-            SELECT 
-                rc.readableId, 
-                rc.content,
-                COALESCE(
-                    (SELECT content FROM textMap WHERE hash = r.titleTextMapHash AND lang = ? LIMIT 1),
-                    (SELECT content FROM textMap WHERE hash = r.titleTextMapHash LIMIT 1)
-                ) as title
-            FROM readableContent rc
-            JOIN readable r ON rc.readableId = r.readableId
-            WHERE rc.lang = ? AND rc.content LIKE ?
-            LIMIT 50
-        """
-        cursor.execute(sql_readable, (langCode, langCode, '%{}%'.format(keyWord)))
-        
-        for row in cursor.fetchall():
-            title = row[2] if row[2] else f"Book {row[0]}"
-            origin = title
-            matches.append({
-                'type': 'readable',
-                'id': row[0],
-                'content': row[1],
-                'title': title,
-                'origin': origin  # <--- 关键修改：显示 titleTextMapHash 对应的书名
-            })
-
-        # 3. 字幕 (Subtitle) 查询
-        sql_subtitle = """
-            SELECT id, fileName, startTime, endTime, content
-            FROM subtitle
-            WHERE lang = ? AND content LIKE ?
-            LIMIT 50
-        """
-        cursor.execute(sql_subtitle, (langCode, '%{}%'.format(keyWord)))
-        
-        for row in cursor.fetchall():
-            matches.append({
-                'type': 'subtitle',
-                'id': row[0],
-                'fileName': row[1],
-                'startTime': row[2],
-                'endTime': row[3],
-                'content': row[4],
-                'origin': row[1]  # <--- 关键修改：将字幕文件名赋值给 origin 字段
-            })
-
-    return matches
+        sql1 = "select hash, content from textMap where lang=? and content like ? limit 200"
+        cursor.execute(sql1, (langCode, '%{}%'.format(keyWord)))
+        matches = cursor.fetchall()
+        return matches
 
 
 def selectTextMapFromTextHash(textHash: int, langs: list[int] | None = None):
@@ -320,3 +270,120 @@ def getTalkContent(talkId: int, coopQuestId: 'int | None') -> 'list[tuple[int, s
             return ans
         else:
             return None
+
+def getLangCodeMap():
+    # Returns {id: 'CHS', ...}
+    with closing(conn.cursor()) as cursor:
+        sql = "select id, codeName from langCode"
+        cursor.execute(sql)
+        rows = cursor.fetchall()
+        mapping = {}
+        for row in rows:
+            # codeName is like 'TextMapCHS.json'
+            match = re.match(r'TextMap(.+)\.json', row[1])
+            if match:
+                mapping[row[0]] = match.group(1)
+        return mapping
+
+def selectReadableFromKeyword(keyword: str, langStr: str):
+    # Returns [(fileName, content, titleTextMapHash, readableId)]
+    with closing(conn.cursor()) as cursor:
+        sql = "select fileName, content, titleTextMapHash, readableId from readable where lang=? and content like ? limit 200"
+        cursor.execute(sql, (langStr, f'%{keyword}%'))
+        return cursor.fetchall()
+
+def selectReadableFromFileName(fileName: str, langs: list[str]):
+    # Returns [(content, langStr)]
+    with closing(conn.cursor()) as cursor:
+        if not langs:
+            return []
+        placeholders = ','.join(['?'] * len(langs))
+        sql = f"select content, lang from readable where fileName=? and lang in ({placeholders})"
+        params = [fileName] + langs
+        cursor.execute(sql, params)
+        return cursor.fetchall()
+
+def selectReadableFromReadableId(readableId: int, langs: list[str]):
+    # Returns [(content, langStr)]
+    with closing(conn.cursor()) as cursor:
+        if not langs:
+            return []
+        placeholders = ','.join(['?'] * len(langs))
+        sql = f"select content, lang from readable where readableId=? and lang in ({placeholders})"
+        params = [readableId] + langs
+        cursor.execute(sql, params)
+        return cursor.fetchall()
+
+def getTextMapContent(textHash: int, langCode: int):
+    with closing(conn.cursor()) as cursor:
+        sql = "select content from textMap where hash=? and lang=?"
+        cursor.execute(sql, (textHash, langCode))
+        ans = cursor.fetchall()
+        if len(ans) > 0:
+            return ans[0][0]
+        return None
+
+def selectSubtitleFromKeyword(keyword: str, langCode: int):
+    # Returns [(fileName, content, startTime, endTime, subtitleId)]
+    with closing(conn.cursor()) as cursor:
+        sql = "select fileName, content, startTime, endTime, subtitleId from subtitle where lang=? and content like ? limit 200"
+        cursor.execute(sql, (langCode, f'%{keyword}%'))
+        return cursor.fetchall()
+
+def selectSubtitleTranslations(fileName: str, startTime: float, langs: list[int]):
+    # Returns [(content, langCode)]
+    # Matches subtitles in other languages with similar start time (+- 0.5s)
+    with closing(conn.cursor()) as cursor:
+        if not langs:
+            return []
+        placeholders = ','.join(['?'] * len(langs))
+        sql = f"""
+            select content, lang 
+            from subtitle 
+            where fileName=? 
+            and lang in ({placeholders})
+            and abs(startTime - ?) < 0.5
+        """
+        params = [fileName] + langs + [startTime]
+        cursor.execute(sql, params)
+        return cursor.fetchall()
+
+def selectSubtitleTranslationsBySubtitleId(subtitleId: int, startTime: float, langs: list[int]):
+    # Returns [(content, langCode)]
+    # Matches subtitles in other languages with similar start time (+- 0.5s) using subtitleId
+    with closing(conn.cursor()) as cursor:
+        if not langs:
+            return []
+        placeholders = ','.join(['?'] * len(langs))
+        sql = f"""
+            select content, lang 
+            from subtitle 
+            where subtitleId=? 
+            and lang in ({placeholders})
+            and abs(startTime - ?) < 0.5
+        """
+        params = [subtitleId] + langs + [startTime]
+        cursor.execute(sql, params)
+        return cursor.fetchall()
+
+def selectSubtitleContext(fileName: str, langs: list[int]):
+    # Returns [(content, lang, startTime, endTime)]
+    with closing(conn.cursor()) as cursor:
+        if not langs:
+            return []
+        placeholders = ','.join(['?'] * len(langs))
+        sql = f"select content, lang, startTime, endTime from subtitle where fileName=? and lang in ({placeholders}) order by startTime"
+        params = [fileName] + langs
+        cursor.execute(sql, params)
+        return cursor.fetchall()
+
+def selectSubtitleContextBySubtitleId(subtitleId: int, langs: list[int]):
+    # Returns [(content, lang, startTime, endTime)]
+    with closing(conn.cursor()) as cursor:
+        if not langs:
+            return []
+        placeholders = ','.join(['?'] * len(langs))
+        sql = f"select content, lang, startTime, endTime from subtitle where subtitleId=? and lang in ({placeholders}) order by startTime"
+        params = [subtitleId] + langs
+        cursor.execute(sql, params)
+        return cursor.fetchall()
