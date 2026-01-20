@@ -67,15 +67,26 @@ const getVoiceOver = async (voicePath, langCode) => {
 
 
 
-const getTalkFromHash = (textHash) => {
+const getTalkFromHash = (textHash, searchLang) => {
     return request.post("/api/getTalkFromHash", {
-        "textHash": textHash
+        "textHash": textHash,
+        "searchLang": searchLang
     });
 };
+
+const getSubtitleContext = (fileName, subtitleId, searchLang) => {
+    return request.post("/api/getSubtitleContext", {
+        "fileName": fileName,
+        "subtitleId": subtitleId,
+        "searchLang": searchLang
+    });
+};
+
 
 export default {
     queryBaidu,
     queryByKeyword,
     getVoiceOver,
-    getTalkFromHash
+    getTalkFromHash,
+    getSubtitleContext
 };

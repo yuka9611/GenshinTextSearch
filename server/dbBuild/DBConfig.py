@@ -2,7 +2,7 @@ import sqlite3
 import os
 
 # Dim的解包数据仓库所在的文件夹，如果只是导入语言包不用管
-DATA_PATH = r''
+DATA_PATH = r'C:\Users\yuka9\Downloads\AnimeGameData'
 
 # Dim的解包数据的TextMap文件夹位置，请在其中放置需要导入的语言json，并保持其TextMapXX.json的文件名不变
 LANG_PATH = os.path.join(DATA_PATH, 'TextMap')
