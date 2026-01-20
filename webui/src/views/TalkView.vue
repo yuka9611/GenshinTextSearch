@@ -3,7 +3,7 @@ import global from "@/global/global"
 import api from "@/api/keywordQuery";
 
 import {useRoute} from "vue-router";
-import {onActivated, onDeactivated, reactive, ref, watch} from "vue";
+import {onActivated, onDeactivated, reactive, ref, watch, computed} from "vue";
 import PlayVoiceButton from "@/components/PlayVoiceButton.vue";
 import StylizedText from "@/components/StylizedText.vue";
 import AudioPlayer from "@liripeng/vue-audio-player";
@@ -29,7 +29,20 @@ const reloadPage = () => {
 
 
 const reloadTalk = () => {
-    api.getTalkFromHash(textHash.value).then(res => {
+    if (route.query.isSubtitle) {
+        api.getSubtitleContext(route.query.fileName, route.query.subtitleId, route.query.searchLang).then(res => {
+            let resJson = res.json
+            queryTime.value = resJson.time.toFixed(2)
+            let talkContents = resJson.contents
+            questName.value = talkContents.talkQuestName
+            dialogues.value = talkContents.dialogues
+        }).catch(err => {
+            if(!err.network) err.defaultHandler()
+        })
+        return
+    }
+
+    api.getTalkFromHash(textHash.value, route.query.searchLang).then(res => {
         let resJson = res.json
         queryTime.value = resJson.time.toFixed(2)
         let talkContents = resJson.contents
@@ -41,7 +54,14 @@ const reloadTalk = () => {
     })
 }
 
-
+const displayLanguages = computed(() => {
+    let langs = [...global.config.resultLanguages]
+    let searchLang = parseInt(route.query.searchLang)
+    if (searchLang && !langs.includes(searchLang)) {
+        langs.push(searchLang)
+    }
+    return langs
+})
 
 // 播放器相关开始
 /**
@@ -195,7 +215,7 @@ onDeactivated(() => {
         </div>
         <el-table :data="dialogues" :row-class-name="tableRowClassName">
             <el-table-column prop="talker" label="角色" width="100" />
-            <template v-for="langCode in global.config.resultLanguages">
+            <template v-for="langCode in displayLanguages">
                 <el-table-column width="40">
                     <template #header>
                         <el-tooltip :content="'播放全部' + global.languages[langCode] + '语音'">

@@ -23,16 +23,16 @@ def loadConfig():
     if "assetDir" in fileJson:
         config["assetDir"] = fileJson['assetDir']
 
-    if "resultLanguages" in fileJson and fileJson["resultLanguages"] is list[int]:
+    if "resultLanguages" in fileJson and isinstance(fileJson["resultLanguages"], list):
         config["resultLanguages"] = fileJson["resultLanguages"]
 
-    if "defaultSearchLanguage" in fileJson and fileJson["defaultSearchLanguage"] is int:
+    if "defaultSearchLanguage" in fileJson and isinstance(fileJson["defaultSearchLanguage"], int):
         config["defaultSearchLanguage"] = fileJson["defaultSearchLanguage"]
 
-    if "sourceLanguage" in fileJson and fileJson['sourceLanguage'] is int:
+    if "sourceLanguage" in fileJson and isinstance(fileJson['sourceLanguage'], int):
         config['sourceLanguage'] = fileJson['sourceLanguage']
 
-    if "isMale" in fileJson and fileJson['isMale'] is bool:
+    if "isMale" in fileJson and isinstance(fileJson['isMale'], bool):
         config['isMale'] = fileJson['isMale']
 
 
@@ -79,5 +79,3 @@ def getIsMale():
 
 
 loadConfig()
-
-

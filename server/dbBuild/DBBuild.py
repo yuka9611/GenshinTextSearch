@@ -5,6 +5,7 @@ from DBConfig import conn, DATA_PATH
 import voiceItemImport
 import readableImport
 import subtitleImport
+import textMapImport
 from tqdm import tqdm
 
 # 语言文件夹名到数据库 langCode ID 的映射
@@ -236,6 +237,8 @@ def main():
     readableImport.importReadable()
     print("Importing subtitles...")
     subtitleImport.importSubtitles()
+    print("Importing textMap...")
+    textMapImport.importAllTextMap()
     print("Done!")
 
 
