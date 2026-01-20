@@ -4,6 +4,8 @@ import global from '@/global/global.js'
 import PlayVoiceButton from "@/components/PlayVoiceButton.vue";
 import StylizedText from "@/components/StylizedText.vue";
 import {useRouter} from "vue-router";
+import {ElMessage} from "element-plus";
+import {CopyDocument} from "@element-plus/icons-vue";
 /**
  *         {
  *             "type": "Dialogue",
@@ -22,6 +24,34 @@ const router = useRouter()
 
 const onVoicePlay = (voiceUrl) => {
     emit('onVoicePlay', voiceUrl)
+}
+
+const copyToClipboard = async (text) => {
+    if (!text) {
+        ElMessage.warning("没有可复制的文本")
+        return
+    }
+    try {
+        if (navigator.clipboard?.writeText) {
+            await navigator.clipboard.writeText(text)
+            ElMessage.success("已复制")
+            return
+        }
+
+        const textarea = document.createElement('textarea')
+        textarea.value = text
+        textarea.setAttribute('readonly', '')
+        textarea.style.position = 'absolute'
+        textarea.style.left = '-9999px'
+        document.body.appendChild(textarea)
+        textarea.select()
+        document.execCommand('copy')
+        document.body.removeChild(textarea)
+        ElMessage.success("已复制")
+    } catch (error) {
+        console.error(error)
+        ElMessage.error("复制失败，请手动选择文本")
+    }
 }
 
 const gotoTalk = () => {
@@ -43,6 +73,13 @@ const gotoTalk = () => {
                                      @on-voice-play="onVoicePlay"
                     />
                 </span>
+                <el-button
+                    class="copyButton"
+                    :icon="CopyDocument"
+                    circle
+                    size="small"
+                    @click="copyToClipboard(translate)"
+                />
 
             </p>
             <StylizedText :text="translate" :keyword="$props.keyword"/>
@@ -73,6 +110,11 @@ const gotoTalk = () => {
 
 .voice{
     margin-right: 10px;
+}
+
+.copyButton {
+    margin-left: 8px;
+    vertical-align: middle;
 }
 
 .origin{
