@@ -5,3 +5,6 @@ vgm
 .DS_Store
 *.pyc
 *.bat
+GenshinTextSearch.spec
+build/
+dist/
