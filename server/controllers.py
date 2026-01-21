@@ -407,5 +407,5 @@ def setSourceLanguage(newSourceLanguage):
     config.setSourceLanguage(newSourceLanguage)
 
 
-def setIsMale(isMale: bool):
+def setIsMale(isMale):
     config.setIsMale(isMale)

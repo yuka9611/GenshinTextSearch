@@ -40,7 +40,7 @@
             // 游戏资源路径，一般是YuanShen_Data或者GenshinImpact_Data
             "assetDir": "D:\\ys\\Genshin Impact Game\\YuanShen_Data",  
             "sourceLanguage": 1,  // 来源显示的语言
-            "isMale": false  // 对话对于双子有区别时，显示荧(false)、空(true)的文本
+            "isMale": false  // 对话对于双子有区别时，显示荧(false)、空(true)、双子("both")的文本
         }
     ```
 5. 在游戏中下载好想听的语音包

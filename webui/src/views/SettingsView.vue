@@ -61,6 +61,10 @@ const twinList = ref([
     {
         "value": true,
         "label": "空"
+    },
+    {
+        "value": "both",
+        "label": "双子"
     }
 ])
 const selectedTwin = ref(global.config.isMale)

@@ -2,15 +2,34 @@ import re
 import databaseHelper
 
 
-def replace(textMap: str, playerIsMale: bool, lang: int):
+def replace(textMap: str, playerIsMale, lang: int):
     # 主要处理3种情况： {M#xxxx}{F#xxx}
     # #{PLAYERAVATAR#SEXPRO[INFO_MALE_PRONOUN_HE|INFO_FEMALE_PRONOUN_SHE]}是特别的，不需要神之眼也可以使用元素力。
     # #以前，我也做过蘑菇菜肴给那菈吃。而且因为好吃，{MATEAVATAR#SEXPRO[INFO_MALE_PRONOUN_HE|INFO_FEMALE_PRONOUN_SHE]}咽下去的时候还特别用力。
     # 处理散兵的名字#（……！！难道是{REALNAME[ID(1)|HOSTONLY(true)]}那时候的…？）
-    text1 = re.sub(r'\{M#(.*?)}\{F#(.*?)}', '\\1' if playerIsMale else '\\2', textMap)
-    text1 = re.sub(r'\{F#(.*?)}\{M#(.*?)}', '\\2' if playerIsMale else '\\1', text1)
+    def replaceTwinText(match: 're.Match') -> str:
+        male_text = match.group(1)
+        female_text = match.group(2)
+        if playerIsMale == "both":
+            return f"{{{male_text}/{female_text}}}"
+        return male_text if playerIsMale else female_text
+
+    def replaceTwinTextReverse(match: 're.Match') -> str:
+        female_text = match.group(1)
+        male_text = match.group(2)
+        if playerIsMale == "both":
+            return f"{{{male_text}/{female_text}}}"
+        return male_text if playerIsMale else female_text
+
+    text1 = re.sub(r'\{M#(.*?)}\{F#(.*?)}', replaceTwinText, textMap)
+    text1 = re.sub(r'\{F#(.*?)}\{M#(.*?)}', replaceTwinTextReverse, text1)
 
     def replaceSexPro(match: 're.Match') -> str:
+        if playerIsMale == "both":
+            male_text = databaseHelper.getManualTextMap(match.group(2), lang) or ""
+            female_text = databaseHelper.getManualTextMap(match.group(3), lang) or ""
+            return f"{{{male_text}/{female_text}}}"
+        
         isMate = match.group(1) == "MATE"
         if isMate == playerIsMale:
             result = databaseHelper.getManualTextMap(match.group(3), lang)
