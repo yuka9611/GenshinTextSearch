@@ -8,7 +8,7 @@ DATA_PATH = r'C:\Users\yuka9\Downloads\AnimeGameData'
 LANG_PATH = os.path.join(DATA_PATH, 'TextMap')
 
 # 导入/生成的数据库的位置，默认为../data.db，如果要新建从头建立数据库建议选一个其他位置
-DB_PATH = os.path.join(os.path.dirname(__file__), "data.db")
+DB_PATH = os.environ.get("GTS_DB_PATH") or os.path.join(os.path.dirname(__file__), "data.db")
 conn = sqlite3.connect(DB_PATH)
 
 # Dim的解包数据的Readable文件夹位置

@@ -99,7 +99,7 @@ def importAvatars():
     cursor = conn.cursor()
     avatars = json.load(open(DATA_PATH + "\\ExcelBinOutput\\AvatarExcelConfigData.json", encoding='utf-8'))
 
-    sql1 = "insert into avatar(avatarId, nameTextMapHash) values (?,?)"
+    sql1 = "INSERT OR REPLACE INTO avatar(avatarId, nameTextMapHash) VALUES (?,?)"
 
     for avatar in avatars:
         cursor.execute(sql1, (avatar['id'], avatar['nameTextMapHash']))
@@ -111,7 +111,7 @@ def importAvatars():
 def importFetters():
     cursor = conn.cursor()
     fetters = json.load(open(DATA_PATH + "\\ExcelBinOutput\\FettersExcelConfigData.json", encoding='utf-8'))
-    sql1 = "insert into fetters(fetterId, avatarId, voiceTitleTextMapHash, voiceFileTextTextMapHash, voiceFile) values (?,?,?,?,?)"
+    sql1 = "INSERT OR REPLACE INTO fetters(fetterId, avatarId, voiceTitleTextMapHash, voiceFileTextTextMapHash, voiceFile) values (?,?,?,?,?)"
 
     for fetter in fetters:
         cursor.execute(sql1,(fetter['fetterId'], fetter['avatarId'], fetter['voiceTitleTextMapHash'], fetter['voiceFileTextTextMapHash'], fetter['voiceFile']))
@@ -124,8 +124,8 @@ def importQuest(fileName: str):
     cursor = conn.cursor()
     obj = json.load(open(DATA_PATH + "\\BinOutput\\Quest\\" + fileName, encoding='utf-8'))
 
-    sql1 = 'insert into quest(questId, titleTextMapHash, chapterId) VALUES (?,?,?)'
-    sql2 = 'insert into questTalk(questId, talkId) values (?,?)'
+    sql1 = 'INSERT OR REPLACE INTO quest(questId, titleTextMapHash, chapterId) VALUES (?,?,?)'
+    sql2 = 'INSERT OR IGNORE INTO questTalk(questId, talkId) VALUES (?,?)'
 
     if 'id' in obj:
         keyQuestId = 'id'
@@ -187,7 +187,7 @@ def importAllQuests():
 def importChapters():
     cursor = conn.cursor()
     chapters = json.load(open(DATA_PATH + "\\ExcelBinOutput\\ChapterExcelConfigData.json", encoding='utf-8'))
-    sql1 = "insert into chapter(chapterId, chapterTitleTextMapHash, chapterNumTextMapHash) values (?,?,?)"
+    sql1 = "INSERT OR REPLACE INTO chapter(chapterId, chapterTitleTextMapHash, chapterNumTextMapHash) VALUES (?,?,?)"
 
     for chapter in chapters:
         cursor.execute(sql1,(chapter['id'], chapter['chapterTitleTextMapHash'], chapter['chapterNumTextMapHash']))
@@ -199,7 +199,9 @@ def importChapters():
 def importNPCs():
     cursor = conn.cursor()
     NPCs = json.load(open(DATA_PATH + "\\ExcelBinOutput\\NpcExcelConfigData.json", encoding='utf-8'))
-    sql1 = "insert into npc(npcId, textHash) values (?,?)"
+
+    # 有就覆盖更新，没有就插入（兼容老 SQLite）
+    sql1 = "INSERT OR REPLACE INTO npc(npcId, textHash) VALUES (?,?)"
 
     for npc in NPCs:
         cursor.execute(sql1, (npc['id'], npc['nameTextMapHash']))
@@ -211,7 +213,7 @@ def importNPCs():
 def importManualTextMap():
     cursor = conn.cursor()
     placeholders = json.load(open(DATA_PATH + "\\ExcelBinOutput\\ManualTextMapConfigData.json", encoding='utf-8'))
-    sql1 = "insert into manualTextMap(textMapId, textHash) values (?,?)"
+    sql1 = "INSERT OR REPLACE INTO manualTextMap(textMapId, textHash) VALUES (?,?)"
 
     for placeholder in placeholders:
         cursor.execute(sql1, (placeholder['textMapId'], placeholder['textMapContentTextMapHash']))
@@ -282,15 +284,3 @@ if __name__ == "__main__":
         except Exception as e:
             print(f"[ERROR] failed to set db_version: {e}", file=sys.stderr)
             sys.exit(3)
-
-    # 3) 如果指定了 --out：复制过去
-    if args.out:
-        src_db = Path(__file__).resolve().parent / "data.db"
-        dst_db = Path(args.out).resolve()
-
-        if not src_db.exists() or src_db.stat().st_size == 0:
-            print(f"[ERROR] DBBuild 未生成有效数据库: {src_db}", file=sys.stderr)
-            sys.exit(2)
-
-        _atomic_copy(src_db, dst_db)
-        print(f"[INFO] Database copied to: {dst_db}")

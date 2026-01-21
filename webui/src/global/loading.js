@@ -13,7 +13,7 @@ function startLoading(){
     // _showLoading_DO_NOT_USE.value = true;
     loadingService.value = ElLoading.service({
         lock: true,
-        text: '请稍后'
+        text: '加载中……',
     })
 
     return loadingCount;
