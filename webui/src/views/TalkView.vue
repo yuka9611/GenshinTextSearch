@@ -108,6 +108,34 @@ const displayLanguages = computed(() => {
     return langs
 })
 
+const dialogueGroups = computed(() => {
+    if (!dialogues.value || dialogues.value.length === 0) {
+        return []
+    }
+    const hasTalkId = dialogues.value.some(item => item.talkId)
+    if (!hasTalkId) {
+        return [{ talkId: null, rows: dialogues.value }]
+    }
+    const groups = []
+    let currentTalkId = null
+    let currentRows = []
+    dialogues.value.forEach((item) => {
+        if (item.talkId !== currentTalkId) {
+            if (currentRows.length > 0) {
+                groups.push({ talkId: currentTalkId, rows: currentRows })
+            }
+            currentTalkId = item.talkId
+            currentRows = [item]
+        } else {
+            currentRows.push(item)
+        }
+    })
+    if (currentRows.length > 0) {
+        groups.push({ talkId: currentTalkId, rows: currentRows })
+    }
+    return groups
+})
+
 // 播放器相关开始
 /**
  *
@@ -267,33 +295,37 @@ onDeactivated(() => {
             </div>
         </div>
 
-        <el-table v-else :data="dialogues" :row-class-name="tableRowClassName">
-            <el-table-column prop="talker" label="角色" width="100" />
-            <template v-for="langCode in displayLanguages">
-                <el-table-column width="40">
-                    <template #header>
-                        <el-tooltip :content="'播放全部' + global.languages[langCode] + '语音'">
-                            <el-icon @click="playAllLangVoice(langCode)"><VideoPlay /></el-icon>
-                        </el-tooltip>
+        <div v-else class="dialogueGroups">
+            <div v-for="group in dialogueGroups" :key="group.talkId || 'single'" class="dialogueGroup">
+                <h3 v-if="group.talkId" class="dialogueGroupTitle">Talk ID: {{ group.talkId }}</h3>
+                <el-table :data="group.rows" :row-class-name="tableRowClassName">
+                    <el-table-column prop="talker" label="角色" width="100" />
+                    <template v-for="langCode in displayLanguages">
+                        <el-table-column width="40">
+                            <template #header>
+                                <el-tooltip :content="'播放全部' + global.languages[langCode] + '语音'">
+                                    <el-icon @click="playAllLangVoice(langCode)"><VideoPlay /></el-icon>
+                                </el-tooltip>
+                            </template>
+                            <template #default="scope">
+                                <span v-if="global.voiceLanguages[langCode]">
+                                    <PlayVoiceButton v-for="voice in scope.row.voicePaths"
+                                                     :voice-path="voice" :lang-code="langCode"
+                                                     @on-voice-play="(url) =>{ onVoicePlay(url, scope.row.dialogueId)}"
+                                                     :ref = "(el) => {registerVoicePlayButton(el, langCode, scope.row.dialogueId)}"
+                                    />
+                                </span>
+                            </template>
+                        </el-table-column>
+                        <el-table-column :label="global.languages[langCode]" >
+                            <template #default="scope">
+                                <StylizedText :text="scope.row.translates[langCode]" :keyword="keyword"/>
+                            </template>
+                        </el-table-column>
                     </template>
-                    <template #default="scope">
-                        <span v-if="global.voiceLanguages[langCode]">
-                            <PlayVoiceButton v-for="voice in scope.row.voicePaths"
-                                             :voice-path="voice" :lang-code="langCode"
-                                             @on-voice-play="(url) =>{ onVoicePlay(url, scope.row.dialogueId)}"
-                                             :ref = "(el) => {registerVoicePlayButton(el, langCode, scope.row.dialogueId)}"
-                            />
-                        </span>
-                    </template>
-                </el-table-column>
-                <el-table-column :label="global.languages[langCode]" >
-                    <template #default="scope">
-                        <StylizedText :text="scope.row.translates[langCode]" :keyword="keyword"/>
-                    </template>
-                </el-table-column>
-            </template>
-
-        </el-table>
+                </el-table>
+            </div>
+        </div>
 
         <el-form v-if="!isReadable" style="margin-top: 10px;" :inline="true">
             <el-form-item label="自动连续播放">
@@ -373,6 +405,17 @@ onDeactivated(() => {
 
 .readableBlock:last-child {
     border-bottom: none;
+}
+
+.dialogueGroups {
+    display: flex;
+    flex-direction: column;
+    gap: 16px;
+}
+
+.dialogueGroupTitle {
+    margin: 8px 0;
+    font-weight: 600;
 }
 
 .voicePlayerContainer {
