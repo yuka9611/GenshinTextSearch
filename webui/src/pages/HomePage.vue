@@ -29,6 +29,7 @@ const avatarClicked = () => {
 const menus = reactive({
     v: [
         { "title": "首页", "icon": "fi-rr-home", "path": "/" },
+        { "title": "名称检索", "icon": "fi-rr-search", "path": "/name-search" },
         { "title": "设置", "icon": "fi-rr-settings", "path": "/settings" },
     ]
 });

@@ -259,11 +259,13 @@ def getManualTextMap(placeHolderName, lang):
 def getTalkContent(talkId: int, coopQuestId: 'int | None') -> 'list[tuple[int, str, int, int]] | None':
     with closing(conn.cursor()) as cursor:
         if coopQuestId is None:
-            sql1 = 'select textHash, talkerType, talkerId, dialogueId from dialogue where talkId = ? and coopQuestId is null'
+            sql1 = ('select textHash, talkerType, talkerId, dialogueId '
+                    'from dialogue where talkId = ? and coopQuestId is null order by dialogueId')
             cursor.execute(sql1, (talkId,))
             ans = cursor.fetchall()
         else:
-            sql1 = 'select textHash, talkerType, talkerId, dialogueId from dialogue where talkId = ? and coopQuestId = ?'
+            sql1 = ('select textHash, talkerType, talkerId, dialogueId '
+                    'from dialogue where talkId = ? and coopQuestId = ? order by dialogueId')
             cursor.execute(sql1, (talkId, coopQuestId))
             ans = cursor.fetchall()
         if len(ans) > 0:
@@ -314,6 +316,21 @@ def selectReadableFromReadableId(readableId: int, langs: list[str]):
         cursor.execute(sql, params)
         return cursor.fetchall()
 
+def getReadableInfo(readableId: int | None = None, fileName: str | None = None):
+    with closing(conn.cursor()) as cursor:
+        if readableId is not None:
+            sql = "select fileName, titleTextMapHash, readableId from readable where readableId=? limit 1"
+            cursor.execute(sql, (readableId,))
+        elif fileName is not None:
+            sql = "select fileName, titleTextMapHash, readableId from readable where fileName=? limit 1"
+            cursor.execute(sql, (fileName,))
+        else:
+            return None
+        ans = cursor.fetchall()
+        if len(ans) > 0:
+            return ans[0]
+        return None
+
 def getTextMapContent(textHash: int, langCode: int):
     with closing(conn.cursor()) as cursor:
         sql = "select content from textMap where hash=? and lang=?"
@@ -322,7 +339,62 @@ def getTextMapContent(textHash: int, langCode: int):
         if len(ans) > 0:
             return ans[0][0]
         return None
+    
+def selectQuestByTitleKeyword(keyword: str, langCode: int):
+    with closing(conn.cursor()) as cursor:
+        sql = ("select quest.questId, textMap.content from quest "
+               "join textMap on quest.titleTextMapHash=textMap.hash "
+               "where textMap.lang=? and textMap.content like ? limit 200")
+        cursor.execute(sql, (langCode, f'%{keyword}%'))
+        return cursor.fetchall()
 
+def getQuestChapterName(questId: int, langCode: int):
+    with closing(conn.cursor()) as cursor:
+        sql = "select chapterId from quest where questId=?"
+        cursor.execute(sql, (questId,))
+        ans = cursor.fetchall()
+        if len(ans) == 0 or ans[0][0] is None:
+            return None
+        chapterId = ans[0][0]
+
+        sql2 = ("select chapterTitleTextMapHash, chapterNumTextMapHash "
+                "from chapter where chapterId=?")
+        cursor.execute(sql2, (chapterId,))
+        chapter_row = cursor.fetchall()
+        if len(chapter_row) == 0:
+            return None
+        chapterTitleTextMapHash, chapterNumTextMapHash = chapter_row[0]
+
+        sql3 = 'select content from textMap where hash=? and lang=?'
+        cursor.execute(sql3, (chapterTitleTextMapHash, langCode))
+        ans2 = cursor.fetchall()
+        if len(ans2) == 0:
+            return None
+        chapterTitleText = ans2[0][0]
+
+        cursor.execute(sql3, (chapterNumTextMapHash, langCode))
+        ans3 = cursor.fetchall()
+        if len(ans3) > 0:
+            chapterNumText = ans3[0][0]
+            return '{} · {}'.format(chapterNumText, chapterTitleText)
+        return chapterTitleText
+
+def selectQuestTalkIds(questId: int):
+    with closing(conn.cursor()) as cursor:
+        sql = "select talkId from questTalk where questId=? order by talkId"
+        cursor.execute(sql, (questId,))
+        return [row[0] for row in cursor.fetchall()]
+
+def selectReadableByTitleKeyword(keyword: str, langCode: int, langStr: str):
+    with closing(conn.cursor()) as cursor:
+        sql = ("select readable.fileName, readable.readableId, readable.titleTextMapHash, textMap.content "
+               "from readable join textMap on readable.titleTextMapHash=textMap.hash "
+               "where readable.lang=? and textMap.lang=? and textMap.content like ? "
+               "group by readable.fileName, readable.readableId, readable.titleTextMapHash, textMap.content "
+               "limit 200")
+        cursor.execute(sql, (langStr, langCode, f'%{keyword}%'))
+        return cursor.fetchall()
+    
 def selectSubtitleFromKeyword(keyword: str, langCode: int):
     # Returns [(fileName, content, startTime, endTime, subtitleId)]
     with closing(conn.cursor()) as cursor:
