@@ -7,6 +7,33 @@ import config
 import placeholderHandler
 
 
+def pickAssetDirViaDialog() -> str | None:
+    """
+    弹出选择文件夹对话框（Windows/macOS/Linux）
+    - 返回选中的目录路径
+    - 取消返回 None
+
+    注意：这适合桌面发行版。如果你把服务部署到远端服务器，这个对话框不会在用户电脑上出现。
+    """
+    try:
+        import tkinter as tk
+        from tkinter import filedialog
+    except Exception:
+        return None
+
+    try:
+        root = tk.Tk()
+        root.withdraw()
+        root.attributes("-topmost", True)
+        picked = filedialog.askdirectory(title="请选择原神资源目录（包含 StreamingAssets 或 Persistent）")
+        root.destroy()
+        if not picked:
+            return None
+        return picked
+    except Exception:
+        return None
+    
+
 def selectVoicePathFromTextHash(textHash: int):
     voicePath: str | None = databaseHelper.selectVoicePathFromTextHashInDialogue(textHash)
     if voicePath is not None:
@@ -388,7 +415,10 @@ def getImportedTextMapLangs():
 
 
 def getConfig():
-    return config.config
+    # 返回 config + 额外状态字段（前端可以直接显示“目录是否有效”）
+    cfg = dict(config.config)
+    cfg["assetDirValid"] = config.isAssetDirValid()
+    return cfg
 
 
 def setDefaultSearchLanguage(newLanguage: int):

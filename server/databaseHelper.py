@@ -1,37 +1,49 @@
 import sqlite3
 from contextlib import closing
 import re
+from pathlib import Path
 
-# 没人会给一个词典搞高并发吧？
-conn = sqlite3.connect(r".\data.db", check_same_thread=False)
+import config
+
+
+def get_connection() -> sqlite3.Connection:
+    """
+    连接用户目录下的 DB（可写、稳定）
+    如果不存在就从打包资源复制出来
+    """
+    config.ensure_db_exists("data.db")
+    db_path: Path = config.get_db_path()
+    if not db_path.exists():
+        # 给一个更直观的错误
+        raise FileNotFoundError(f"Database file not found: {db_path}")
+
+    return sqlite3.connect(str(db_path), check_same_thread=False)
+
+
+# 单例连接（你原本就是单连接设计）
+conn = get_connection()
 
 
 def selectTextMapFromKeyword(keyWord: str, langCode: int):
-    # [hash] 反正最后还得去数据库查一遍目标语言，不如不查content
     with closing(conn.cursor()) as cursor:
         sql1 = "select hash, content from textMap where lang=? and content like ? limit 200"
-        cursor.execute(sql1, (langCode, '%{}%'.format(keyWord)))
-        matches = cursor.fetchall()
-        return matches
+        cursor.execute(sql1, (langCode, f'%{keyWord}%'))
+        return cursor.fetchall()
 
 
 def selectTextMapFromTextHash(textHash: int, langs: list[int] | None = None):
-    # [text, langCode]
-
     with closing(conn.cursor()) as cursor:
         if langs is not None and len(langs) > 0:
             langStr = ','.join([str(i) for i in langs])
-            sql1 = "select content, lang from textMap where hash=? and lang in ({})".format(langStr)
+            sql1 = f"select content, lang from textMap where hash=? and lang in ({langStr})"
         else:
             sql1 = "select content, lang from textMap where hash=?"
         cursor.execute(sql1, (textHash,))
-        matches = cursor.fetchall()
-        return matches
+        return cursor.fetchall()
 
 
 def selectVoicePathFromTextHashInFetter(textHash: int):
     with closing(conn.cursor()) as cursor:
-        # fetter中，只要voice指定了avatarId，则fetter和voice的avatarId必须匹配
         sql1 = ("select voicePath,voice.avatarId from fetters, voice "
                 "where voiceFileTextTextMapHash=? and fetters.voiceFile=voice.dialogueId "
                 "and (fetters.avatarId=voice.avatarId or voice.avatarId=0)")
@@ -39,13 +51,10 @@ def selectVoicePathFromTextHashInFetter(textHash: int):
         matches = cursor.fetchall()
         if len(matches) >= 1:
             return matches[0][0]
-        elif len(matches) == 0:
-            return None
+        return None
 
 
-# 实际是从talk里拿
 def selectVoicePathFromTextHashInDialogue(textHash: int):
-    # str
     with closing(conn.cursor()) as cursor:
         sql1 = "select voicePath from dialogue join voice on voice.dialogueId= dialogue.dialogueId where textHash=?"
         cursor.execute(sql1, (textHash,))
@@ -56,28 +65,23 @@ def selectVoicePathFromTextHashInDialogue(textHash: int):
 
 
 def getImportedTextMapLangs():
-    # [(id, displayName)]
     with closing(conn.cursor()) as cursor:
         sql1 = "select id,displayName from langCode where imported=1"
-        cursor.execute(sql1, )
-        matches = cursor.fetchall()
-        return matches
+        cursor.execute(sql1)
+        return cursor.fetchall()
 
 
-# 如果是角色语音，则返回角色名+标题，否则返回None
 def getSourceFromFetter(textHash: int, langCode: int = 1):
-    # 获得语音标题
     with closing(conn.cursor()) as cursor:
-        sql1 = 'select avatarId, content from fetters, textMap where voiceFileTextTextMapHash=? and voiceTitleTextMapHash = hash and lang=?'
+        sql1 = ('select avatarId, content from fetters, textMap '
+                'where voiceFileTextTextMapHash=? and voiceTitleTextMapHash = hash and lang=?')
         cursor.execute(sql1, (textHash, langCode))
         ans = cursor.fetchall()
         if len(ans) == 0:
             return None
         avatarId, voiceTitle = ans[0]
 
-        # 接下来获得角色名称
         sql2 = 'select content from avatar, textMap where avatarId=? and avatar.nameTextMapHash=textMap.hash and lang=?'
-
         cursor.execute(sql2, (avatarId, langCode))
         ans2 = cursor.fetchall()
         if len(ans2) == 0:
@@ -93,35 +97,28 @@ travellerNames = {}
 
 def getCharterName(avatarId: int, langCode: int = 1):
     with closing(conn.cursor()) as cursor:
-        # 接下来获得角色名称
         sql2 = 'select content from avatar, textMap where avatarId=? and avatar.nameTextMapHash=textMap.hash and lang=?'
-
         cursor.execute(sql2, (avatarId, langCode,))
         ans2 = cursor.fetchall()
         if len(ans2) == 0:
             return None
-
         return ans2[0][0]
 
 
-# 获得散兵名字
 def getWanderName(langCode: int = 1):
     if langCode not in wanderNames:
         wanderNames[langCode] = getCharterName(10000075, langCode)
     return wanderNames[langCode]
 
 
-# 获得旅行者名字
 def getTravellerName(langCode: int = 1):
     if langCode not in travellerNames:
         travellerNames[langCode] = getCharterName(10000005, langCode)
     return travellerNames[langCode]
 
 
-# 通过textHash查询对话信息，返回[talkId, talkerType, talkerId, coopQuestId]
-def getTalkInfo(textHash: int) -> 'tuple[int, str, int, int | None] | None':
+def getTalkInfo(textHash: int):
     with closing(conn.cursor()) as cursor:
-        # 先搞到talkId
         sql1 = 'select talkerType, talkerId, talkId, coopQuestId from dialogue where textHash=?'
         cursor.execute(sql1, (textHash,))
         ans = cursor.fetchall()
@@ -131,8 +128,7 @@ def getTalkInfo(textHash: int) -> 'tuple[int, str, int, int | None] | None':
         return talkId, talkerType, talkerId, coopQuestId
 
 
-# 根据talkerType和Id找到说话人的名称
-def getTalkerName(talkerType: str, talkerId: int, langCode: int = 1) -> 'str | None':
+def getTalkerName(talkerType: str, talkerId: int, langCode: int = 1):
     with closing(conn.cursor()) as cursor:
         talkerName = None
         if talkerType == "TALK_ROLE_NPC":
@@ -151,16 +147,13 @@ def getTalkerName(talkerType: str, talkerId: int, langCode: int = 1) -> 'str | N
         return talkerName
 
 
-def getTalkQuestId(talkId: int) -> int | None:
+def getTalkQuestId(talkId: int):
     with closing(conn.cursor()) as cursor:
-
-        # 搞到questId，与任务的标题
         sql2 = ('select quest.questId from questTalk, quest '
                 'where talkId=? and quest.questId=questTalk.questId')
         cursor.execute(sql2, (talkId,))
         ans2 = cursor.fetchall()
         if len(ans2) == 0:
-            # 如果查询到没有属于某个任务的talk就会到这里
             return None
         return ans2[0][0]
 
@@ -172,17 +165,14 @@ def getQuestName(questId, langCode):
         cursor.execute(sql2, (questId, langCode))
         ans2 = cursor.fetchall()
         if len(ans2) == 0:
-            # 如果查询到没有属于某个任务的talk就会到这里
             return "对话文本"
 
         questTitle = ans2[0][0]
 
-        # 尝试找到任务属于哪个章节
         sql3 = 'select chapterTitleTextMapHash,chapterNumTextMapHash from chapter, quest where questId=? and quest.chapterId=chapter.chapterId'
         cursor.execute(sql3, (questId,))
         ans3 = cursor.fetchall()
         if len(ans3) == 0:
-            # 没找到对应的章节，直接返回任务标题
             return questTitle
         chapterTitleTextMapHash, chapterNumTextMapHash = ans3[0]
 
@@ -190,7 +180,6 @@ def getQuestName(questId, langCode):
         cursor.execute(sql4, (chapterTitleTextMapHash, langCode))
         ans4 = cursor.fetchall()
         if len(ans4) == 0:
-            # 没找到对应的章节名称，直接返回任务标题
             return questTitle
 
         chapterTitleText = ans4[0][0]
@@ -207,30 +196,23 @@ def getQuestName(questId, langCode):
         return questCompleteName
 
 
-# 通过talkId尝试找到对话所属的任务全量名称
 def getTalkQuestName(talkId: int, langCode: int = 1) -> str:
     questId = getTalkQuestId(talkId)
     if questId is None:
         return "对话文本"
-
-    questCompleteName = getQuestName(questId, langCode)
-    return questCompleteName
+    return getQuestName(questId, langCode)
 
 
 def getCoopTalkQuestName(coopQuestId, langCode):
-    # 直接除以100把subQuestId变为questId
-    questCompleteName = getQuestName(coopQuestId // 100, langCode)
-    return questCompleteName
+    return getQuestName(coopQuestId // 100, langCode)
 
 
-# 如果是任务对话，则返回章节号+章节名+任务名，否则返回None
 def getSourceFromDialogue(textHash: int, langCode: int = 1):
     talkInfo = getTalkInfo(textHash)
     if talkInfo is None:
         return None
 
     talkId, talkerType, talkerId, coopQuestId = talkInfo
-
     talkerName = getTalkerName(talkerType, talkerId, langCode)
 
     if coopQuestId is None:
@@ -251,51 +233,44 @@ def getManualTextMap(placeHolderName, lang):
         ans = cursor.fetchall()
         if len(ans) > 0:
             return ans[0][0]
-        else:
-            return None
+        return None
 
 
-# 根据talk的id查找整个talk，返回为[tuple[textHash, talkerType, talkerId, dialogueId]]
-def getTalkContent(talkId: int, coopQuestId: 'int | None') -> 'list[tuple[int, str, int, int]] | None':
+def getTalkContent(talkId: int, coopQuestId: int | None):
     with closing(conn.cursor()) as cursor:
         if coopQuestId is None:
             sql1 = ('select textHash, talkerType, talkerId, dialogueId '
                     'from dialogue where talkId = ? and coopQuestId is null order by dialogueId')
             cursor.execute(sql1, (talkId,))
-            ans = cursor.fetchall()
         else:
             sql1 = ('select textHash, talkerType, talkerId, dialogueId '
                     'from dialogue where talkId = ? and coopQuestId = ? order by dialogueId')
             cursor.execute(sql1, (talkId, coopQuestId))
-            ans = cursor.fetchall()
-        if len(ans) > 0:
-            return ans
-        else:
-            return None
+        ans = cursor.fetchall()
+        return ans if len(ans) > 0 else None
+
 
 def getLangCodeMap():
-    # Returns {id: 'CHS', ...}
     with closing(conn.cursor()) as cursor:
         sql = "select id, codeName from langCode"
         cursor.execute(sql)
         rows = cursor.fetchall()
         mapping = {}
         for row in rows:
-            # codeName is like 'TextMapCHS.json'
             match = re.match(r'TextMap(.+)\.json', row[1])
             if match:
                 mapping[row[0]] = match.group(1)
         return mapping
 
+
 def selectReadableFromKeyword(keyword: str, langStr: str):
-    # Returns [(fileName, content, titleTextMapHash, readableId)]
     with closing(conn.cursor()) as cursor:
         sql = "select fileName, content, titleTextMapHash, readableId from readable where lang=? and content like ? limit 200"
         cursor.execute(sql, (langStr, f'%{keyword}%'))
         return cursor.fetchall()
 
+
 def selectReadableFromFileName(fileName: str, langs: list[str]):
-    # Returns [(content, langStr)]
     with closing(conn.cursor()) as cursor:
         if not langs:
             return []
@@ -305,8 +280,8 @@ def selectReadableFromFileName(fileName: str, langs: list[str]):
         cursor.execute(sql, params)
         return cursor.fetchall()
 
+
 def selectReadableFromReadableId(readableId: int, langs: list[str]):
-    # Returns [(content, langStr)]
     with closing(conn.cursor()) as cursor:
         if not langs:
             return []
@@ -315,6 +290,7 @@ def selectReadableFromReadableId(readableId: int, langs: list[str]):
         params = [readableId] + langs
         cursor.execute(sql, params)
         return cursor.fetchall()
+
 
 def getReadableInfo(readableId: int | None = None, fileName: str | None = None):
     with closing(conn.cursor()) as cursor:
@@ -331,6 +307,7 @@ def getReadableInfo(readableId: int | None = None, fileName: str | None = None):
             return ans[0]
         return None
 
+
 def getTextMapContent(textHash: int, langCode: int):
     with closing(conn.cursor()) as cursor:
         sql = "select content from textMap where hash=? and lang=?"
@@ -339,7 +316,8 @@ def getTextMapContent(textHash: int, langCode: int):
         if len(ans) > 0:
             return ans[0][0]
         return None
-    
+
+
 def selectQuestByTitleKeyword(keyword: str, langCode: int):
     with closing(conn.cursor()) as cursor:
         sql = ("select quest.questId, textMap.content from quest "
@@ -347,6 +325,7 @@ def selectQuestByTitleKeyword(keyword: str, langCode: int):
                "where textMap.lang=? and textMap.content like ? limit 200")
         cursor.execute(sql, (langCode, f'%{keyword}%'))
         return cursor.fetchall()
+
 
 def getQuestChapterName(questId: int, langCode: int):
     with closing(conn.cursor()) as cursor:
@@ -379,11 +358,13 @@ def getQuestChapterName(questId: int, langCode: int):
             return '{} · {}'.format(chapterNumText, chapterTitleText)
         return chapterTitleText
 
+
 def selectQuestTalkIds(questId: int):
     with closing(conn.cursor()) as cursor:
         sql = "select talkId from questTalk where questId=? order by talkId"
         cursor.execute(sql, (questId,))
         return [row[0] for row in cursor.fetchall()]
+
 
 def selectReadableByTitleKeyword(keyword: str, langCode: int, langStr: str):
     with closing(conn.cursor()) as cursor:
@@ -394,17 +375,16 @@ def selectReadableByTitleKeyword(keyword: str, langCode: int, langStr: str):
                "limit 200")
         cursor.execute(sql, (langStr, langCode, f'%{keyword}%'))
         return cursor.fetchall()
-    
+
+
 def selectSubtitleFromKeyword(keyword: str, langCode: int):
-    # Returns [(fileName, content, startTime, endTime, subtitleId)]
     with closing(conn.cursor()) as cursor:
         sql = "select fileName, content, startTime, endTime, subtitleId from subtitle where lang=? and content like ? limit 200"
         cursor.execute(sql, (langCode, f'%{keyword}%'))
         return cursor.fetchall()
 
+
 def selectSubtitleTranslations(fileName: str, startTime: float, langs: list[int]):
-    # Returns [(content, langCode)]
-    # Matches subtitles in other languages with similar start time (+- 0.5s)
     with closing(conn.cursor()) as cursor:
         if not langs:
             return []
@@ -420,9 +400,8 @@ def selectSubtitleTranslations(fileName: str, startTime: float, langs: list[int]
         cursor.execute(sql, params)
         return cursor.fetchall()
 
+
 def selectSubtitleTranslationsBySubtitleId(subtitleId: int, startTime: float, langs: list[int]):
-    # Returns [(content, langCode)]
-    # Matches subtitles in other languages with similar start time (+- 0.5s) using subtitleId
     with closing(conn.cursor()) as cursor:
         if not langs:
             return []
@@ -438,8 +417,8 @@ def selectSubtitleTranslationsBySubtitleId(subtitleId: int, startTime: float, la
         cursor.execute(sql, params)
         return cursor.fetchall()
 
+
 def selectSubtitleContext(fileName: str, langs: list[int]):
-    # Returns [(content, lang, startTime, endTime)]
     with closing(conn.cursor()) as cursor:
         if not langs:
             return []
@@ -449,8 +428,8 @@ def selectSubtitleContext(fileName: str, langs: list[int]):
         cursor.execute(sql, params)
         return cursor.fetchall()
 
+
 def selectSubtitleContextBySubtitleId(subtitleId: int, langs: list[int]):
-    # Returns [(content, lang, startTime, endTime)]
     with closing(conn.cursor()) as cursor:
         if not langs:
             return []
