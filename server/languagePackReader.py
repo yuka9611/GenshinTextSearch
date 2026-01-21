@@ -1,14 +1,17 @@
 import os
+
+from AudioReader.FilePackager import Package, fnv_hash_64
+
 import config
 
 langCodes = {
     1: "Chinese",
     4: "English(US)",
     9: "Japanese",
-    10: "Korean"
+    10: "Korean",
 }
 
-langPackages: dict[int, str] = {}  # langCode -> 目录路径
+langPackages: dict[int, Package] = {}
 
 
 def reloadLangPackages():
@@ -22,39 +25,53 @@ def loadLangPackages():
         return
 
     paths = [
+        os.path.join(assetDir, "Persistent", "AudioAssets"),
         os.path.join(assetDir, "StreamingAssets", "AudioAssets"),
-        os.path.join(assetDir, "Persistent", "AudioAssets")
     ]
 
-    for base in paths:
-        if not os.path.isdir(base):
+    for pathDir in paths:
+        if not os.path.exists(pathDir):
             continue
 
-        for code, name in langCodes.items():
-            if code in langPackages:
+        for langCode, langName in langCodes.items():
+            if langCode in langPackages:
                 continue
-            langDir = os.path.join(base, name)
-            if os.path.isdir(langDir):
-                files = os.listdir(langDir)
-                if len(files) > 10:  # 基本判定：不是空目录
-                    langPackages[code] = langDir
+            langPackPath = os.path.join(pathDir, langName)
+            if not os.path.exists(langPackPath):
+                continue
+            files = os.listdir(langPackPath)
+            if len(files) < 10:
+                continue
+
+            voicePack = Package()
+            for fileName in files:
+                fobj = open(os.path.join(langPackPath, fileName), "rb")
+                voicePack.addfile(fobj)
+            langPackages[langCode] = voicePack
 
 
-def checkAudioBin(voicePath: str, langCode: int) -> bool:
+def getAudioBin(path: str, langCode: int) -> bytes | None:
+    if langCode not in langPackages:
+        return None
+    langStr = langCodes[langCode]
+    hashVal = fnv_hash_64((langStr + "\\" + path).lower())
+    try:
+        voicePack = langPackages[langCode]
+        wemFiles = voicePack.get_file_data_by_hash(hashVal, langid=0, mode=2)
+        wemBin, pckPath = wemFiles[0]
+        return wemBin
+    except (FileNotFoundError, KeyError):
+        return None
+
+
+def checkAudioBin(path: str, langCode: int) -> bool:
     if langCode not in langPackages:
         return False
-    return os.path.isfile(os.path.join(langPackages[langCode], voicePath))
+    langStr = langCodes[langCode]
+    hashVal = fnv_hash_64((langStr + "\\" + path).lower())
+    voicePack = langPackages[langCode]
+
+    return voicePack.check_file_by_hash(hashVal, langid=0, mode=2)
 
 
-def getAudioBin(voicePath: str, langCode: int) -> bytes | None:
-    if langCode not in langPackages:
-        return None
-    filePath = os.path.join(langPackages[langCode], voicePath)
-    if not os.path.isfile(filePath):
-        return None
-    with open(filePath, "rb") as f:
-        return f.read()
-
-
-# 启动时尝试加载
 loadLangPackages()

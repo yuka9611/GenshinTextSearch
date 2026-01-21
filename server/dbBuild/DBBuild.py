@@ -1,6 +1,10 @@
 import os
 import re
 import json
+import argparse
+import shutil
+from pathlib import Path
+import sys
 from DBConfig import conn, DATA_PATH
 import voiceItemImport
 import readableImport
@@ -242,6 +246,51 @@ def main():
     print("Done!")
 
 
+def set_db_version(conn, version: str):
+    cur = conn.cursor()
+    cur.execute("CREATE TABLE IF NOT EXISTS app_meta (k TEXT PRIMARY KEY, v TEXT)")
+    cur.execute("INSERT OR REPLACE INTO app_meta(k, v) VALUES (?, ?)", ("db_version", version))
+    conn.commit()
+
+def _atomic_copy(src: Path, dst: Path):
+    """
+    安全复制数据库：
+    - 先复制到临时文件
+    - 再原子替换目标文件（Windows/Linux 都安全）
+    """
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    tmp = dst.with_suffix(dst.suffix + ".tmp")
+    shutil.copy2(src, tmp)
+    os.replace(tmp, dst)
+
+
 if __name__ == "__main__":
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--out", type=str, default="", help="将生成的数据库复制到指定路径")
+    parser.add_argument("--dbver", type=str, default="", help="写入数据库版本号，例如 2026-01-21.1 或 v0.1.0-db3")
+    args = parser.parse_args()
+
+    # 1) 执行原 DBBuild
     main()
-    pass
+
+    # 2) 写入版本号（如果提供了）
+    if args.dbver:
+        # 你脚本里使用的 conn 是全局变量（你现在就是这样），所以这里能直接用
+        try:
+            set_db_version(conn, args.dbver)
+            print(f"[INFO] db_version set to: {args.dbver}")
+        except Exception as e:
+            print(f"[ERROR] failed to set db_version: {e}", file=sys.stderr)
+            sys.exit(3)
+
+    # 3) 如果指定了 --out：复制过去
+    if args.out:
+        src_db = Path(__file__).resolve().parent / "data.db"
+        dst_db = Path(args.out).resolve()
+
+        if not src_db.exists() or src_db.stat().st_size == 0:
+            print(f"[ERROR] DBBuild 未生成有效数据库: {src_db}", file=sys.stderr)
+            sys.exit(2)
+
+        _atomic_copy(src_db, dst_db)
+        print(f"[INFO] Database copied to: {dst_db}")
