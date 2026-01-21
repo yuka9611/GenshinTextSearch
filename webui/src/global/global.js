@@ -1,9 +1,9 @@
-let languages = {}
-let voiceLanguages = {}
-let config = {}
+import { reactive } from "vue";
 
-export default {
-    languages,
-    voiceLanguages,
-    config
-};
+const globalState = reactive({
+    languages: {},
+    voiceLanguages: {},
+    config: {}
+});
+
+export default globalState;

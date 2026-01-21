@@ -8,6 +8,8 @@ from flask_cors import CORS
 import controllers
 import config
 import languagePackReader
+import threading
+import webbrowser
 
 
 def resource_path(rel_path: str) -> str:
@@ -122,7 +124,11 @@ def keywordQuery():
 
 @app.route("/api/getVoiceOver", methods=['POST'])
 def getVoiceOver():
-    langCode = request.json['langCode']
+    try:
+        langCode = int(request.json['langCode'])   # ✅ 关键：转 int
+    except Exception:
+        return buildResponse(code=400, msg="Invalid langCode")
+
     voicePath = request.json['voicePath']
 
     wemStream = controllers.getVoiceBinStream(voicePath, langCode)
@@ -134,8 +140,8 @@ def getVoiceOver():
 
     return send_file(
         wemStream,
-        download_name='voicePath',
-        mimetype='image/png'
+        download_name=os.path.basename(voicePath),   # ✅ 不要写死 'voicePath'
+        mimetype='application/octet-stream'          # ✅ 不要用 image/png
     )
 
 
@@ -285,5 +291,12 @@ def serveStatic(path):
 
 
 if __name__ == "__main__":
+    def open_browser():
+        # 延迟一下，等 Flask 起来
+        time.sleep(0.8)
+        webbrowser.open("http://127.0.0.1:5000/", new=1)
+
+    threading.Thread(target=open_browser, daemon=True).start()
+    app.run(debug=False, host="127.0.0.1", port=5000)
     # 桌面发行版建议只监听本机
     app.run(debug=False, host='127.0.0.1', port=5000)
