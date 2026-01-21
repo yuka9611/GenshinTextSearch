@@ -9,7 +9,7 @@ config = {
     "defaultSearchLanguage": 1,
     "assetDir": "D:\\Program Files\\Genshin Impact\\Genshin Impact game\\GenshinImpact_Data",
     "sourceLanguage": 1,
-    "isMale": False
+    "isMale": "both"
 }
 
 
@@ -34,6 +34,8 @@ def loadConfig():
 
     if "isMale" in fileJson and isinstance(fileJson['isMale'], bool):
         config['isMale'] = fileJson['isMale']
+    elif "isMale" in fileJson and fileJson['isMale'] == "both":
+        config['isMale'] = "both"
 
 
 def saveConfig():
