@@ -1,22 +1,96 @@
-import os.path
+import os
+import sys
 import time
 
-from flask import Flask, jsonify, request, send_file, make_response
-import controllers
+from flask import Flask, jsonify, request, send_file, make_response, send_from_directory
 from flask_cors import CORS
-from flask import send_from_directory
+
+import controllers
+import config
+import languagePackReader
+
+
+def resource_path(rel_path: str) -> str:
+    """
+    兼容 PyInstaller 和源码运行的资源路径
+    - 打包后资源在 sys._MEIPASS
+    - 源码运行时以项目根目录为基准（server/..）
+    """
+    if hasattr(sys, "_MEIPASS"):
+        base_path = sys._MEIPASS # type: ignore
+    else:
+        base_path = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+    return os.path.join(base_path, rel_path)
+
 
 app = Flask(__name__)
 CORS(app)
 
 
 def buildResponse(data=None, code=200, msg="ok"):
-    return jsonify({
-        "data": data,
-        "code": code,
-        "msg": msg
+    return jsonify({"data": data, "code": code, "msg": msg})
+
+
+# ----------------------------
+# Startup / Settings APIs
+# ----------------------------
+
+@app.route("/api/startupStatus")
+def startupStatus():
+    """
+    前端启动时调用：判断 assetDir 是否有效，决定是否弹窗引导用户选择目录
+    """
+    return buildResponse({
+        "assetDirValid": config.isAssetDirValid(),
+        "assetDir": config.getAssetDir()
     })
 
+
+@app.route("/api/setAssetDir", methods=["POST"])
+def setAssetDir():
+    """
+    前端选择目录后调用：保存 assetDir，并尝试重新加载语音包
+    """
+    assetDir = request.json.get("assetDir")
+    if not assetDir or not os.path.isdir(assetDir):
+        return buildResponse(code=400, msg="Invalid directory")
+
+    config.setAssetDir(assetDir)
+    config.saveConfig()
+
+    # 重新加载语音包
+    languagePackReader.reloadLangPackages()
+
+    return buildResponse({
+        "assetDir": assetDir,
+        "assetDirValid": config.isAssetDirValid()
+    })
+
+
+@app.route("/api/pickAssetDir", methods=["POST"])
+def pickAssetDir():
+    """
+    由后端弹出“选择文件夹”对话框（更适合发行版/本地桌面使用）
+    - 选中：保存并 reload
+    - 取消：返回 cancel=True
+    """
+    picked = controllers.pickAssetDirViaDialog()
+    if not picked:
+        return buildResponse({"cancel": True, "assetDir": config.getAssetDir(), "assetDirValid": config.isAssetDirValid()})
+
+    if not os.path.isdir(picked):
+        return buildResponse(code=400, msg="Invalid directory")
+
+    config.setAssetDir(picked)
+    config.saveConfig()
+    languagePackReader.reloadLangPackages()
+
+    return buildResponse({"cancel": False, "assetDir": picked, "assetDirValid": config.isAssetDirValid()})
+
+
+# ----------------------------
+# Existing APIs
+# ----------------------------
 
 @app.route("/api/getImportedTextLanguages")
 def getImportedTextLanguages():
@@ -42,7 +116,7 @@ def keywordQuery():
 
     return buildResponse({
         'contents': contents,
-        'time': (end - start)*1000
+        'time': (end - start) * 1000
     })
 
 
@@ -80,8 +154,9 @@ def getTalkFromHash():
 
     return buildResponse({
         'contents': contents,
-        'time': (end - start)*1000
+        'time': (end - start) * 1000
     })
+
 
 @app.route("/api/getSubtitleContext", methods=['POST'])
 def getSubtitleContext():
@@ -90,14 +165,14 @@ def getSubtitleContext():
     searchLang = request.json.get('searchLang')
     if searchLang:
         searchLang = int(searchLang)
-    
+
     start = time.time()
     contents = controllers.getSubtitleContext(fileName, subtitleId, searchLang)
     end = time.time()
 
     return buildResponse({
         'contents': contents,
-        'time': (end - start)*1000
+        'time': (end - start) * 1000
     })
 
 
@@ -118,7 +193,7 @@ def nameSearch():
 
     return buildResponse({
         'contents': contents,
-        'time': (end - start)*1000
+        'time': (end - start) * 1000
     })
 
 
@@ -138,7 +213,7 @@ def getReadableContent():
 
     return buildResponse({
         'contents': contents,
-        'time': (end - start)*1000
+        'time': (end - start) * 1000
     })
 
 
@@ -158,8 +233,9 @@ def getQuestDialogues():
 
     return buildResponse({
         'contents': contents,
-        'time': (end - start)*1000
+        'time': (end - start) * 1000
     })
+
 
 @app.route("/api/saveSettings", methods=['POST'])
 def saveSettings():
@@ -182,11 +258,16 @@ def saveSettings():
 
 
 @app.route("/api/getSettings")
-def getConfig():
+def getConfigApi():
     return buildResponse(controllers.getConfig())
 
 
-staticDir = r"../webui/dist/"
+# ----------------------------
+# Static frontend (webui/dist)
+# ----------------------------
+
+# 关键：发行版里用 resource_path 才能稳定找到 dist
+staticDir = resource_path("webui/dist")
 
 
 @app.route('/')
@@ -196,13 +277,13 @@ def serveRoot():
 
 @app.route("/<path:path>")
 def serveStatic(path):
-    filePath = staticDir + path
+    filePath = os.path.join(staticDir, path)
     if os.path.exists(filePath):
         return send_from_directory(staticDir, path)
     else:
         return send_from_directory(staticDir, 'index.html')
 
 
-# Run the server if this script is executed directly
 if __name__ == "__main__":
-    app.run(debug=False, host='0.0.0.0')
+    # 桌面发行版建议只监听本机
+    app.run(debug=False, host='127.0.0.1', port=5000)
