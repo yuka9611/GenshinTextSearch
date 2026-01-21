@@ -4,7 +4,7 @@
 
 以下教程假设您未对`DBConfig.py`做出改动，该文件可以定制目录等内容，如果您对其进行修改，则请自行调整下文中的目录。
 
-1. 前往[https://gitlab.com/Dimbreath/AnimeGameData/-/tree/main/TextMap](https://gitlab.com/Dimbreath/AnimeGameData/-/tree/main/TextMap)下载您需要的语言的json文件，点击所需的文件进入预览页面，然后点击右边的下载图标即可。
+1. 前往[https://gitlab.com/Dimbreath/AnimeGameData/-/tree/master/TextMap](https://gitlab.com/Dimbreath/AnimeGameData/-/tree/master/TextMap)下载您需要的语言的json文件，点击所需的文件进入预览页面，然后点击右边的下载图标即可。
     
     语音文件名与语言的对应关系如下：
 

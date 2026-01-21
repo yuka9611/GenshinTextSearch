@@ -100,6 +100,67 @@ def getSubtitleContext():
         'time': (end - start)*1000
     })
 
+
+@app.route("/api/nameSearch", methods=['POST'])
+def nameSearch():
+    langCode = int(request.json['langCode'])
+    keyword: str = request.json['keyword']
+
+    if keyword.strip() == "":
+        return buildResponse({
+            "quests": [],
+            "readables": []
+        })
+
+    start = time.time()
+    contents = controllers.searchNameEntries(keyword, langCode)
+    end = time.time()
+
+    return buildResponse({
+        'contents': contents,
+        'time': (end - start)*1000
+    })
+
+
+@app.route("/api/getReadableContent", methods=['POST'])
+def getReadableContent():
+    readableId = request.json.get('readableId')
+    fileName = request.json.get('fileName')
+    searchLang = request.json.get('searchLang')
+    if searchLang:
+        searchLang = int(searchLang)
+    if readableId is not None:
+        readableId = int(readableId)
+
+    start = time.time()
+    contents = controllers.getReadableContent(readableId, fileName, searchLang)
+    end = time.time()
+
+    return buildResponse({
+        'contents': contents,
+        'time': (end - start)*1000
+    })
+
+
+@app.route("/api/getQuestDialogues", methods=['POST'])
+def getQuestDialogues():
+    questId = request.json.get('questId')
+    searchLang = request.json.get('searchLang')
+    if searchLang:
+        searchLang = int(searchLang)
+    if questId is None:
+        return buildResponse(code=400, msg="questId is required")
+    questId = int(questId)
+
+    start = time.time()
+    contents = controllers.getQuestDialogues(questId, searchLang)
+    end = time.time()
+
+    return buildResponse({
+        'contents': contents,
+        'time': (end - start)*1000
+    })
+
 @app.route("/api/saveSettings", methods=['POST'])
 def saveSettings():
     newConfig = request.json['config']

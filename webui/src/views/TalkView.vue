@@ -15,15 +15,35 @@ const questName = ref("对话文本")
 const textHash = ref(0)
 const queryTime = ref("0")
 const dialogues = ref([])
+const isReadable = ref(false)
+const readableTitle = ref("")
+const readableFileName = ref("")
+const readableTranslates = ref({})
 
 let playVoiceButtonDict = {}
 let playableDialogueIdList = []
 
 const reloadPage = () => {
-    textHash.value = parseInt(route.query.textHash)
     keyword.value = route.query.keyword
     playVoiceButtonDict = {}
     playableDialogueIdList = []
+    const readableId = route.query.readableId
+    const fileName = route.query.fileName
+    const questId = route.query.questId
+    if (readableId || fileName) {
+        isReadable.value = true
+        showPlayer.value = false
+        reloadReadable()
+        return
+    }
+    if (questId) {
+        isReadable.value = false
+        showPlayer.value = false
+        reloadQuest()
+        return
+    }
+    isReadable.value = false
+    textHash.value = parseInt(route.query.textHash)
     reloadTalk()
 }
 
@@ -49,6 +69,31 @@ const reloadTalk = () => {
         questName.value = talkContents.talkQuestName
         dialogues.value = talkContents.dialogues
 
+    }).catch(err => {
+        if(!err.network) err.defaultHandler()
+    })
+}
+
+const reloadReadable = () => {
+    api.getReadableContent(route.query.readableId, route.query.fileName, route.query.searchLang).then(res => {
+        let resJson = res.json
+        queryTime.value = resJson.time.toFixed(2)
+        let readableContents = resJson.contents
+        readableTitle.value = readableContents.readableTitle || "阅读物"
+        readableFileName.value = readableContents.fileName || ""
+        readableTranslates.value = readableContents.translates || {}
+    }).catch(err => {
+        if(!err.network) err.defaultHandler()
+    })
+}
+
+const reloadQuest = () => {
+    api.getQuestDialogues(route.query.questId, route.query.searchLang).then(res => {
+        let resJson = res.json
+        queryTime.value = resJson.time.toFixed(2)
+        let talkContents = resJson.contents
+        questName.value = talkContents.talkQuestName
+        dialogues.value = talkContents.dialogues
     }).catch(err => {
         if(!err.network) err.defaultHandler()
     })
@@ -208,12 +253,21 @@ onDeactivated(() => {
 
 <template>
     <div class="viewWrapper">
-        <h1 class="pageTitle">剧情对话查询</h1>
+        <h1 class="pageTitle">{{ isReadable ? "阅读物查询" : "剧情对话查询" }}</h1>
         <div class="helpText">
-            <p>来源：{{questName}}</p>
+            <p v-if="!isReadable">来源：{{questName}}</p>
+            <p v-else>来源：{{ readableTitle }}<span v-if="readableFileName">（{{ readableFileName }}）</span></p>
             <p>查询用时： {{queryTime}} ms</p>
         </div>
-        <el-table :data="dialogues" :row-class-name="tableRowClassName">
+
+        <div v-if="isReadable" class="readableContent">
+            <div v-for="langCode in displayLanguages" :key="langCode" class="readableBlock">
+                <h3>{{ global.languages[langCode] }}</h3>
+                <StylizedText :text="readableTranslates[langCode]" :keyword="keyword" />
+            </div>
+        </div>
+
+        <el-table v-else :data="dialogues" :row-class-name="tableRowClassName">
             <el-table-column prop="talker" label="角色" width="100" />
             <template v-for="langCode in displayLanguages">
                 <el-table-column width="40">
@@ -241,7 +295,7 @@ onDeactivated(() => {
 
         </el-table>
 
-        <el-form style="margin-top: 10px;" :inline="true">
+        <el-form v-if="!isReadable" style="margin-top: 10px;" :inline="true">
             <el-form-item label="自动连续播放">
                 <el-switch v-model="autoLoop" />
             </el-form-item>
@@ -253,7 +307,7 @@ onDeactivated(() => {
 
     </div>
 
-    <div class="viewWrapper voicePlayerContainer" v-show="showPlayer">
+    <div class="viewWrapper voicePlayerContainer" v-show="showPlayer" v-if="!isReadable">
         <span class="hideIcon" @click="onHidePlayerButtonClicked">
             <el-icon>
                 <Close />
@@ -271,7 +325,7 @@ onDeactivated(() => {
         </AudioPlayer>
     </div>
 
-    <div class="showPlayerButton" @click="onShowPlayerButtonClicked" v-show="!showPlayer">
+    <div class="showPlayerButton" @click="onShowPlayerButtonClicked" v-show="!showPlayer" v-if="!isReadable">
         <i class="fi fi-sr-waveform-path"></i>
     </div>
 
@@ -304,6 +358,21 @@ onDeactivated(() => {
 .helpText {
     margin: 20px 0 20px 0;
     color: #999;
+}
+
+.readableContent {
+    display: flex;
+    flex-direction: column;
+    gap: 16px;
+}
+
+.readableBlock {
+    padding: 12px 0;
+    border-bottom: 1px solid #eee;
+}
+
+.readableBlock:last-child {
+    border-bottom: none;
 }
 
 .voicePlayerContainer {

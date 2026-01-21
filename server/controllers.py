@@ -174,6 +174,68 @@ def getTranslateObj(keyword: str, langCode: int):
     return ans
 
 
+def searchNameEntries(keyword: str, langCode: int):
+    quests = []
+    readables = []
+
+    questMatches = databaseHelper.selectQuestByTitleKeyword(keyword, langCode)
+    for questId, questTitle in questMatches:
+        chapterName = databaseHelper.getQuestChapterName(questId, langCode)
+        quests.append({
+            "questId": questId,
+            "title": questTitle,
+            "chapterName": chapterName
+        })
+
+    langMap = databaseHelper.getLangCodeMap()
+    if langCode in langMap:
+        langStr = langMap[langCode]
+        readableMatches = databaseHelper.selectReadableByTitleKeyword(keyword, langCode, langStr)
+        for fileName, readableId, titleTextMapHash, title in readableMatches:
+            readables.append({
+                "fileName": fileName,
+                "readableId": readableId,
+                "title": title,
+                "titleTextMapHash": titleTextMapHash
+            })
+
+    return {
+        "quests": quests,
+        "readables": readables
+    }
+
+
+def getQuestDialogues(questId: int, searchLang: int | None = None):
+    langs = config.getResultLanguages().copy()
+    if searchLang and searchLang not in langs:
+        langs.append(searchLang)
+    sourceLangCode = config.getSourceLanguage()
+
+    questCompleteName = databaseHelper.getQuestName(questId, sourceLangCode)
+    talkIds = databaseHelper.selectQuestTalkIds(questId)
+    dialogues = []
+
+    for talkId in talkIds:
+        rawDialogues = databaseHelper.getTalkContent(talkId, None)
+        if rawDialogues is None:
+            continue
+        for rawDialogue in rawDialogues:
+            textHash, talkerType, talkerId, dialogueId = rawDialogue
+            obj = queryTextHashInfo(textHash, langs, sourceLangCode, False)
+            obj['talker'] = databaseHelper.getTalkerName(talkerType, talkerId, sourceLangCode)
+            obj['dialogueId'] = dialogueId
+            obj['talkId'] = talkId
+            dialogues.append(obj)
+
+    dialogues.sort(key=lambda item: (item.get('talkId', 0), item.get('dialogueId', 0)))
+
+    return {
+        "talkQuestName": questCompleteName,
+        "talkId": 0,
+        "dialogues": dialogues
+    }
+
+
 # 根据hash值查询整个对话的内容
 def getTalkFromHash(textHash: int, searchLang: int | None = None):
     # 先查到文本所属的talk，然后查询对话所属的任务的标题，然后查询对话所有的内容，对于每一句话，查询多语言翻译、说话者
@@ -212,6 +274,45 @@ def getTalkFromHash(textHash: int, searchLang: int | None = None):
     }
 
     return ans
+
+
+def getReadableContent(readableId: int | None, fileName: str | None, searchLang: int | None = None):
+    langs = config.getResultLanguages().copy()
+    if searchLang and searchLang not in langs:
+        langs.append(searchLang)
+    sourceLangCode = config.getSourceLanguage()
+
+    langMap = databaseHelper.getLangCodeMap()
+    targetLangStrs = []
+    for l in langs:
+        if l in langMap:
+            targetLangStrs.append(langMap[l])
+
+    readableInfo = databaseHelper.getReadableInfo(readableId, fileName)
+    readableTitle = None
+    if readableInfo:
+        fileName, titleTextMapHash, readableId = readableInfo
+        if titleTextMapHash:
+            readableTitle = databaseHelper.getTextMapContent(titleTextMapHash, sourceLangCode)
+
+    translations = []
+    if readableId:
+        translations = databaseHelper.selectReadableFromReadableId(readableId, targetLangStrs)
+    if not translations and fileName:
+        translations = databaseHelper.selectReadableFromFileName(fileName, targetLangStrs)
+
+    strToLangId = {v: k for k, v in langMap.items()}
+    translateMap = {}
+    for transContent, transLangStr in translations:
+        if transLangStr in strToLangId:
+            translateMap[strToLangId[transLangStr]] = transContent
+
+    return {
+        "fileName": fileName,
+        "readableId": readableId,
+        "readableTitle": readableTitle,
+        "translates": translateMap
+    }
 
 def getSubtitleContext(fileName: str, subtitleId: int | None = None, searchLang: int | None = None):
     langs = config.getResultLanguages().copy()

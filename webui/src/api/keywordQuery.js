@@ -82,11 +82,36 @@ const getSubtitleContext = (fileName, subtitleId, searchLang) => {
     });
 };
 
+const searchByName = (keyword, langCode) => {
+    return request.post("/api/nameSearch", {
+        keyword: keyword,
+        langCode: langCode
+    });
+};
+
+const getReadableContent = (readableId, fileName, searchLang) => {
+    return request.post("/api/getReadableContent", {
+        readableId: readableId,
+        fileName: fileName,
+        searchLang: searchLang
+    });
+};
+
+const getQuestDialogues = (questId, searchLang) => {
+    return request.post("/api/getQuestDialogues", {
+        questId: questId,
+        searchLang: searchLang
+    });
+};
+
 
 export default {
     queryBaidu,
     queryByKeyword,
     getVoiceOver,
     getTalkFromHash,
-    getSubtitleContext
+    getSubtitleContext,
+    searchByName,
+    getReadableContent,
+    getQuestDialogues
 };
