@@ -17,12 +17,25 @@ function closedTagParser(text, startIndex) {
 
     // 先读取标签, 找到起始标签末尾
     let tagEnded = false;
+    let isSelfClosing = false;
+
     if (text[startIndex] === '<') {
         let tagNameEnded = false;
         for (let i = startIndex + 1; i < endIndex; i++) {
             if (text[i] === '>') {
                 lastIndex = i + 1;
                 tagEnded = true;
+                // Check for self-closing tag (ends with / or />)
+                // If tagValue ends with /, it's self closing.
+                // Or if we look back at text[i-1] == '/'
+                if (text[i-1] === '/') {
+                    isSelfClosing = true;
+                    if (tagNameEnded) {
+                        tagValue = tagValue.slice(0, -1); // Remove trailing /
+                    } else {
+                        tagName = tagName.slice(0, -1); // Remove trailing / from tagName if no value
+                    }
+                }
                 break;
             } else if (!tagNameEnded && text[i] === '=') {
                 tagNameEnded = true;
@@ -47,6 +60,10 @@ function closedTagParser(text, startIndex) {
     ans.tagName = tagName;
     ans.tagValue = tagValue;
 
+    if (isSelfClosing) {
+        return [ans, lastIndex - 1];
+    }
+
     // 开始扫描后续内容
     // 遇到<xxx 而不是</xxx 则说明遇到了新元素，要进行递归，把当前读到的元素写到ans里
 
@@ -65,9 +82,26 @@ function closedTagParser(text, startIndex) {
                     if (tagName === '') {
                         throw new Error("String tag should NOT have tail tag!");
                     }
-                    if (i + tagName.length + 2 > endIndex || text.substring(i + 2, i + 3 + tagName.length) !== tagName + '>') {
-                        throw new Error(`Tag head and Tail Not Match at ${i}`);
+                    // Extract closing tag name to compare
+                    let closeTagNameEnd = i + 2;
+                    while(closeTagNameEnd < endIndex && text[closeTagNameEnd] !== '>') {
+                        closeTagNameEnd++;
                     }
+                    let closeTagName = text.substring(i + 2, closeTagNameEnd);
+                    
+                    if (closeTagName !== tagName) {
+                         // Mismatch, might be nested unclosed tag or just mismatch.
+                         // For robustness, we might want to throw or handle it.
+                         // Original code:
+                         // if (i + tagName.length + 2 > endIndex || text.substring(i + 2, i + 3 + tagName.length) !== tagName + '>') {
+                         //    throw new Error(`Tag head and Tail Not Match at ${i}`);
+                         // }
+                         // Let's stick to original strict check for now but fix the logic if needed.
+                         if (i + tagName.length + 2 > endIndex || text.substring(i + 2, i + 3 + tagName.length) !== tagName + '>') {
+                             throw new Error(`Tag head and Tail Not Match at ${i}. Expected </${tagName}>`);
+                         }
+                    }
+                    
                     // 可以结束了
                     ans.children.push(text.substring(lastIndex, i));
                     return [ans, i + 2 + tagName.length];
@@ -81,7 +115,7 @@ function closedTagParser(text, startIndex) {
         ans.children.push(text.substring(lastIndex, text.length));
         return [ans, endIndex - 1];
     } else {
-        throw new Error("Tag Not Closed!");
+        throw new Error(`Tag <${tagName}> Not Closed!`);
     }
 }
 
