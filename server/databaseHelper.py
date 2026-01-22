@@ -327,6 +327,24 @@ def selectQuestByTitleKeyword(keyword: str, langCode: int):
         return cursor.fetchall()
 
 
+def selectQuestByChapterKeyword(keyword: str, langCode: int):
+    with closing(conn.cursor()) as cursor:
+        sql = (
+            "select quest.questId, questTitle.content, chapterTitle.content, chapterNum.content "
+            "from quest "
+            "join textMap as questTitle on quest.titleTextMapHash=questTitle.hash "
+            "join chapter on quest.chapterId=chapter.chapterId "
+            "left join textMap as chapterTitle on chapter.chapterTitleTextMapHash=chapterTitle.hash "
+            "and chapterTitle.lang=? "
+            "left join textMap as chapterNum on chapter.chapterNumTextMapHash=chapterNum.hash "
+            "and chapterNum.lang=? "
+            "where questTitle.lang=? and (chapterTitle.content like ? or chapterNum.content like ?) "
+            "limit 200"
+        )
+        cursor.execute(sql, (langCode, langCode, langCode, f'%{keyword}%', f'%{keyword}%'))
+        return cursor.fetchall()
+    
+    
 def getQuestChapterName(questId: int, langCode: int):
     with closing(conn.cursor()) as cursor:
         sql = "select chapterId from quest where questId=?"
