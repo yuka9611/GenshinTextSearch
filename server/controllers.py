@@ -205,14 +205,37 @@ def searchNameEntries(keyword: str, langCode: int):
     quests = []
     readables = []
 
+    def format_chapter_name(chapter_num: str | None, chapter_title: str | None):
+        if chapter_num and chapter_title:
+            return '{} · {}'.format(chapter_num, chapter_title)
+        if chapter_title:
+            return chapter_title
+        if chapter_num:
+            return chapter_num
+        return None
+
+    quest_map = {}
     questMatches = databaseHelper.selectQuestByTitleKeyword(keyword, langCode)
     for questId, questTitle in questMatches:
         chapterName = databaseHelper.getQuestChapterName(questId, langCode)
-        quests.append({
+        quest_map[questId] = {
             "questId": questId,
             "title": questTitle,
             "chapterName": chapterName
-        })
+        }
+
+    chapterMatches = databaseHelper.selectQuestByChapterKeyword(keyword, langCode)
+    for questId, questTitle, chapterTitle, chapterNum in chapterMatches:
+        if questId in quest_map:
+            continue
+        chapterName = format_chapter_name(chapterNum, chapterTitle)
+        quest_map[questId] = {
+            "questId": questId,
+            "title": questTitle,
+            "chapterName": chapterName
+        }
+
+    quests.extend(quest_map.values())
 
     langMap = databaseHelper.getLangCodeMap()
     if langCode in langMap:
