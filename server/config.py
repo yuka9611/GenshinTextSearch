@@ -22,13 +22,24 @@ DB_FILE = get_app_dir() / "data.db"
 
 
 def is_packaged() -> bool:
-    return hasattr(sys, "_MEIPASS")
+    # onedir 场景通常只有 sys.frozen，没有 _MEIPASS
+    return bool(getattr(sys, "frozen", False) or hasattr(sys, "_MEIPASS"))
 
 
 def project_root() -> Path:
     # config.py 在项目根目录时：root = config.py 所在目录
     # 如果你把 config.py 放在 server/ 里，请相应调整 parent
-    return Path(__file__).resolve().parent
+     return Path(__file__).resolve().parents[1]
+
+
+def executable_dir() -> Path:
+    """
+    打包后：exe 所在目录
+    源码：项目根目录
+    """
+    if is_packaged():
+        return Path(sys.executable).resolve().parent
+    return project_root()
 
 
 def bundled_resource_path(rel: str) -> Path:
@@ -36,8 +47,10 @@ def bundled_resource_path(rel: str) -> Path:
     打包后：资源在 sys._MEIPASS
     源码：资源在项目根目录
     """
+    if hasattr(sys, "_MEIPASS"):
+        return Path(sys._MEIPASS) / rel  # type: ignore[attr-defined]
     if is_packaged():
-        return Path(sys._MEIPASS) / rel  # type: ignore
+        return executable_dir() / rel
     return project_root() / rel
 
 
@@ -161,8 +174,26 @@ def ensure_db_exists(bundled_rel_path: str = "data.db"):
     if db_path.exists() and db_path.stat().st_size > 0:
         return
 
-    src = bundled_resource_path(bundled_rel_path)
-    if not src.exists():
+    exec_dir = executable_dir()
+    repo_root = project_root()
+    cwd = Path.cwd()
+
+    def _with_server_dir(base: Path) -> list[Path]:
+        return [
+            base / bundled_rel_path,
+            base / "server" / bundled_rel_path,
+            base / "_internal" / "server" / bundled_rel_path,
+        ]
+
+    candidates: list[Path] = []
+    candidates.extend(_with_server_dir(bundled_resource_path("")))
+    candidates.extend(_with_server_dir(exec_dir))
+    candidates.extend(_with_server_dir(exec_dir.parent))
+    candidates.extend(_with_server_dir(cwd))
+    candidates.extend(_with_server_dir(repo_root))
+
+    src = next((path for path in candidates if path.exists()), None)
+    if src is None:
         # 如果你开发时 db 还没放到项目根目录，也不强制报错
         # 但此时 databaseHelper 连接会失败，建议你确保打包时带上 data.db
         return
