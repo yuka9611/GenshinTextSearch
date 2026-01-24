@@ -24,10 +24,33 @@ def get_connection() -> sqlite3.Connection:
 conn = get_connection()
 
 
+def _escape_like(value: str) -> str:
+    return (value
+            .replace("\\", "\\\\")
+            .replace("%", r"\%")
+            .replace("_", r"\_"))
+
+
+def _build_like_patterns(keyword: str) -> tuple[str, str]:
+    escaped = _escape_like(keyword)
+    exact = f"%{escaped}%"
+
+    fuzzy_source = "".join(keyword.split())
+    fuzzy_escaped_chars = [_escape_like(ch) for ch in fuzzy_source]
+    fuzzy = "%" + "%".join(fuzzy_escaped_chars) + "%" if fuzzy_escaped_chars else exact
+    return exact, fuzzy
+
+
 def selectTextMapFromKeyword(keyWord: str, langCode: int):
     with closing(conn.cursor()) as cursor:
-        sql1 = "select hash, content from textMap where lang=? and content like ? limit 200"
-        cursor.execute(sql1, (langCode, f'%{keyWord}%'))
+        exact, fuzzy = _build_like_patterns(keyWord)
+        sql1 = (
+            "select hash, content from textMap "
+            "where lang=? and (content like ? escape '\\' or content like ? escape '\\') "
+            "order by case when content like ? escape '\\' then 0 else 1 end, length(content) "
+            "limit 200"
+        )
+        cursor.execute(sql1, (langCode, exact, fuzzy, exact))
         return cursor.fetchall()
 
 
@@ -265,8 +288,14 @@ def getLangCodeMap():
 
 def selectReadableFromKeyword(keyword: str, langStr: str):
     with closing(conn.cursor()) as cursor:
-        sql = "select fileName, content, titleTextMapHash, readableId from readable where lang=? and content like ? limit 200"
-        cursor.execute(sql, (langStr, f'%{keyword}%'))
+        exact, fuzzy = _build_like_patterns(keyword)
+        sql = (
+            "select fileName, content, titleTextMapHash, readableId from readable "
+            "where lang=? and (content like ? escape '\\' or content like ? escape '\\') "
+            "order by case when content like ? escape '\\' then 0 else 1 end, length(content) "
+            "limit 200"
+        )
+        cursor.execute(sql, (langStr, exact, fuzzy, exact))
         return cursor.fetchall()
 
 
@@ -320,15 +349,19 @@ def getTextMapContent(textHash: int, langCode: int):
 
 def selectQuestByTitleKeyword(keyword: str, langCode: int):
     with closing(conn.cursor()) as cursor:
+        exact, fuzzy = _build_like_patterns(keyword)
         sql = ("select quest.questId, textMap.content from quest "
                "join textMap on quest.titleTextMapHash=textMap.hash "
-               "where textMap.lang=? and textMap.content like ? limit 200")
-        cursor.execute(sql, (langCode, f'%{keyword}%'))
+               "where textMap.lang=? and (textMap.content like ? escape '\\' or textMap.content like ? escape '\\') "
+               "order by case when textMap.content like ? escape '\\' then 0 else 1 end, length(textMap.content) "
+               "limit 200")
+        cursor.execute(sql, (langCode, exact, fuzzy, exact))
         return cursor.fetchall()
 
 
 def selectQuestByChapterKeyword(keyword: str, langCode: int):
     with closing(conn.cursor()) as cursor:
+        exact, fuzzy = _build_like_patterns(keyword)
         sql = (
             "select quest.questId, questTitle.content, chapterTitle.content, chapterNum.content "
             "from quest "
@@ -338,10 +371,28 @@ def selectQuestByChapterKeyword(keyword: str, langCode: int):
             "and chapterTitle.lang=? "
             "left join textMap as chapterNum on chapter.chapterNumTextMapHash=chapterNum.hash "
             "and chapterNum.lang=? "
-            "where questTitle.lang=? and (chapterTitle.content like ? or chapterNum.content like ?) "
+            "where questTitle.lang=? and ("
+            "chapterTitle.content like ? escape '\\' or chapterNum.content like ? escape '\\' "
+            "or chapterTitle.content like ? escape '\\' or chapterNum.content like ? escape '\\'"
+            ") "
+            "order by case when (chapterTitle.content like ? escape '\\' or chapterNum.content like ? escape '\\') then 0 else 1 end, "
+            "length(coalesce(chapterTitle.content, chapterNum.content)) "
             "limit 200"
         )
-        cursor.execute(sql, (langCode, langCode, langCode, f'%{keyword}%', f'%{keyword}%'))
+        cursor.execute(
+            sql,
+            (
+                langCode,
+                langCode,
+                langCode,
+                exact,
+                exact,
+                fuzzy,
+                fuzzy,
+                exact,
+                exact,
+            ),
+        )
         return cursor.fetchall()
     
     
@@ -386,19 +437,28 @@ def selectQuestTalkIds(questId: int):
 
 def selectReadableByTitleKeyword(keyword: str, langCode: int, langStr: str):
     with closing(conn.cursor()) as cursor:
+        exact, fuzzy = _build_like_patterns(keyword)
         sql = ("select readable.fileName, readable.readableId, readable.titleTextMapHash, textMap.content "
                "from readable join textMap on readable.titleTextMapHash=textMap.hash "
-               "where readable.lang=? and textMap.lang=? and textMap.content like ? "
+               "where readable.lang=? and textMap.lang=? "
+               "and (textMap.content like ? escape '\\' or textMap.content like ? escape '\\') "
                "group by readable.fileName, readable.readableId, readable.titleTextMapHash, textMap.content "
+               "order by case when textMap.content like ? escape '\\' then 0 else 1 end, length(textMap.content) "
                "limit 200")
-        cursor.execute(sql, (langStr, langCode, f'%{keyword}%'))
+        cursor.execute(sql, (langStr, langCode, exact, fuzzy, exact))
         return cursor.fetchall()
 
 
 def selectSubtitleFromKeyword(keyword: str, langCode: int):
     with closing(conn.cursor()) as cursor:
-        sql = "select fileName, content, startTime, endTime, subtitleId from subtitle where lang=? and content like ? limit 200"
-        cursor.execute(sql, (langCode, f'%{keyword}%'))
+        exact, fuzzy = _build_like_patterns(keyword)
+        sql = (
+            "select fileName, content, startTime, endTime, subtitleId from subtitle "
+            "where lang=? and (content like ? escape '\\' or content like ? escape '\\') "
+            "order by case when content like ? escape '\\' then 0 else 1 end, length(content) "
+            "limit 200"
+        )
+        cursor.execute(sql, (langCode, exact, fuzzy, exact))
         return cursor.fetchall()
 
 
