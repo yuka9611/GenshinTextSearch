@@ -28,7 +28,17 @@ def is_packaged() -> bool:
 def project_root() -> Path:
     # config.py 在项目根目录时：root = config.py 所在目录
     # 如果你把 config.py 放在 server/ 里，请相应调整 parent
-    return Path(__file__).resolve().parent
+     return Path(__file__).resolve().parents[1]
+
+
+def executable_dir() -> Path:
+    """
+    打包后：exe 所在目录
+    源码：项目根目录
+    """
+    if is_packaged():
+        return Path(sys.executable).resolve().parent
+    return project_root()
 
 
 def bundled_resource_path(rel: str) -> Path:
@@ -161,8 +171,14 @@ def ensure_db_exists(bundled_rel_path: str = "data.db"):
     if db_path.exists() and db_path.stat().st_size > 0:
         return
 
-    src = bundled_resource_path(bundled_rel_path)
-    if not src.exists():
+    candidates = [
+        bundled_resource_path(bundled_rel_path),
+        executable_dir() / bundled_rel_path,
+        project_root() / bundled_rel_path,
+    ]
+
+    src = next((path for path in candidates if path.exists()), None)
+    if src is None:
         # 如果你开发时 db 还没放到项目根目录，也不强制报错
         # 但此时 databaseHelper 连接会失败，建议你确保打包时带上 data.db
         return
