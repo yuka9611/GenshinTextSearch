@@ -171,11 +171,23 @@ def ensure_db_exists(bundled_rel_path: str = "data.db"):
     if db_path.exists() and db_path.stat().st_size > 0:
         return
 
-    candidates = [
-        bundled_resource_path(bundled_rel_path),
-        executable_dir() / bundled_rel_path,
-        project_root() / bundled_rel_path,
-    ]
+    exec_dir = executable_dir()
+    repo_root = project_root()
+    cwd = Path.cwd()
+
+    def _with_server_dir(base: Path) -> list[Path]:
+        return [
+            base / bundled_rel_path,
+            base / "server" / bundled_rel_path,
+            base / "_internal" / "server" / bundled_rel_path,
+        ]
+
+    candidates: list[Path] = []
+    candidates.extend(_with_server_dir(bundled_resource_path("")))
+    candidates.extend(_with_server_dir(exec_dir))
+    candidates.extend(_with_server_dir(exec_dir.parent))
+    candidates.extend(_with_server_dir(cwd))
+    candidates.extend(_with_server_dir(repo_root))
 
     src = next((path for path in candidates if path.exists()), None)
     if src is None:
