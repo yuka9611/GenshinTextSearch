@@ -198,6 +198,27 @@ def getTranslateObj(keyword: str, langCode: int):
             
         ans.append(obj)
 
+    keyword_lower = keyword.strip().lower()
+
+    def is_exact_match(entry: dict) -> bool:
+        if not keyword_lower:
+            return False
+        target_text = entry.get('translates', {}).get(langCode)
+        if not isinstance(target_text, str):
+            return False
+        return keyword_lower in target_text.lower()
+
+    def has_voice(entry: dict) -> bool:
+        return len(entry.get('voicePaths', [])) > 0
+
+    ans.sort(
+        key=lambda entry: (
+            0 if is_exact_match(entry) else 1,
+            0 if has_voice(entry) else 1,
+            len(entry.get('translates', {}).get(langCode, "")),
+        )
+    )
+
     return ans
 
 

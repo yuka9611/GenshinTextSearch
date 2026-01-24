@@ -160,14 +160,6 @@ const onQueryButtonClicked = async () =>{
 
     // 不合并了
     queryResult.value = ans.contents;
-    // 把有语音的排在前面
-    queryResult.value.sort((a, b) => {
-      const aHasVoice = a.voicePaths && a.voicePaths.length > 0;
-      const bHasVoice = b.voicePaths && b.voicePaths.length > 0;
-      if (aHasVoice && !bHasVoice) return -1;
-      if (!aHasVoice && bHasVoice) return 1;
-      return 0;
-    });
 
     keywordLast.value = keyword.value
     searchLangLast.value = parseInt(selectedInputLanguage.value)
