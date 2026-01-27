@@ -107,7 +107,7 @@ def getTranslateObj(keyword: str, langCode: int):
     langMap = databaseHelper.getLangCodeMap()
     if langCode in langMap:
         langStr = langMap[langCode]
-        readableContents = databaseHelper.selectReadableFromKeyword(keyword, langStr)
+        readableContents = databaseHelper.selectReadableFromKeyword(keyword, langCode, langStr)
         
         targetLangStrs = []
         for l in langs:

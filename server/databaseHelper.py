@@ -31,19 +31,25 @@ def _escape_like(value: str) -> str:
             .replace("_", r"\_"))
 
 
-def _build_like_patterns(keyword: str) -> tuple[str, str]:
+CHINESE_LANG_CODES = {1, 2}
+
+
+def _build_like_patterns(keyword: str, lang_code: int) -> tuple[str, str]:
     escaped = _escape_like(keyword)
     exact = f"%{escaped}%"
 
-    fuzzy_source = "".join(keyword.split())
-    fuzzy_escaped_chars = [_escape_like(ch) for ch in fuzzy_source]
-    fuzzy = "%" + "%".join(fuzzy_escaped_chars) + "%" if fuzzy_escaped_chars else exact
+    if lang_code in CHINESE_LANG_CODES:
+        fuzzy_source = "".join(keyword.split())
+        fuzzy_escaped_chars = [_escape_like(ch) for ch in fuzzy_source]
+        fuzzy = "%" + "%".join(fuzzy_escaped_chars) + "%" if fuzzy_escaped_chars else exact
+    else:
+        fuzzy = exact
     return exact, fuzzy
 
 
 def selectTextMapFromKeyword(keyWord: str, langCode: int):
     with closing(conn.cursor()) as cursor:
-        exact, fuzzy = _build_like_patterns(keyWord)
+        exact, fuzzy = _build_like_patterns(keyWord, langCode)
         sql1 = (
             "select hash, content from textMap "
             "where lang=? and (content like ? escape '\\' or content like ? escape '\\') "
@@ -286,9 +292,9 @@ def getLangCodeMap():
         return mapping
 
 
-def selectReadableFromKeyword(keyword: str, langStr: str):
+def selectReadableFromKeyword(keyword: str, langCode: int, langStr: str):
     with closing(conn.cursor()) as cursor:
-        exact, fuzzy = _build_like_patterns(keyword)
+        exact, fuzzy = _build_like_patterns(keyword, langCode)
         sql = (
             "select fileName, content, titleTextMapHash, readableId from readable "
             "where lang=? and (content like ? escape '\\' or content like ? escape '\\') "
@@ -349,7 +355,7 @@ def getTextMapContent(textHash: int, langCode: int):
 
 def selectQuestByTitleKeyword(keyword: str, langCode: int):
     with closing(conn.cursor()) as cursor:
-        exact, fuzzy = _build_like_patterns(keyword)
+        exact, fuzzy = _build_like_patterns(keyword, langCode)
         sql = ("select quest.questId, textMap.content from quest "
                "join textMap on quest.titleTextMapHash=textMap.hash "
                "where textMap.lang=? and (textMap.content like ? escape '\\' or textMap.content like ? escape '\\') "
@@ -361,7 +367,7 @@ def selectQuestByTitleKeyword(keyword: str, langCode: int):
 
 def selectQuestByChapterKeyword(keyword: str, langCode: int):
     with closing(conn.cursor()) as cursor:
-        exact, fuzzy = _build_like_patterns(keyword)
+        exact, fuzzy = _build_like_patterns(keyword, langCode)
         sql = (
             "select quest.questId, questTitle.content, chapterTitle.content, chapterNum.content "
             "from quest "
@@ -437,7 +443,7 @@ def selectQuestTalkIds(questId: int):
 
 def selectReadableByTitleKeyword(keyword: str, langCode: int, langStr: str):
     with closing(conn.cursor()) as cursor:
-        exact, fuzzy = _build_like_patterns(keyword)
+        exact, fuzzy = _build_like_patterns(keyword, langCode)
         sql = ("select readable.fileName, readable.readableId, readable.titleTextMapHash, textMap.content "
                "from readable join textMap on readable.titleTextMapHash=textMap.hash "
                "where readable.lang=? and textMap.lang=? "
@@ -451,7 +457,7 @@ def selectReadableByTitleKeyword(keyword: str, langCode: int, langStr: str):
 
 def selectSubtitleFromKeyword(keyword: str, langCode: int):
     with closing(conn.cursor()) as cursor:
-        exact, fuzzy = _build_like_patterns(keyword)
+        exact, fuzzy = _build_like_patterns(keyword, langCode)
         sql = (
             "select fileName, content, startTime, endTime, subtitleId from subtitle "
             "where lang=? and (content like ? escape '\\' or content like ? escape '\\') "

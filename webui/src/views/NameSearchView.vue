@@ -21,7 +21,7 @@ onBeforeMount(async () => {
 
 const onSearchClicked = async () => {
     if (!keyword.value.trim()) {
-        searchSummary.value = "请输入关键词，支持模糊搜索。"
+        searchSummary.value = "请输入关键词，中文支持模糊搜索。"
         questResults.value = []
         readableResults.value = []
         return
