@@ -107,6 +107,11 @@ const myDomElementIterate = (myDomElement, lineHtmlElements, containerStack, cur
 
                 }
 
+                if(line.trim().length === 0) {
+                    container.append(document.createElement('br'))
+                    continue
+                }
+
                 // 高亮搜索关键字
                 if(props.keyword){
                     let indices = getAllOccurrences(line.toLowerCase(), loweredKeyword.value);
