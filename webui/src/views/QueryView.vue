@@ -10,7 +10,7 @@
         <el-input
             v-model="keyword"
             style="max-width: 600px;"
-            placeholder="请输入关键词，支持模糊搜索"
+            placeholder="请输入关键词，中文支持模糊搜索"
             class="input-with-select"
             @keyup.enter.native="onQueryButtonClicked"
             clearable
