@@ -7,7 +7,8 @@ import {onActivated, onDeactivated, reactive, ref, watch, computed} from "vue";
 import PlayVoiceButton from "@/components/PlayVoiceButton.vue";
 import StylizedText from "@/components/StylizedText.vue";
 import AudioPlayer from "@liripeng/vue-audio-player";
-import {Close, VideoPlay} from "@element-plus/icons-vue";
+import {Close, CopyDocument, VideoPlay} from "@element-plus/icons-vue";
+import {ElMessage} from "element-plus";
 
 const route = useRoute()
 const keyword = ref("")
@@ -97,6 +98,51 @@ const reloadQuest = () => {
     }).catch(err => {
         if(!err.network) err.defaultHandler()
     })
+}
+
+const normalizeReadableText = (text) => {
+    if (!text) return ""
+    const normalized = text.replace(/\\n/g, "\n")
+    const lines = normalized.split(/\r?\n/).map(line => line.trimEnd())
+    let start = 0
+    let end = lines.length
+    while (start < end && lines[start].trim() === "") {
+        start += 1
+    }
+    while (end > start && lines[end - 1].trim() === "") {
+        end -= 1
+    }
+    return lines.slice(start, end).join("\n")
+}
+
+const copyReadableContent = async (langCode) => {
+    const rawText = readableTranslates.value?.[langCode] || ""
+    const text = normalizeReadableText(rawText)
+    if (!text) {
+        ElMessage.warning("没有可复制的文本")
+        return
+    }
+    try {
+        if (navigator.clipboard?.writeText) {
+            await navigator.clipboard.writeText(text)
+            ElMessage.success("已复制")
+            return
+        }
+
+        const textarea = document.createElement('textarea')
+        textarea.value = text
+        textarea.setAttribute('readonly', '')
+        textarea.style.position = 'absolute'
+        textarea.style.left = '-9999px'
+        document.body.appendChild(textarea)
+        textarea.select()
+        document.execCommand('copy')
+        document.body.removeChild(textarea)
+        ElMessage.success("已复制")
+    } catch (error) {
+        console.error(error)
+        ElMessage.error("复制失败，请手动选择文本")
+    }
 }
 
 const displayLanguages = computed(() => {
@@ -290,7 +336,17 @@ onDeactivated(() => {
 
         <div v-if="isReadable" class="readableContent">
             <div v-for="langCode in displayLanguages" :key="langCode" class="readableBlock">
-                <h3>{{ global.languages[langCode] }}</h3>
+                <div class="readableHeader">
+                    <h3>{{ global.languages[langCode] }}</h3>
+                    <el-button
+                        size="small"
+                        class="copyReadableButton"
+                        :icon="CopyDocument"
+                        @click="copyReadableContent(langCode)"
+                    >
+                        复制
+                    </el-button>
+                </div>
                 <StylizedText :text="readableTranslates[langCode]" :keyword="keyword" />
             </div>
         </div>
@@ -401,6 +457,17 @@ onDeactivated(() => {
 .readableBlock {
     padding: 12px 0;
     border-bottom: 1px solid #eee;
+}
+
+.readableHeader {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+}
+
+.copyReadableButton {
+    flex-shrink: 0;
 }
 
 .readableBlock:last-child {
