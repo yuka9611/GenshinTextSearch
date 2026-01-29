@@ -7,30 +7,38 @@
         </div>
 
 
-        <el-input
-            v-model="keyword"
-            style="max-width: 600px;"
-            placeholder="请输入关键词，中文支持模糊搜索"
-            class="input-with-select"
-            @keyup.enter.native="onQueryButtonClicked"
-            clearable
-        >
-            <template #prepend>
-                <el-select v-model="selectedInputLanguage" placeholder="Select" class="languageSelector" >
-                    <el-option v-for="(v,k) in supportedInputLanguage" :label="v" :value="k" :key="k"/>
-                </el-select>
-            </template>
-            <template #append>
-                <el-button :icon="Search" @click="onQueryButtonClicked"/>
-            </template>
-        </el-input>
-        <span class="searchSummary">
-            {{ searchSummary }}
-        </span>
-
+        <div class="searchBar">
+            <el-input
+                v-model="keyword"
+                style="max-width: 600px;"
+                placeholder="请输入关键词，中文支持模糊搜索"
+                class="input-with-select"
+                @keyup.enter.native="onQueryButtonClicked"
+                clearable
+            >
+                <template #prepend>
+                    <el-select v-model="selectedInputLanguage" placeholder="Select" class="languageSelector" >
+                        <el-option v-for="(v,k) in supportedInputLanguage" :label="v" :value="k" :key="k"/>
+                    </el-select>
+                </template>
+                <template #append>
+                    <el-button :icon="Search" @click="onQueryButtonClicked"/>
+                </template>
+            </el-input>
+            <span class="searchSummary">
+                {{ searchSummary }}
+            </span>
+        </div>
+        <div class="searchSpacer"></div>
 
         <div>
-            <TranslateDisplay v-for="translate in queryResult" :translate-obj="translate" class="translate" @onVoicePlay="onVoicePlay" :keyword="keywordLast" :search-lang="searchLangLast" />
+            <TranslateDisplay v-for="translate in visibleResults" :translate-obj="translate" class="translate" @onVoicePlay="onVoicePlay" :keyword="keywordLast" :search-lang="searchLangLast" />
+        </div>
+
+        <div class="resultControls" v-if="queryResult.length > 0">
+            <span class="resultCount">已显示 {{ Math.min(renderLimit, queryResult.length) }} / {{ queryResult.length }}</span>
+            <el-button v-if="hasMoreResults" size="small" @click="showMoreResults">显示更多</el-button>
+            <el-button v-if="hasMoreResults" size="small" @click="showAllResults">显示全部</el-button>
         </div>
     </div>
 
@@ -61,7 +69,7 @@
 </template>
 
 <script setup>
-import {onBeforeMount, ref} from 'vue';
+import {onBeforeMount, ref, computed} from 'vue';
 import {Close, Delete, Download, Plus, ZoomIn} from '@element-plus/icons-vue';
 import { Search } from '@element-plus/icons-vue'
 import global from "@/global/global"
@@ -80,6 +88,10 @@ const keywordLast = ref("")
 const searchLangLast = ref(0)
 const supportedInputLanguage = ref({})
 const searchSummary = ref("")
+const renderStep = 50
+const renderLimit = ref(renderStep)
+const visibleResults = computed(() => queryResult.value.slice(0, renderLimit.value))
+const hasMoreResults = computed(() => queryResult.value.length > renderLimit.value)
 
 onBeforeMount(async ()=>{
     supportedInputLanguage.value = global.languages
@@ -160,6 +172,7 @@ const onQueryButtonClicked = async () =>{
 
     // 不合并了
     queryResult.value = ans.contents;
+    renderLimit.value = Math.min(renderStep, queryResult.value.length)
 
     keywordLast.value = keyword.value
     searchLangLast.value = parseInt(selectedInputLanguage.value)
@@ -186,6 +199,14 @@ const onHidePlayerButtonClicked = () => {
 
 const onShowPlayerButtonClicked = () => {
     showPlayer.value = true
+}
+
+const showMoreResults = () => {
+    renderLimit.value = Math.min(renderLimit.value + renderStep, queryResult.value.length)
+}
+
+const showAllResults = () => {
+    renderLimit.value = queryResult.value.length
 }
 
 const onVoicePlay = (voiceUrl) => {
@@ -218,12 +239,13 @@ const onVoicePlay = (voiceUrl) => {
 <style scoped>
 .viewWrapper{
     position: relative;
-    width: 85%;
+    width: var(--page-width);
     margin: 0 auto;
     background-color: #fff;
-    box-shadow: 0 3px 3px rgba(36,37,38,.05);
-    border-radius: 3px;
-    padding: 20px;
+    box-shadow: var(--page-shadow);
+    border-radius: var(--page-radius);
+    padding: var(--page-padding-compact);
+    overflow: visible;
 }
 
 .languageSelector{
@@ -242,6 +264,8 @@ const onVoicePlay = (voiceUrl) => {
     bottom: 0;
     position: sticky !important;
     box-shadow: 0 0 5px 5px rgba(36,37,38,.05);
+    z-index: 3;
+    background-color: #fff;
 }
 
 .showPlayerButton{
@@ -258,6 +282,7 @@ const onVoicePlay = (voiceUrl) => {
     text-align: center;
     line-height: 75px;
     cursor: pointer;
+    z-index: 3;
 }
 
 .showPlayerButton:hover{
@@ -281,8 +306,17 @@ const onVoicePlay = (voiceUrl) => {
 }
 
 .helpText {
-    margin: 20px 0 20px 0;
+    margin: 8px 0 12px;
     color: #999;
+}
+
+.searchBar {
+    position: sticky;
+    top: 0;
+    z-index: 3;
+    background-color: #fff;
+    padding-bottom: 8px;
+    box-sizing: border-box;
 }
 
 .searchSummary{
@@ -290,5 +324,59 @@ const onVoicePlay = (voiceUrl) => {
     color: var(--el-input-text-color, var(--el-text-color-regular));
     font-size: 14px;
 }
+.searchSpacer {
+    display: none;
+}
+
+.resultControls {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin: 6px 0 12px;
+    color: #666;
+    font-size: 13px;
+}
+
+.resultCount {
+    margin-right: 4px;
+}
+
+@media (max-width: 720px) {
+    .searchSummary {
+        display: block;
+        margin-left: 0;
+        margin-top: 8px;
+    }
+
+    .searchSpacer {
+        display: none;
+        height: 0;
+    }
+
+    .voicePlayerContainer {
+        position: fixed !important;
+        left: 8px;
+        right: 8px;
+        bottom: 0;
+        width: auto;
+        margin-top: 0;
+        border-radius: 0;
+        z-index: 3;
+        box-sizing: border-box;
+        box-shadow: none;
+    }
+
+    .showPlayerButton {
+        position: fixed;
+        right: 16px;
+        bottom: 24px;
+        width: 56px;
+        height: 56px;
+        line-height: 60px;
+        z-index: 3;
+        box-shadow: none;
+    }
+}
 
 </style>
+

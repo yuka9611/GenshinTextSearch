@@ -234,12 +234,12 @@ const save = async () => {
 <style>
 .viewWrapper {
   position: relative;
-  width: 85%;
+  width: var(--page-width);
   margin: 0 auto;
   background-color: #fff;
-  box-shadow: 0 3px 3px rgba(36, 37, 38, 0.05);
-  border-radius: 3px;
-  padding: 20px;
+  box-shadow: var(--page-shadow);
+  border-radius: var(--page-radius);
+  padding: var(--page-padding);
 }
 
 .pageTitle {
@@ -308,5 +308,12 @@ const save = async () => {
 
 .langPackTag {
   margin-right: 0 !important;
+}
+
+@media (max-width: 720px) {
+  .voiceTop {
+    flex-direction: column;
+    align-items: flex-start;
+  }
 }
 </style>

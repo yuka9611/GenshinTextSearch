@@ -70,26 +70,30 @@ const gotoReadable = (entry) => {
             <p>搜索结果可跳转到剧情文本查询页面查看对应内容。</p>
         </div>
 
-        <el-input
-            v-model="keyword"
-            style="max-width: 600px;"
-            placeholder="请输入关键词"
-            class="input-with-select"
-            @keyup.enter.native="onSearchClicked"
-            clearable
-        >
-            <template #prepend>
-                <el-select v-model="selectedInputLanguage" placeholder="Select" class="languageSelector">
-                    <el-option v-for="(v, k) in supportedInputLanguage" :label="v" :value="k" :key="k" />
-                </el-select>
-            </template>
-            <template #append>
-                <el-button :icon="Search" @click="onSearchClicked" />
-            </template>
-        </el-input>
-        <span class="searchSummary">
-            {{ searchSummary }}
-        </span>
+        <div class="searchBar">
+            <el-input
+                v-model="keyword"
+                style="max-width: 600px;"
+                placeholder="请输入关键词，中文支持模糊搜索"
+                class="input-with-select"
+                @keyup.enter.native="onSearchClicked"
+                clearable
+            >
+                <template #prepend>
+                    <el-select v-model="selectedInputLanguage" placeholder="Select" class="languageSelector">
+                        <el-option v-for="(v, k) in supportedInputLanguage" :label="v" :value="k" :key="k" />
+                    </el-select>
+                </template>
+                <template #append>
+                    <el-button :icon="Search" @click="onSearchClicked" />
+                </template>
+            </el-input>
+            <span class="searchSummary">
+                {{ searchSummary }}
+            </span>
+        </div>
+
+        <div class="searchSpacer"></div>
 
         <div class="resultSection">
             <h2>任务名称</h2>
@@ -125,12 +129,13 @@ const gotoReadable = (entry) => {
 <style scoped>
 .viewWrapper {
     position: relative;
-    width: 85%;
+    width: var(--page-width);
     margin: 0 auto;
     background-color: #fff;
-    box-shadow: 0 3px 3px rgba(36, 37, 38, .05);
-    border-radius: 3px;
-    padding: 20px;
+    box-shadow: var(--page-shadow);
+    border-radius: var(--page-radius);
+    padding: var(--page-padding);
+    overflow: visible;
 }
 
 .pageTitle {
@@ -141,6 +146,15 @@ const gotoReadable = (entry) => {
 .helpText {
     margin: 20px 0;
     color: #999;
+}
+
+.searchBar {
+    position: sticky;
+    top: 0;
+    z-index: 3;
+    background-color: #fff;
+    padding-bottom: 8px;
+    box-sizing: border-box;
 }
 
 .languageSelector {
@@ -155,6 +169,10 @@ const gotoReadable = (entry) => {
     margin-left: 10px;
     color: var(--el-input-text-color, var(--el-text-color-regular));
     font-size: 14px;
+}
+
+.searchSpacer {
+    display: none;
 }
 
 .resultSection {
@@ -184,5 +202,18 @@ const gotoReadable = (entry) => {
 .cardMeta {
     color: #888;
     font-size: 13px;
+}
+
+@media (max-width: 720px) {
+    .searchSummary {
+        display: block;
+        margin-left: 0;
+        margin-top: 8px;
+    }
+
+    .searchSpacer {
+        display: none;
+        height: 0;
+    }
 }
 </style>

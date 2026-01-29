@@ -7,6 +7,74 @@
 
 body{
     overflow-y: hidden;
+    overflow-x: hidden;
+}
+
+:root {
+    --scrollbar-width: calc(100vw - 100%);
+    --page-width: 85%;
+    --page-padding: 20px;
+    --page-padding-compact: 12px 20px 20px;
+    --page-radius: 3px;
+    --page-shadow: 0 3px 3px rgba(36,37,38,.05);
+    --header-padding-x: 20px;
+    --sidebar-width: 200px;
+    --sidebar-min-width: 200px;
+    --sidebar-max-width: 200px;
+    --user-info-padding: 10px 20px;
+    --content-direction: row;
+    --content-width: auto;
+    --content-scroll: auto;
+    --content-scrollbar-padding: 0px;
+    --sidebar-display: block;
+    --sidebar-align-items: stretch;
+    --sidebar-wrap: nowrap;
+    --sidebar-align-self: flex-start;
+    --sidebar-border: none;
+    --sidebar-gap: 0;
+    --sidebarmenu-display: block;
+    --sidebarmenu-direction: column;
+    --sidebarmenu-wrap: nowrap;
+    --sidebarmenu-padding: 0;
+    --sidebarmenu-gap: 0;
+    --sidebarmenu-max-width: none;
+    --user-info-border: 1px solid #eee;
+    --sidebarmenu-item-padding: 0 20px;
+    --sidebarmenu-icon-margin: 10px;
+}
+
+@media (max-width: 720px) {
+    :root {
+        --page-width: 100%;
+        --page-padding: 16px;
+        --page-padding-compact: 16px;
+        --page-radius: 0;
+        --page-shadow: none;
+        --header-padding-x: 16px;
+        --sidebar-width: 100%;
+        --sidebar-min-width: 0;
+        --sidebar-max-width: none;
+        --user-info-padding: 10px 12px;
+        --content-direction: column;
+        --content-width: 100%;
+        --content-scroll: touch;
+        --content-scrollbar-padding: calc(var(--scrollbar-width, 0px) + 8px);
+        --sidebar-display: flex;
+        --sidebar-align-items: center;
+        --sidebar-wrap: wrap;
+        --sidebar-align-self: stretch;
+        --sidebar-border: 1px solid #eee;
+        --sidebar-gap: 6px 10px;
+        --sidebarmenu-display: flex;
+        --sidebarmenu-direction: row;
+        --sidebarmenu-wrap: wrap;
+        --sidebarmenu-padding: 4px 8px;
+        --sidebarmenu-gap: 4px 8px;
+        --sidebarmenu-max-width: 100%;
+        --user-info-border: none;
+        --sidebarmenu-item-padding: 0 12px;
+        --sidebarmenu-icon-margin: 10px;
+    }
 }
 i.centerIcon{
     line-height: 1em;

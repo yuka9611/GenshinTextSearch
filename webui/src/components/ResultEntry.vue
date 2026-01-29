@@ -26,20 +26,27 @@ const onVoicePlay = (voiceUrl) => {
     emit('onVoicePlay', voiceUrl)
 }
 
+const normalizeCopyText = (text) => {
+    if (!text) return ""
+    const normalized = text.replace(/\\n/g, "\n")
+    return normalized.replace(/\r\n/g, "\n").replace(/\r/g, "\n")
+}
+
 const copyToClipboard = async (text) => {
-    if (!text) {
+    const sanitizedText = normalizeCopyText(text)
+    if (!sanitizedText) {
         ElMessage.warning("没有可复制的文本")
         return
     }
     try {
         if (navigator.clipboard?.writeText) {
-            await navigator.clipboard.writeText(text)
+            await navigator.clipboard.writeText(sanitizedText)
             ElMessage.success("已复制")
             return
         }
 
         const textarea = document.createElement('textarea')
-        textarea.value = text
+        textarea.value = sanitizedText
         textarea.setAttribute('readonly', '')
         textarea.style.position = 'absolute'
         textarea.style.left = '-9999px'
