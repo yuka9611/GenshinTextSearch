@@ -90,7 +90,6 @@ onMounted(async () => {
     loaded.value = true
 })
 
-
 watch(router.currentRoute, () => {
     contentDom.scrollTo({ left: 0, top: 0 })
 })
@@ -149,20 +148,21 @@ watch(router.currentRoute, () => {
     background-color: var(--el-color-primary);
     display: flex;
     justify-content: space-between;
+    align-items: center;
     max-height: 50px;
-    flex: 1;
+    flex: 0 0 auto;
 }
 
 .headerHolder>div {
     display: flex;
     align-items: center;
-    margin: 0 20px;
+    margin: 0 var(--header-padding-x);
 }
 
 .pageWrapper {
     height: 100vh;
     width: 100%;
-    min-width: 1200px;
+    min-width: 0;
     max-height: 100vh;
     box-sizing: border-box;
     display: flex;
@@ -192,40 +192,80 @@ watch(router.currentRoute, () => {
 .contentHolder {
     display: flex;
     justify-items: stretch;
-    flex: 3;
+    flex-direction: var(--content-direction);
+    flex: 1 1 auto;
     overflow: hidden;
+    min-width: 0;
+    min-height: 0;
 
 }
 
 
 .content {
     overflow-y: auto;
+    overflow-x: hidden;
     background-color: var(--el-color-primary-light-9);
     flex: 1;
+    min-height: 0;
+    width: var(--content-width);
+    -webkit-overflow-scrolling: var(--content-scroll);
+    scrollbar-gutter: stable;
+    padding-right: var(--content-scrollbar-padding);
+}
+
+.content.dialogueContent {
+    overflow-x: auto;
 }
 
 .sideBar {
-    width: 230px;
-    min-width: 230px;
-    max-width: 230px;
-    flex: 3;
+    width: var(--sidebar-width);
+    min-width: var(--sidebar-min-width);
+    max-width: var(--sidebar-max-width);
+    flex: 0 0 auto;
+    align-self: var(--sidebar-align-self);
+    display: var(--sidebar-display);
+    align-items: var(--sidebar-align-items);
+    flex-wrap: var(--sidebar-wrap);
+    border-bottom: var(--sidebar-border);
+    gap: var(--sidebar-gap);
 }
 
 .sideBar .sideBarMenu {
     border-right: none;
+    display: var(--sidebarmenu-display);
+    flex-direction: var(--sidebarmenu-direction);
+    flex-wrap: var(--sidebarmenu-wrap);
+    max-width: var(--sidebarmenu-max-width);
+    padding: var(--sidebarmenu-padding);
+    gap: var(--sidebarmenu-gap);
+}
+
+:deep(.sideBarMenu .el-menu-item),
+:deep(.sideBarMenu .el-sub-menu__title) {
+    padding: var(--sidebarmenu-item-padding);
 }
 
 .sideBar .sideBarMenu i {
-    margin-right: 10px;
+    margin-right: var(--sidebarmenu-icon-margin);
     font-size: 1.1em;
 }
 
 .userInfoWrapper {
-    padding: 10px 20px;
-    border-bottom: 1px #eee solid;
+    padding: var(--user-info-padding);
+    border-bottom: var(--user-info-border);
 }
 
 .leftTitle {
     color: #fff;
+}
+
+@media (max-width: 720px) {
+    :deep(.sideBarMenu .el-sub-menu) {
+        flex: 0 0 auto;
+    }
+
+    .userInfoWrapper {
+        flex: 0 0 auto;
+    }
 }
 </style>

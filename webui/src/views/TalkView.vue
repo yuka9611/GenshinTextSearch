@@ -24,6 +24,16 @@ const readableTranslates = ref({})
 let playVoiceButtonDict = {}
 let playableDialogueIdList = []
 
+const updateContentScrollClass = () => {
+    const content = document.querySelector(".content")
+    if (!content) return
+    if (isReadable.value) {
+        content.classList.remove("dialogueContent")
+    } else {
+        content.classList.add("dialogueContent")
+    }
+}
+
 const reloadPage = () => {
     keyword.value = route.query.keyword
     playVoiceButtonDict = {}
@@ -34,17 +44,20 @@ const reloadPage = () => {
     if (readableId || fileName) {
         isReadable.value = true
         showPlayer.value = false
+        updateContentScrollClass()
         reloadReadable()
         return
     }
     if (questId) {
         isReadable.value = false
         showPlayer.value = false
+        updateContentScrollClass()
         reloadQuest()
         return
     }
     isReadable.value = false
     textHash.value = parseInt(route.query.textHash)
+    updateContentScrollClass()
     reloadTalk()
 }
 
@@ -100,24 +113,15 @@ const reloadQuest = () => {
     })
 }
 
-const normalizeReadableText = (text) => {
+const normalizeCopyText = (text) => {
     if (!text) return ""
     const normalized = text.replace(/\\n/g, "\n")
-    const lines = normalized.split(/\r?\n/).map(line => line.trimEnd())
-    let start = 0
-    let end = lines.length
-    while (start < end && lines[start].trim() === "") {
-        start += 1
-    }
-    while (end > start && lines[end - 1].trim() === "") {
-        end -= 1
-    }
-    return lines.slice(start, end).join("\n")
+    return normalized.replace(/\r\n/g, "\n").replace(/\r/g, "\n")
 }
 
 const copyReadableContent = async (langCode) => {
     const rawText = readableTranslates.value?.[langCode] || ""
-    const text = normalizeReadableText(rawText)
+    const text = normalizeCopyText(rawText)
     if (!text) {
         ElMessage.warning("没有可复制的文本")
         return
@@ -142,6 +146,35 @@ const copyReadableContent = async (langCode) => {
     } catch (error) {
         console.error(error)
         ElMessage.error("复制失败，请手动选择文本")
+    }
+}
+
+const copyDialogueText = async (text) => {
+    const normalized = normalizeCopyText(text)
+    if (!normalized) {
+        ElMessage.warning("豐｡譛牙庄螟榊宛逧・枚譛ｬ")
+        return
+    }
+    try {
+        if (navigator.clipboard?.writeText) {
+            await navigator.clipboard.writeText(normalized)
+            ElMessage.success("蟾ｲ螟榊宛")
+            return
+        }
+
+        const textarea = document.createElement('textarea')
+        textarea.value = normalized
+        textarea.setAttribute('readonly', '')
+        textarea.style.position = 'absolute'
+        textarea.style.left = '-9999px'
+        document.body.appendChild(textarea)
+        textarea.select()
+        document.execCommand('copy')
+        document.body.removeChild(textarea)
+        ElMessage.success("蟾ｲ螟榊宛")
+    } catch (error) {
+        console.error(error)
+        ElMessage.error("螟榊宛螟ｱ雍･・瑚ｯｷ謇句勘騾画叫譁・悽")
     }
 }
 
@@ -321,12 +354,14 @@ onActivated(() => {
 
 onDeactivated(() => {
     voicePlayer.value && voicePlayer.value.pause()
+    const content = document.querySelector(".content")
+    content && content.classList.remove("dialogueContent")
 })
 
 </script>
 
 <template>
-    <div class="viewWrapper">
+    <div class="viewWrapper" :class="{dialogueView: !isReadable}">
         <h1 class="pageTitle">{{ isReadable ? "阅读物查询" : "剧情对话查询" }}</h1>
         <div class="helpText">
             <p v-if="!isReadable">来源：{{questName}}</p>
@@ -351,7 +386,8 @@ onDeactivated(() => {
             </div>
         </div>
 
-        <div v-else class="dialogueGroups">
+        <div v-else class="dialogueScroll">
+            <div class="dialogueGroups">
             <div v-for="group in dialogueGroups" :key="group.talkId || 'single'" class="dialogueGroup">
                 <h3 v-if="group.talkId" class="dialogueGroupTitle">Talk ID: {{ group.talkId }}</h3>
                 <el-table :data="group.rows" :row-class-name="tableRowClassName">
@@ -375,12 +411,22 @@ onDeactivated(() => {
                         </el-table-column>
                         <el-table-column :label="global.languages[langCode]" >
                             <template #default="scope">
-                                <StylizedText :text="scope.row.translates[langCode]" :keyword="keyword"/>
+                                <div class="dialogueCell">
+                                    <StylizedText :text="scope.row.translates[langCode]" :keyword="keyword"/>
+                                    <el-button
+                                        class="copyDialogueButton"
+                                        :icon="CopyDocument"
+                                        circle
+                                        size="small"
+                                        @click="copyDialogueText(scope.row.translates[langCode])"
+                                    />
+                                </div>
                             </template>
                         </el-table-column>
                     </template>
                 </el-table>
             </div>
+        </div>
         </div>
 
         <el-form v-if="!isReadable" style="margin-top: 10px;" :inline="true">
@@ -480,6 +526,26 @@ onDeactivated(() => {
     gap: 16px;
 }
 
+.dialogueScroll {
+    overflow-x: visible;
+    width: 100%;
+}
+
+.dialogueView {
+    min-width: 1000px;
+}
+
+.dialogueCell {
+    display: flex;
+    align-items: flex-start;
+    gap: 8px;
+}
+
+.copyDialogueButton {
+    margin-top: 2px;
+    flex-shrink: 0;
+}
+
 .dialogueGroupTitle {
     margin: 8px 0;
     font-weight: 600;
@@ -529,5 +595,14 @@ onDeactivated(() => {
     background-color: var(--el-color-primary-light-9);
 }
 
+@media (max-width: 720px) {
+    .showPlayerButton {
+        right: 16px;
+        bottom: 24px;
+        width: 56px;
+        height: 56px;
+        line-height: 60px;
+    }
+}
 
 </style>
