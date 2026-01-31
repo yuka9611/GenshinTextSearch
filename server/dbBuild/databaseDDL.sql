@@ -62,6 +62,29 @@ create index fetters_voiceFileTextTextMapHash_index
 create index fetters_voiceFile_index
     on fetters (voiceFile);
 
+create table fetterStory
+(
+    id                       integer
+        constraint fetterStory_pk
+            primary key autoincrement,
+    fetterId                 integer,
+    avatarId                 integer,
+    storyTitleTextMapHash    integer,
+    storyTitle2TextMapHash   integer,
+    storyTitleLockedTextMapHash integer,
+    storyContextTextMapHash  integer,
+    storyContext2TextMapHash integer
+);
+
+create index fetterStory_avatarId_index
+    on fetterStory (avatarId);
+
+create index fetterStory_fetterId_index
+    on fetterStory (fetterId);
+
+create index fetterStory_storyContextTextMapHash_index
+    on fetterStory (storyContextTextMapHash);
+
 create table langCode
 (
     id          integer

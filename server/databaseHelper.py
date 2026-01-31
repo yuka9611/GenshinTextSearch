@@ -176,6 +176,25 @@ def getTalkerName(talkerType: str, talkerId: int, langCode: int = 1):
         return talkerName
 
 
+def getTalkerNameFromTextHash(textHash: int, langCode: int = 1):
+    talkInfo = getTalkInfo(textHash)
+    if talkInfo is not None:
+        _, talkerType, talkerId, _ = talkInfo
+        talkerName = getTalkerName(talkerType, talkerId, langCode)
+        if talkerName:
+            return talkerName
+
+    with closing(conn.cursor()) as cursor:
+        sql = "select avatarId from fetters where voiceFileTextTextMapHash=? limit 1"
+        cursor.execute(sql, (textHash,))
+        ans = cursor.fetchall()
+        if len(ans) > 0:
+            avatarId = ans[0][0]
+            return getCharterName(avatarId, langCode)
+
+    return None
+
+
 def getTalkQuestId(talkId: int):
     with closing(conn.cursor()) as cursor:
         sql2 = ('select quest.questId from questTalk, quest '
@@ -365,6 +384,52 @@ def selectQuestByTitleKeyword(keyword: str, langCode: int):
         return cursor.fetchall()
 
 
+def selectAvatarByNameKeyword(keyword: str, langCode: int):
+    with closing(conn.cursor()) as cursor:
+        exact, fuzzy = _build_like_patterns(keyword, langCode)
+        sql = (
+            "select avatar.avatarId, textMap.content "
+            "from avatar join textMap on avatar.nameTextMapHash=textMap.hash "
+            "where textMap.lang=? and (textMap.content like ? escape '\\' or textMap.content like ? escape '\\') "
+            "order by case when textMap.content like ? escape '\\' then 0 else 1 end, length(textMap.content) "
+            "limit 200"
+        )
+        cursor.execute(sql, (langCode, exact, fuzzy, exact))
+        return cursor.fetchall()
+
+
+def selectAvatarVoiceItems(avatarId: int, limit: int = 400):
+    with closing(conn.cursor()) as cursor:
+        sql = (
+            "select fetters.voiceTitleTextMapHash, fetters.voiceFileTextTextMapHash, voice.voicePath "
+            "from fetters "
+            "left join voice on voice.dialogueId = fetters.voiceFile "
+            "and (voice.avatarId = fetters.avatarId or voice.avatarId = 0) "
+            "where fetters.avatarId=? "
+            "order by fetters.fetterId "
+            "limit ?"
+        )
+        cursor.execute(sql, (avatarId, limit))
+        return cursor.fetchall()
+
+
+def selectAvatarStories(avatarId: int, limit: int = 800):
+    with closing(conn.cursor()) as cursor:
+        try:
+            sql = (
+                "select fetterId, storyTitleTextMapHash, storyTitle2TextMapHash, "
+                "storyTitleLockedTextMapHash, storyContextTextMapHash, storyContext2TextMapHash "
+                "from fetterStory "
+                "where avatarId=? "
+                "order by fetterId "
+                "limit ?"
+            )
+            cursor.execute(sql, (avatarId, limit))
+            return cursor.fetchall()
+        except sqlite3.OperationalError:
+            return []
+
+
 def selectQuestByChapterKeyword(keyword: str, langCode: int):
     with closing(conn.cursor()) as cursor:
         exact, fuzzy = _build_like_patterns(keyword, langCode)
@@ -465,6 +530,33 @@ def selectSubtitleFromKeyword(keyword: str, langCode: int):
             "limit 200"
         )
         cursor.execute(sql, (langCode, exact, fuzzy, exact))
+        return cursor.fetchall()
+
+
+def selectDialogueByTalkerKeyword(keyword: str, langCode: int):
+    with closing(conn.cursor()) as cursor:
+        exact, fuzzy = _build_like_patterns(keyword, langCode)
+        sql = (
+            "select dialogue.textHash, dialogue.talkerType, dialogue.talkerId, dialogue.dialogueId "
+            "from dialogue "
+            "join npc on dialogue.talkerType = 'TALK_ROLE_NPC' and dialogue.talkerId = npc.npcId "
+            "join textMap on npc.textHash = textMap.hash "
+            "where textMap.lang=? and (textMap.content like ? escape '\\' or textMap.content like ? escape '\\') "
+            "order by case when textMap.content like ? escape '\\' then 0 else 1 end, length(textMap.content), dialogue.dialogueId "
+            "limit 200"
+        )
+        cursor.execute(sql, (langCode, exact, fuzzy, exact))
+        return cursor.fetchall()
+
+
+def selectDialogueByTalkerType(talkerType: str, limit: int = 200):
+    with closing(conn.cursor()) as cursor:
+        sql = (
+            "select textHash, talkerType, talkerId, dialogueId "
+            "from dialogue where talkerType=? "
+            "order by dialogueId limit ?"
+        )
+        cursor.execute(sql, (talkerType, limit))
         return cursor.fetchall()
 
 

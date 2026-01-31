@@ -24,6 +24,16 @@ const router = createRouter({
                     component: () => import("@/views/NameSearchView.vue"),
                 },
                 {
+                    path: "voice-search",
+                    name: "voiceSearchView",
+                    component: () => import("@/views/VoiceSearchView.vue"),
+                },
+                {
+                    path: "story-search",
+                    name: "storySearchView",
+                    component: () => import("@/views/StorySearchView.vue"),
+                },
+                {
                     path: "talk",
                     name: "talkView",
                     component: () => import("@/views/TalkView.vue"),

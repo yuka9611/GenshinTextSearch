@@ -111,12 +111,13 @@ def create_app() -> Flask:
 
         langCode = int(request.json["langCode"])
         keyword: str = request.json["keyword"]
+        speaker = request.json.get("speaker")
 
-        if keyword.strip() == "":
+        if keyword.strip() == "" and (speaker is None or str(speaker).strip() == ""):
             return buildResponse([])
 
         start = time.time()
-        contents = controllers.getTranslateObj(keyword, langCode)
+        contents = controllers.getTranslateObj(keyword, langCode, speaker)
         end = time.time()
 
         return buildResponse({
@@ -203,6 +204,73 @@ def create_app() -> Flask:
 
         start = time.time()
         contents = controllers.searchNameEntries(keyword, langCode)
+        end = time.time()
+
+        return buildResponse({
+            "contents": contents,
+            "time": (end - start) * 1000
+        })
+
+    @app.route("/api/avatarSearch", methods=["POST"])
+    def avatarSearch():
+        import controllers
+
+        langCode = int(request.json["langCode"])
+        keyword: str = request.json["keyword"]
+
+        if keyword.strip() == "":
+            return buildResponse({
+                "avatars": []
+            })
+
+        start = time.time()
+        contents = controllers.searchAvatarEntries(keyword, langCode)
+        end = time.time()
+
+        return buildResponse({
+            "contents": contents,
+            "time": (end - start) * 1000
+        })
+
+    @app.route("/api/avatarVoice", methods=["POST"])
+    def avatarVoice():
+        import controllers
+
+        avatarId = request.json.get("avatarId")
+        searchLang = request.json.get("searchLang")
+        if searchLang:
+            searchLang = int(searchLang)
+
+        if avatarId is None:
+            return buildResponse(code=400, msg="avatarId is required")
+
+        avatarId = int(avatarId)
+
+        start = time.time()
+        contents = controllers.getAvatarVoices(avatarId, searchLang)
+        end = time.time()
+
+        return buildResponse({
+            "contents": contents,
+            "time": (end - start) * 1000
+        })
+
+    @app.route("/api/avatarStory", methods=["POST"])
+    def avatarStory():
+        import controllers
+
+        avatarId = request.json.get("avatarId")
+        searchLang = request.json.get("searchLang")
+        if searchLang:
+            searchLang = int(searchLang)
+
+        if avatarId is None:
+            return buildResponse(code=400, msg="avatarId is required")
+
+        avatarId = int(avatarId)
+
+        start = time.time()
+        contents = controllers.getAvatarStories(avatarId, searchLang)
         end = time.time()
 
         return buildResponse({

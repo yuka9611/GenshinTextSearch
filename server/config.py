@@ -5,25 +5,53 @@ from pathlib import Path
 
 
 # ----------------------------
-# App dirs (user writable)
+# Local app files (server folder)
 # ----------------------------
-
-def get_app_dir() -> Path:
-    """
-    用户目录：跨平台、可写、不会被 PyInstaller 临时目录吞掉
-    """
-    base = Path.home() / ".genshin_text_search"
-    base.mkdir(parents=True, exist_ok=True)
-    return base
-
-
-CONFIG_FILE = get_app_dir() / "config.json"
-DB_FILE = get_app_dir() / "data.db"
 
 
 def is_packaged() -> bool:
     # onedir 场景通常只有 sys.frozen，没有 _MEIPASS
     return bool(getattr(sys, "frozen", False) or hasattr(sys, "_MEIPASS"))
+
+def _resolve_server_dir() -> Path:
+    current = Path(__file__).resolve().parent
+    candidates = []
+    if current.name != "server":
+        candidates.append(current / "server")
+    if hasattr(sys, "_MEIPASS"):
+        candidates.append(Path(sys._MEIPASS) / "server")  # type: ignore[attr-defined]
+    if is_packaged():
+        exec_dir = Path(sys.executable).resolve().parent
+        candidates.extend([exec_dir / "server", exec_dir / "_internal" / "server"])
+    candidates.append(current)
+    candidates.append(current.parent / "server")
+    for candidate in candidates:
+        if candidate.is_dir():
+            return candidate
+    return current
+
+def _fallback_user_dir() -> Path:
+    base = Path.home() / ".genshin_text_search"
+    base.mkdir(parents=True, exist_ok=True)
+    return base
+
+
+def _dir_writable(path: Path) -> bool:
+    try:
+        path.mkdir(parents=True, exist_ok=True)
+        test_file = path / ".write_test"
+        with open(test_file, "w", encoding="utf-8") as fp:
+            fp.write("ok")
+        test_file.unlink(missing_ok=True)
+        return True
+    except Exception:
+        return False
+
+
+SERVER_DIR = _resolve_server_dir()
+RUNTIME_DIR = SERVER_DIR if _dir_writable(SERVER_DIR) else _fallback_user_dir()
+CONFIG_FILE = RUNTIME_DIR / "config.json"
+DB_FILE = RUNTIME_DIR / "data.db"
 
 
 def project_root() -> Path:

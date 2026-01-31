@@ -88,7 +88,72 @@ def queryTextHashInfo(textHash: int, langs: 'list[int]', sourceLangCode: int, qu
     return obj
 
 
-def getTranslateObj(keyword: str, langCode: int):
+def _normalize_text_map_content(content: str | None, lang_code: int):
+    if content is None:
+        return None
+    if content.startswith("#"):
+        return placeholderHandler.replace(content, config.getIsMale(), lang_code)[1:]
+    return content
+
+
+def _build_text_map_translates(text_hash: int | None, langs: 'list[int]'):
+    if not text_hash:
+        return None
+    translates = databaseHelper.selectTextMapFromTextHash(text_hash, langs)
+    if not translates:
+        return None
+    result = {}
+    for content, lang_code in translates:
+        result[lang_code] = _normalize_text_map_content(content, lang_code)
+    return result if result else None
+
+
+def getTranslateObj(keyword: str, langCode: int, speaker: str | None = None):
+    speaker_keyword = (speaker or "").strip()
+    keyword_trim = keyword.strip()
+
+    def normalize_speaker(value: str) -> str:
+        normalized = value.strip().lower()
+        if langCode in databaseHelper.CHINESE_LANG_CODES:
+            normalized = "".join(normalized.split())
+        return normalized
+
+    if keyword_trim == "" and speaker_keyword:
+        ans = []
+        langs = config.getResultLanguages().copy()
+        if langCode not in langs:
+            langs.append(langCode)
+        sourceLangCode = config.getSourceLanguage()
+
+        seen_hashes = set()
+        speaker_norm = normalize_speaker(speaker_keyword)
+
+        dialogue_rows = databaseHelper.selectDialogueByTalkerKeyword(speaker_keyword, langCode)
+        for textHash, talkerType, talkerId, _dialogueId in dialogue_rows:
+            if textHash in seen_hashes:
+                continue
+            seen_hashes.add(textHash)
+            obj = queryTextHashInfo(textHash, langs, sourceLangCode)
+            obj['talker'] = databaseHelper.getTalkerName(talkerType, talkerId, sourceLangCode)
+            ans.append(obj)
+
+        for talkerType in ("TALK_ROLE_PLAYER", "TALK_ROLE_MATE_AVATAR"):
+            talkerName = databaseHelper.getTalkerName(talkerType, 0, langCode)
+            if not talkerName:
+                continue
+            talker_norm = normalize_speaker(talkerName)
+            if speaker_norm not in talker_norm:
+                continue
+            talker_rows = databaseHelper.selectDialogueByTalkerType(talkerType)
+            for textHash, talkerType, talkerId, _dialogueId in talker_rows:
+                if textHash in seen_hashes:
+                    continue
+                seen_hashes.add(textHash)
+                obj = queryTextHashInfo(textHash, langs, sourceLangCode)
+                obj['talker'] = databaseHelper.getTalkerName(talkerType, talkerId, sourceLangCode)
+                ans.append(obj)
+
+        return ans[:200]
     # 找出目标语言的textMap包含keyword的文本
     ans = []
 
@@ -211,13 +276,34 @@ def getTranslateObj(keyword: str, langCode: int):
     def has_voice(entry: dict) -> bool:
         return len(entry.get('voicePaths', [])) > 0
 
-    ans.sort(
-        key=lambda entry: (
-            0 if is_exact_match(entry) else 1,
-            0 if has_voice(entry) else 1,
-            len(entry.get('translates', {}).get(langCode, "")),
+    def sort_key(entry: dict) -> tuple[int, int, int]:
+        exact = is_exact_match(entry)
+        voice = has_voice(entry)
+        target_len = len(entry.get('translates', {}).get(langCode, "") or "")
+        return (
+            0 if exact else 1,
+            0 if (not exact and voice) else 1,
+            target_len,
         )
-    )
+
+    ans.sort(key=sort_key)
+
+    if speaker_keyword:
+        speaker_norm = normalize_speaker(speaker_keyword)
+
+        filtered = []
+        for entry in ans:
+            text_hash = entry.get('hash')
+            if text_hash is None:
+                continue
+            talker_name = databaseHelper.getTalkerNameFromTextHash(text_hash, langCode)
+            entry['talker'] = talker_name
+            if not talker_name:
+                continue
+            talker_norm = normalize_speaker(talker_name)
+            if speaker_norm in talker_norm:
+                filtered.append(entry)
+        ans = filtered
 
     return ans
 
@@ -273,6 +359,143 @@ def searchNameEntries(keyword: str, langCode: int):
     return {
         "quests": quests,
         "readables": readables
+    }
+
+
+def searchAvatarEntries(keyword: str, langCode: int):
+    avatars = []
+    matches = databaseHelper.selectAvatarByNameKeyword(keyword, langCode)
+    for avatarId, avatarName in matches:
+        avatars.append({
+            "avatarId": avatarId,
+            "name": avatarName
+        })
+    return {
+        "avatars": avatars
+    }
+
+
+def getAvatarVoices(avatarId: int, searchLang: int | None = None):
+    langs = config.getResultLanguages().copy()
+    if searchLang and searchLang not in langs:
+        langs.append(searchLang)
+    sourceLangCode = config.getSourceLanguage()
+
+    avatarName = databaseHelper.getCharterName(avatarId, sourceLangCode)
+    voice_rows = databaseHelper.selectAvatarVoiceItems(avatarId)
+
+    voices = []
+    seen_hashes = set()
+
+    for titleHash, textHash, voicePath in voice_rows:
+        if textHash in seen_hashes:
+            continue
+        seen_hashes.add(textHash)
+
+        obj = queryTextHashInfo(textHash, langs, sourceLangCode)
+        obj['isTalk'] = False
+        if avatarName:
+            if titleHash:
+                title = databaseHelper.getTextMapContent(titleHash, sourceLangCode)
+                if title:
+                    obj['origin'] = f"{avatarName} · {title}"
+                    obj['voiceTitle'] = title
+                else:
+                    obj['origin'] = avatarName
+                    obj['voiceTitle'] = ""
+            else:
+                obj['origin'] = avatarName
+                obj['voiceTitle'] = ""
+        else:
+            obj['voiceTitle'] = ""
+
+        if voicePath and voicePath not in obj.get('voicePaths', []):
+            voiceExist = False
+            for lang in langs:
+                if lang in languagePackReader.langPackages and languagePackReader.checkAudioBin(voicePath, lang):
+                    voiceExist = True
+                    break
+            if voiceExist:
+                obj['voicePaths'].append(voicePath)
+
+        voices.append(obj)
+
+    return {
+        "avatarId": avatarId,
+        "avatarName": avatarName,
+        "voices": voices
+    }
+
+
+def getAvatarStories(avatarId: int, searchLang: int | None = None):
+    langs = config.getResultLanguages().copy()
+    if searchLang and searchLang not in langs:
+        langs.append(searchLang)
+    sourceLangCode = config.getSourceLanguage()
+
+    avatarName = databaseHelper.getCharterName(avatarId, sourceLangCode)
+    story_rows = databaseHelper.selectAvatarStories(avatarId)
+
+    stories = []
+
+    for (fetterId,
+         storyTitleHash,
+         storyTitle2Hash,
+         storyTitleLockedHash,
+         storyContextHash,
+         storyContext2Hash) in story_rows:
+
+        per_story_seen = set()
+        for context_hash, title_hash in (
+            (storyContextHash, storyTitleHash),
+            (storyContext2Hash, storyTitle2Hash),
+        ):
+            translates = _build_text_map_translates(context_hash, langs)
+            if not translates:
+                continue
+
+            source_text = (translates.get(sourceLangCode) or "").strip()
+            if source_text:
+                if source_text in per_story_seen:
+                    continue
+                per_story_seen.add(source_text)
+
+            title = None
+            if title_hash:
+                title = _normalize_text_map_content(
+                    databaseHelper.getTextMapContent(title_hash, sourceLangCode),
+                    sourceLangCode
+                )
+            if not title and storyTitleLockedHash:
+                title = _normalize_text_map_content(
+                    databaseHelper.getTextMapContent(storyTitleLockedHash, sourceLangCode),
+                    sourceLangCode
+                )
+
+            if avatarName and title:
+                origin = f"{avatarName} ﾂｷ {title}"
+            elif avatarName:
+                origin = avatarName
+            elif title:
+                origin = title
+            else:
+                origin = "角色故事"
+
+            stories.append({
+                "translates": translates,
+                "voicePaths": [],
+                "hash": context_hash,
+                "isTalk": False,
+                "origin": origin,
+                "storyTitle": title or "",
+                "fetterId": fetterId,
+                "avatarName": avatarName or ""
+            })
+
+    return {
+        "avatarId": avatarId,
+        "avatarName": avatarName,
+        "stories": stories
     }
 
 

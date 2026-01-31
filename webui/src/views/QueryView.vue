@@ -3,7 +3,7 @@
         <h1 class="pageTitle">关键词检索</h1>
         <div class="helpText">
             <p>使用关键词对游戏的指定语言的文本进行检索。</p>
-            <p>检索结果中，可能有对应配音的结果会被排序在前面。</p>
+            <p>检索结果以精准匹配优先；非精准匹配中，带配音的结果会更靠前。</p>
         </div>
 
 
@@ -25,6 +25,13 @@
                     <el-button :icon="Search" @click="onQueryButtonClicked"/>
                 </template>
             </el-input>
+            <el-input
+                v-model="speakerKeyword"
+                placeholder="说话人（可选）"
+                class="speakerInput"
+                @keyup.enter.native="onQueryButtonClicked"
+                clearable
+            />
             <span class="searchSummary">
                 {{ searchSummary }}
             </span>
@@ -85,6 +92,7 @@ const queryResult = ref([])
 const selectedInputLanguage = ref(global.config.defaultSearchLanguage + '')
 const keyword = ref("")
 const keywordLast = ref("")
+const speakerKeyword = ref("")
 const searchLangLast = ref(0)
 const supportedInputLanguage = ref({})
 const searchSummary = ref("")
@@ -106,7 +114,7 @@ const showPlayer = ref(false)
 let firstShowPlayer = true
 
 const onQueryButtonClicked = async () =>{
-    let ans = (await api.queryByKeyword(keyword.value, selectedInputLanguage.value)).json
+    let ans = (await api.queryByKeyword(keyword.value, selectedInputLanguage.value, speakerKeyword.value)).json
     // 停止语音播放
     voicePlayer.value.pause()
 
@@ -323,6 +331,10 @@ const onVoicePlay = (voiceUrl) => {
     margin-left: 10px;
     color: var(--el-input-text-color, var(--el-text-color-regular));
     font-size: 14px;
+}
+.speakerInput{
+    max-width: 320px;
+    margin-top: 8px;
 }
 .searchSpacer {
     display: none;
