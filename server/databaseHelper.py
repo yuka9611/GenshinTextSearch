@@ -384,6 +384,22 @@ def selectQuestByTitleKeyword(keyword: str, langCode: int):
         return cursor.fetchall()
 
 
+def selectQuestByIdContains(keyword: str, langCode: int):
+    with closing(conn.cursor()) as cursor:
+        escaped = _escape_like(keyword)
+        pattern = f"%{escaped}%"
+        sql = (
+            "select quest.questId, textMap.content "
+            "from quest "
+            "left join textMap on quest.titleTextMapHash=textMap.hash and textMap.lang=? "
+            "where cast(quest.questId as text) like ? escape '\\' "
+            "order by length(cast(quest.questId as text)) "
+            "limit 200"
+        )
+        cursor.execute(sql, (langCode, pattern))
+        return cursor.fetchall()
+
+
 def selectAvatarByNameKeyword(keyword: str, langCode: int):
     with closing(conn.cursor()) as cursor:
         exact, fuzzy = _build_like_patterns(keyword, langCode)
@@ -517,6 +533,23 @@ def selectReadableByTitleKeyword(keyword: str, langCode: int, langStr: str):
                "order by case when textMap.content like ? escape '\\' then 0 else 1 end, length(textMap.content) "
                "limit 200")
         cursor.execute(sql, (langStr, langCode, exact, fuzzy, exact))
+        return cursor.fetchall()
+
+
+def selectReadableByFileNameContains(keyword: str, langCode: int, langStr: str):
+    with closing(conn.cursor()) as cursor:
+        escaped = _escape_like(keyword)
+        pattern = f"%{escaped}%"
+        sql = (
+            "select readable.fileName, readable.readableId, readable.titleTextMapHash, textMap.content "
+            "from readable "
+            "left join textMap on readable.titleTextMapHash=textMap.hash and textMap.lang=? "
+            "where readable.lang=? and readable.fileName like ? escape '\\' "
+            "group by readable.fileName, readable.readableId, readable.titleTextMapHash, textMap.content "
+            "order by length(readable.fileName) "
+            "limit 200"
+        )
+        cursor.execute(sql, (langCode, langStr, pattern))
         return cursor.fetchall()
 
 

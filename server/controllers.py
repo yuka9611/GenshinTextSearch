@@ -1,4 +1,5 @@
 import io
+import re
 import zlib
 
 import databaseHelper
@@ -96,6 +97,23 @@ def _normalize_text_map_content(content: str | None, lang_code: int):
     return content
 
 
+_INT_PATTERN = re.compile(r"^[+-]?\d+$")
+_HEX_PATTERN = re.compile(r"^[+-]?0x[0-9a-fA-F]+$")
+
+
+def _parse_int_keyword(value: str | None) -> int | None:
+    if value is None:
+        return None
+    text = value.strip()
+    if not text:
+        return None
+    if _HEX_PATTERN.match(text):
+        return int(text, 16)
+    if _INT_PATTERN.match(text):
+        return int(text, 10)
+    return None
+
+
 def _build_text_map_translates(text_hash: int | None, langs: 'list[int]'):
     if not text_hash:
         return None
@@ -157,17 +175,31 @@ def getTranslateObj(keyword: str, langCode: int, speaker: str | None = None):
     # 找出目标语言的textMap包含keyword的文本
     ans = []
 
-    contents = databaseHelper.selectTextMapFromKeyword(keyword, langCode)
-
     langs = config.getResultLanguages().copy()
     if langCode not in langs:
         langs.append(langCode)
     sourceLangCode = config.getSourceLanguage()
 
-    for content in contents:
-        obj = queryTextHashInfo(content[0], langs, sourceLangCode)
-        ans.append(obj)
+    hash_value = _parse_int_keyword(keyword_trim)
+    is_hash_query = hash_value is not None
+    text_hashes_seen = set()
 
+    if hash_value is not None:
+        hash_obj = queryTextHashInfo(hash_value, langs, sourceLangCode)
+        if hash_obj.get('translates'):
+            hash_obj['hashMatch'] = True
+            ans.append(hash_obj)
+            text_hashes_seen.add(hash_value)
+
+    contents = databaseHelper.selectTextMapFromKeyword(keyword, langCode)
+
+    for content in contents:
+        text_hash = content[0]
+        if text_hash in text_hashes_seen:
+            continue
+        text_hashes_seen.add(text_hash)
+        obj = queryTextHashInfo(text_hash, langs, sourceLangCode)
+        ans.append(obj)
     # Search readable
     langMap = databaseHelper.getLangCodeMap()
     if langCode in langMap:
@@ -215,14 +247,7 @@ def getTranslateObj(keyword: str, langCode: int, speaker: str | None = None):
             }
             
             # Get translations
-            translations = []
-            if readableId:
-                # Use the readableId (Localization ID) to find translations directly
-                translations = databaseHelper.selectReadableFromReadableId(readableId, targetLangStrs)
-            
-            # Fallback if readableId is missing or didn't return results (e.g. old DB or manual file)
-            if not translations:
-                translations = databaseHelper.selectReadableFromFileName(fileName, targetLangStrs)
+            translations = databaseHelper.selectReadableFromFileName(fileName, targetLangStrs)
 
             for transContent, transLangStr in translations:
                 if transLangStr in strToLangId:
@@ -276,11 +301,13 @@ def getTranslateObj(keyword: str, langCode: int, speaker: str | None = None):
     def has_voice(entry: dict) -> bool:
         return len(entry.get('voicePaths', [])) > 0
 
-    def sort_key(entry: dict) -> tuple[int, int, int]:
+    def sort_key(entry: dict) -> tuple[int, int, int, int]:
+        hash_rank = 0 if (is_hash_query and entry.get('hash') == hash_value) else 1
         exact = is_exact_match(entry)
         voice = has_voice(entry)
         target_len = len(entry.get('translates', {}).get(langCode, "") or "")
         return (
+            hash_rank,
             0 if exact else 1,
             0 if (not exact and voice) else 1,
             target_len,
@@ -320,7 +347,6 @@ def searchNameEntries(keyword: str, langCode: int):
         if chapter_num:
             return chapter_num
         return None
-
     quest_map = {}
     questMatches = databaseHelper.selectQuestByTitleKeyword(keyword, langCode)
     for questId, questTitle in questMatches:
@@ -341,6 +367,16 @@ def searchNameEntries(keyword: str, langCode: int):
             "title": questTitle,
             "chapterName": chapterName
         }
+    questIdMatches = databaseHelper.selectQuestByIdContains(keyword, langCode)
+    for questId, questTitle in questIdMatches:
+        if questId in quest_map:
+            continue
+        chapterName = databaseHelper.getQuestChapterName(questId, langCode)
+        quest_map[questId] = {
+            "questId": questId,
+            "title": questTitle,
+            "chapterName": chapterName
+        }
 
     quests.extend(quest_map.values())
 
@@ -348,11 +384,25 @@ def searchNameEntries(keyword: str, langCode: int):
     if langCode in langMap:
         langStr = langMap[langCode]
         readableMatches = databaseHelper.selectReadableByTitleKeyword(keyword, langCode, langStr)
+        readable_seen = set()
         for fileName, readableId, titleTextMapHash, title in readableMatches:
             readables.append({
                 "fileName": fileName,
                 "readableId": readableId,
                 "title": title,
+                "titleTextMapHash": titleTextMapHash
+            })
+            readable_seen.add((readableId, fileName))
+        readableFileMatches = databaseHelper.selectReadableByFileNameContains(keyword, langCode, langStr)
+        for fileName, readableId, titleTextMapHash, title in readableFileMatches:
+            key = (readableId, fileName)
+            if key in readable_seen:
+                continue
+            readable_seen.add(key)
+            readables.append({
+                "fileName": fileName,
+                "readableId": readableId,
+                "title": title or fileName,
                 "titleTextMapHash": titleTextMapHash
             })
 
@@ -582,7 +632,10 @@ def getReadableContent(readableId: int | None, fileName: str | None, searchLang:
         if l in langMap:
             targetLangStrs.append(langMap[l])
 
-    readableInfo = databaseHelper.getReadableInfo(readableId, fileName)
+    if fileName:
+        readableInfo = databaseHelper.getReadableInfo(None, fileName)
+    else:
+        readableInfo = databaseHelper.getReadableInfo(readableId, None)
     readableTitle = None
     if readableInfo:
         fileName, titleTextMapHash, readableId = readableInfo
@@ -590,10 +643,10 @@ def getReadableContent(readableId: int | None, fileName: str | None, searchLang:
             readableTitle = databaseHelper.getTextMapContent(titleTextMapHash, sourceLangCode)
 
     translations = []
-    if readableId:
-        translations = databaseHelper.selectReadableFromReadableId(readableId, targetLangStrs)
-    if not translations and fileName:
+    if fileName:
         translations = databaseHelper.selectReadableFromFileName(fileName, targetLangStrs)
+    elif readableId:
+        translations = databaseHelper.selectReadableFromReadableId(readableId, targetLangStrs)
 
     strToLangId = {v: k for k, v in langMap.items()}
     translateMap = {}

@@ -203,7 +203,6 @@ def importQuest(fileName: str):
 
 def importAllQuests():
     files = os.listdir(DATA_PATH + "\\BinOutput\\Quest\\")
-    n = len(files)
     for val, fileName in tqdm(enumerate(files), total=len(files)):
         # print("Now: {} {}/{}".format(fileName, val, n))
         importQuest(fileName)
