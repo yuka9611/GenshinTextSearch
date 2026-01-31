@@ -120,6 +120,32 @@ def importFetters():
     conn.commit()
 
 
+def importFetterStories():
+    cursor = conn.cursor()
+    stories = json.load(open(DATA_PATH + "\\ExcelBinOutput\\FetterStoryExcelConfigData.json", encoding='utf-8'))
+    sql1 = ("INSERT OR REPLACE INTO fetterStory("
+            "fetterId, avatarId, storyTitleTextMapHash, storyTitle2TextMapHash, "
+            "storyTitleLockedTextMapHash, storyContextTextMapHash, storyContext2TextMapHash"
+            ") values (?,?,?,?,?,?,?)")
+
+    for story in stories:
+        cursor.execute(
+            sql1,
+            (
+                story['fetterId'],
+                story['avatarId'],
+                story['storyTitleTextMapHash'],
+                story['storyTitle2TextMapHash'],
+                story['storyTitleLockedTextMapHash'],
+                story['storyContextTextMapHash'],
+                story['storyContext2TextMapHash'],
+            ),
+        )
+
+    cursor.close()
+    conn.commit()
+
+
 def importQuest(fileName: str):
     cursor = conn.cursor()
     obj = json.load(open(DATA_PATH + "\\BinOutput\\Quest\\" + fileName, encoding='utf-8'))
@@ -232,6 +258,8 @@ def main():
     importManualTextMap()
     print("Importing fetters...")
     importFetters()
+    print("Importing fetter stories...")
+    importFetterStories()
     print("Importing quests...")
     importAllQuests()
     print("Importing chapters...")

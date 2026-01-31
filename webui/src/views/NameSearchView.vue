@@ -64,10 +64,10 @@ const gotoReadable = (entry) => {
 
 <template>
     <div class="viewWrapper">
-        <h1 class="pageTitle">名称检索</h1>
+        <h1 class="pageTitle">任务/阅读物查询</h1>
         <div class="helpText">
             <p>支持检索任务名称与阅读物名称。</p>
-            <p>搜索结果可跳转到剧情文本查询页面查看对应内容。</p>
+            <p>搜索结果可跳转到对应页面查看详细内容。</p>
         </div>
 
         <div class="searchBar">

@@ -11,7 +11,7 @@ const queryBaidu = (keyword) => {
     // });
 };
 
-const queryByKeyword = (keyword, langCode) => {
+const queryByKeyword = (keyword, langCode, speaker) => {
     // return {contents: [
     //         {
     //             "type": "Dialogue",
@@ -37,7 +37,8 @@ const queryByKeyword = (keyword, langCode) => {
 
     return request.post("/api/keywordQuery", {
         keyword: keyword,
-        langCode: langCode
+        langCode: langCode,
+        speaker: speaker
     });
 };
 
@@ -89,6 +90,27 @@ const searchByName = (keyword, langCode) => {
     });
 };
 
+const searchAvatar = (keyword, langCode) => {
+    return request.post("/api/avatarSearch", {
+        keyword: keyword,
+        langCode: langCode
+    });
+};
+
+const getAvatarVoices = (avatarId, searchLang) => {
+    return request.post("/api/avatarVoice", {
+        avatarId: avatarId,
+        searchLang: searchLang
+    });
+};
+
+const getAvatarStories = (avatarId, searchLang) => {
+    return request.post("/api/avatarStory", {
+        avatarId: avatarId,
+        searchLang: searchLang
+    });
+};
+
 const getReadableContent = (readableId, fileName, searchLang) => {
     return request.post("/api/getReadableContent", {
         readableId: readableId,
@@ -112,6 +134,9 @@ export default {
     getTalkFromHash,
     getSubtitleContext,
     searchByName,
+    searchAvatar,
+    getAvatarVoices,
+    getAvatarStories,
     getReadableContent,
     getQuestDialogues
 };

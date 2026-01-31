@@ -43,6 +43,10 @@ def replace(textMap: str, playerIsMale, lang: int):
     wanderName = databaseHelper.getWanderName(lang)
     text3 = re.sub(r"\{REALNAME\[ID\(1\)\|HOSTONLY\(true\)]}", wanderName, text2)
 
+    # 固定替换ID(2)的占位符
+    text3 = re.sub(r"#\{REALNAME\[ID\(2\)\|SHOWHOST\(true\)]}", "小家伙", text3)
+    text3 = re.sub(r"\{REALNAME\[ID\(2\)\|HOSTONLY\(true\)]}", "小家伙", text3)
+
     travellerName = databaseHelper.getTravellerName(lang)
     text4 = re.sub(r"\{NICKNAME}", travellerName, text3)
 
