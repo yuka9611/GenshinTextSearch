@@ -12,5 +12,16 @@ export default defineConfig({
     alias: {
       '@': fileURLToPath(new URL('./src', import.meta.url))
     }
+  },
+  build: {
+    rollupOptions: {
+      output: {
+        manualChunks: {
+          vue: ['vue', 'vue-router'],
+          element: ['element-plus', '@element-plus/icons-vue'],
+          audio: ['@liripeng/vue-audio-player']
+        }
+      }
+    }
   }
 })

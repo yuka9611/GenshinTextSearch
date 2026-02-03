@@ -112,16 +112,53 @@ def create_app() -> Flask:
         langCode = int(request.json["langCode"])
         keyword: str = request.json["keyword"]
         speaker = request.json.get("speaker")
+        page = request.json.get("page", 1)
+        pageSize = request.json.get("pageSize", 50)
+        voiceFilter = request.json.get("voiceFilter", "all")
+
+        try:
+            page = int(page)
+        except Exception:
+            page = 1
+
+        try:
+            pageSize = int(pageSize)
+        except Exception:
+            pageSize = 50
+
+        if page < 1:
+            page = 1
+        if pageSize < 1:
+            pageSize = 50
+
+        if voiceFilter not in ("all", "with", "without"):
+            voiceFilter = "all"
 
         if keyword.strip() == "" and (speaker is None or str(speaker).strip() == ""):
-            return buildResponse([])
+            return buildResponse({
+                "contents": [],
+                "total": 0,
+                "page": page,
+                "pageSize": pageSize,
+                "time": 0
+            })
 
         start = time.time()
-        contents = controllers.getTranslateObj(keyword, langCode, speaker)
+        contents, total = controllers.getTranslateObj(
+            keyword,
+            langCode,
+            speaker,
+            page=page,
+            page_size=pageSize,
+            voice_filter=voiceFilter,
+        )
         end = time.time()
 
         return buildResponse({
             "contents": contents,
+            "total": total,
+            "page": page,
+            "pageSize": pageSize,
             "time": (end - start) * 1000
         })
 
@@ -305,6 +342,8 @@ def create_app() -> Flask:
 
         questId = request.json.get("questId")
         searchLang = request.json.get("searchLang")
+        page = request.json.get("page", 1)
+        pageSize = request.json.get("pageSize", 200)
         if searchLang:
             searchLang = int(searchLang)
 
@@ -312,13 +351,28 @@ def create_app() -> Flask:
             return buildResponse(code=400, msg="questId is required")
 
         questId = int(questId)
+        try:
+            page = int(page)
+        except Exception:
+            page = 1
+        try:
+            pageSize = int(pageSize)
+        except Exception:
+            pageSize = 200
+        if page < 1:
+            page = 1
+        if pageSize < 1:
+            pageSize = 200
 
         start = time.time()
-        contents = controllers.getQuestDialogues(questId, searchLang)
+        contents, total = controllers.getQuestDialogues(questId, searchLang, page, pageSize)
         end = time.time()
 
         return buildResponse({
             "contents": contents,
+            "total": total,
+            "page": page,
+            "pageSize": pageSize,
             "time": (end - start) * 1000
         })
 

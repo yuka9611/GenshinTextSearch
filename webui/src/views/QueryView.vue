@@ -32,20 +32,40 @@
                 @keyup.enter.native="onQueryButtonClicked"
                 clearable
             />
+            <el-select
+                v-model="voiceFilter"
+                class="voiceFilter"
+                placeholder="配音筛选"
+                @change="onQueryButtonClicked"
+            >
+                <el-option label="全部" value="all" />
+                <el-option label="仅有配音" value="with" />
+                <el-option label="仅无配音" value="without" />
+            </el-select>
             <span class="searchSummary">
                 {{ searchSummary }}
             </span>
         </div>
         <div class="searchSpacer"></div>
 
-        <div>
-            <TranslateDisplay v-for="translate in visibleResults" :translate-obj="translate" class="translate" @onVoicePlay="onVoicePlay" :keyword="keywordLast" :search-lang="searchLangLast" />
+        <div class="resultControls" v-if="totalCount > 0">
+            <span class="resultCount">共 {{ totalCount }} 条，当前 {{ currentPage }} / {{ totalPages }} 页</span>
+            <el-button size="small" :disabled="currentPage <= 1" @click="goToPage(1)">首页</el-button>
+            <el-button size="small" :disabled="currentPage <= 1" @click="goToPage(currentPage - 1)">上一页</el-button>
+            <el-button size="small" :disabled="currentPage >= totalPages" @click="goToPage(currentPage + 1)">下一页</el-button>
+            <el-button size="small" :disabled="currentPage >= totalPages" @click="goToPage(totalPages)">末页</el-button>
         </div>
 
-        <div class="resultControls" v-if="queryResult.length > 0">
-            <span class="resultCount">已显示 {{ Math.min(renderLimit, queryResult.length) }} / {{ queryResult.length }}</span>
-            <el-button v-if="hasMoreResults" size="small" @click="showMoreResults">显示更多</el-button>
-            <el-button v-if="hasMoreResults" size="small" @click="showAllResults">显示全部</el-button>
+        <div>
+            <TranslateDisplay v-for="translate in queryResult" :translate-obj="translate" class="translate" @onVoicePlay="onVoicePlay" :keyword="keywordLast" :search-lang="searchLangLast" />
+        </div>
+
+        <div class="resultControls" v-if="totalCount > 0">
+            <span class="resultCount">共 {{ totalCount }} 条，当前 {{ currentPage }} / {{ totalPages }} 页</span>
+            <el-button size="small" :disabled="currentPage <= 1" @click="goToPage(1)">首页</el-button>
+            <el-button size="small" :disabled="currentPage <= 1" @click="goToPage(currentPage - 1)">上一页</el-button>
+            <el-button size="small" :disabled="currentPage >= totalPages" @click="goToPage(currentPage + 1)">下一页</el-button>
+            <el-button size="small" :disabled="currentPage >= totalPages" @click="goToPage(totalPages)">末页</el-button>
         </div>
     </div>
 
@@ -92,14 +112,17 @@ const queryResult = ref([])
 const selectedInputLanguage = ref(global.config.defaultSearchLanguage + '')
 const keyword = ref("")
 const keywordLast = ref("")
+const speakerLast = ref("")
 const speakerKeyword = ref("")
 const searchLangLast = ref(0)
+const voiceFilter = ref("all")
+const voiceFilterLast = ref("all")
 const supportedInputLanguage = ref({})
 const searchSummary = ref("")
-const renderStep = 50
-const renderLimit = ref(renderStep)
-const visibleResults = computed(() => queryResult.value.slice(0, renderLimit.value))
-const hasMoreResults = computed(() => queryResult.value.length > renderLimit.value)
+const pageSize = ref(50)
+const currentPage = ref(1)
+const totalCount = ref(0)
+const totalPages = computed(() => Math.max(1, Math.ceil(totalCount.value / pageSize.value)))
 
 onBeforeMount(async ()=>{
     supportedInputLanguage.value = global.languages
@@ -113,87 +136,54 @@ const voicePlayer = ref()
 const showPlayer = ref(false)
 let firstShowPlayer = true
 
-const onQueryButtonClicked = async () =>{
-    let ans = (await api.queryByKeyword(keyword.value, selectedInputLanguage.value, speakerKeyword.value)).json
-    // 停止语音播放
-    voicePlayer.value.pause()
-
-    let searchSummaryTmp = `查询用时: ${ans.time.toFixed(2)}ms，`
-    if(ans.contents.length > 0){
-        if(ans.contents.length >= 200){
-            searchSummaryTmp += `共 ≥200 条结果`
-        }else{
-            searchSummaryTmp += `共 ${ans.contents.length} 条结果`
-        }
-
-    }else{
-        searchSummaryTmp += `没有找到结果。`
-        searchSummary.value = searchSummaryTmp
-        queryResult.value = []
-        return
+const fetchPage = async (page, useLast = false) => {
+    const params = useLast ? {
+        keyword: keywordLast.value,
+        speaker: speakerLast.value,
+        langCode: searchLangLast.value,
+        voiceFilter: voiceFilterLast.value
+    } : {
+        keyword: keyword.value,
+        speaker: speakerKeyword.value,
+        langCode: parseInt(selectedInputLanguage.value),
+        voiceFilter: voiceFilter.value
     }
 
-    // let mergedCount = 0
-    // // 去重，合并相同的语音条目
-    // let resultMap = new Map()
-    // for(let item of ans.contents){
-    //     let key = item.translates[queryLanguages[0]]
-    //     if(!resultMap.has(key)){
-    //         resultMap.set(key, item)
-    //         continue
-    //     }
-    //     mergedCount++;
-    //
-    //     let oldItem = resultMap.get(key)
-    //     let voicePathsToAdd = []
-    //     for(let newVoicePath of item.voicePaths){
-    //         let found = false
-    //         for(let oldVoicePath of oldItem.voicePaths){
-    //             if(oldVoicePath === newVoicePath){
-    //                 found = false
-    //                 break
-    //             }
-    //         }
-    //         if(!found){
-    //             voicePathsToAdd.push(newVoicePath)
-    //         }
-    //     }
-    //     if(voicePathsToAdd.length > 0){
-    //         oldItem.voicePaths.push(...voicePathsToAdd)
-    //
-    //     }
-    // }
-    // // 重排序，把有语音的条目拉到上面
-    // queryResult.value.length = 0
-    // let noVoiceEntries = []
-    //
-    // resultMap.forEach((item, key, _)=>{
-    //     if(item.voicePaths.length > 0){
-    //         queryResult.value.push(item)
-    //     }else{
-    //         noVoiceEntries.push(item)
-    //     }
-    // })
-    //
-    //
-    // queryResult.value.push(...noVoiceEntries)
+    let ans = (await api.queryByKeyword(
+        params.keyword,
+        params.langCode,
+        params.speaker,
+        page,
+        pageSize.value,
+        params.voiceFilter
+    )).json
 
-    // 不合并了
-    queryResult.value = ans.contents;
-    renderLimit.value = Math.min(renderStep, queryResult.value.length)
+    if (voicePlayer.value) {
+        voicePlayer.value.pause()
+    }
 
-    keywordLast.value = keyword.value
-    searchLangLast.value = parseInt(selectedInputLanguage.value)
+    const timeMs = typeof ans.time === "number" ? ans.time.toFixed(2) : "0.00"
+    const total = ans.total || 0
 
-    // if(mergedCount > 0){
-    //     searchSummaryTmp += `，已合并 ${mergedCount} 条重复结果。`
-    // }else{
-    //     searchSummaryTmp += '。'
-    // }
+    queryResult.value = ans.contents || []
+    totalCount.value = total
+    currentPage.value = ans.page || page
 
-    // 不合并了
-    searchSummaryTmp += '。'
-    searchSummary.value = searchSummaryTmp
+    keywordLast.value = params.keyword
+    speakerLast.value = params.speaker || ""
+    searchLangLast.value = params.langCode
+    voiceFilterLast.value = params.voiceFilter
+
+    if (total > 0) {
+        searchSummary.value = `查询用时: ${timeMs}ms，共 ${total} 条结果。`
+    } else {
+        searchSummary.value = `查询用时: ${timeMs}ms，没有找到结果。`
+    }
+}
+
+const onQueryButtonClicked = async () =>{
+    currentPage.value = 1
+    await fetchPage(1, false)
 }
 
 // 播放器相关开始
@@ -209,12 +199,12 @@ const onShowPlayerButtonClicked = () => {
     showPlayer.value = true
 }
 
-const showMoreResults = () => {
-    renderLimit.value = Math.min(renderLimit.value + renderStep, queryResult.value.length)
-}
-
-const showAllResults = () => {
-    renderLimit.value = queryResult.value.length
+const goToPage = async (page) => {
+    if (!keywordLast.value && !speakerLast.value) {
+        return
+    }
+    const safePage = Math.min(Math.max(1, page), totalPages.value)
+    await fetchPage(safePage, true)
 }
 
 const onVoicePlay = (voiceUrl) => {
@@ -336,6 +326,11 @@ const onVoicePlay = (voiceUrl) => {
     max-width: 320px;
     margin-top: 8px;
 }
+.voiceFilter{
+    max-width: 160px;
+    margin-top: 8px;
+    margin-left: 8px;
+}
 .searchSpacer {
     display: none;
 }
@@ -344,6 +339,7 @@ const onVoicePlay = (voiceUrl) => {
     display: flex;
     align-items: center;
     gap: 8px;
+    flex-wrap: wrap;
     margin: 6px 0 12px;
     color: #666;
     font-size: 13px;
@@ -358,6 +354,11 @@ const onVoicePlay = (voiceUrl) => {
         display: block;
         margin-left: 0;
         margin-top: 8px;
+    }
+
+    .voiceFilter{
+        margin-left: 0;
+        display: block;
     }
 
     .searchSpacer {

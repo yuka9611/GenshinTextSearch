@@ -209,6 +209,83 @@ def importAllQuests():
     conn.commit()
 
 
+def importQuestBriefs():
+    cursor = conn.cursor()
+    folder = os.path.join(DATA_PATH, "BinOutput", "QuestBrief")
+    if not os.path.isdir(folder):
+        print("QuestBrief folder not found, skipping.")
+        return
+
+    sql = "INSERT OR IGNORE INTO questTalk(questId, talkId) VALUES (?,?)"
+    files = os.listdir(folder)
+    for _val, fileName in tqdm(enumerate(files), total=len(files)):
+        if not fileName.endswith(".json"):
+            continue
+        try:
+            obj = json.load(open(os.path.join(folder, fileName), encoding="utf-8"))
+        except Exception:
+            continue
+
+        questId = None
+        if "id" in obj:
+            questId = obj["id"]
+        elif "ILHDNJDDEOP" in obj:
+            questId = obj["ILHDNJDDEOP"]
+
+        subquests = None
+        if "subQuests" in obj:
+            subquests = obj["subQuests"]
+        elif "GFLHMKOOHHA" in obj:
+            subquests = obj["GFLHMKOOHHA"]
+
+        if not isinstance(subquests, list):
+            continue
+
+        for subquest in subquests:
+            mainQuestId = questId
+            if mainQuestId is None:
+                if "mainQuestId" in subquest:
+                    mainQuestId = subquest["mainQuestId"]
+                elif "GNGFBMPFBOK" in subquest:
+                    mainQuestId = subquest["GNGFBMPFBOK"]
+
+            contents = None
+            if "finishCond" in subquest:
+                contents = subquest["finishCond"]
+            elif "KBFJAAFDHKJ" in subquest:
+                contents = subquest["KBFJAAFDHKJ"]
+
+            if not isinstance(contents, list):
+                continue
+
+            for cond in contents:
+                cond_type = None
+                if "type" in cond:
+                    cond_type = cond["type"]
+                elif "PAINLIBBLDK" in cond:
+                    cond_type = cond["PAINLIBBLDK"]
+
+                if cond_type != "QUEST_CONTENT_COMPLETE_TALK":
+                    continue
+
+                params = None
+                if "param" in cond:
+                    params = cond["param"]
+                elif "paramList" in cond:
+                    params = cond["paramList"]
+                elif "LNHLPKELCAL" in cond:
+                    params = cond["LNHLPKELCAL"]
+
+                if not isinstance(params, list) or len(params) == 0:
+                    continue
+                talkId = params[0]
+                if isinstance(talkId, int) and talkId > 0 and mainQuestId:
+                    cursor.execute(sql, (mainQuestId, talkId))
+
+    cursor.close()
+    conn.commit()
+
+
 def importChapters():
     cursor = conn.cursor()
     chapters = json.load(open(DATA_PATH + "\\ExcelBinOutput\\ChapterExcelConfigData.json", encoding='utf-8'))
@@ -261,6 +338,8 @@ def main():
     importFetterStories()
     print("Importing quests...")
     importAllQuests()
+    print("Importing quest briefs...")
+    importQuestBriefs()
     print("Importing chapters...")
     importChapters()
     print("Importing voices...")
