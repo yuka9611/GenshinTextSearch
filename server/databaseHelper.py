@@ -47,17 +47,119 @@ def _build_like_patterns(keyword: str, lang_code: int) -> tuple[str, str]:
     return exact, fuzzy
 
 
-def selectTextMapFromKeyword(keyWord: str, langCode: int):
+def _voice_exists_expr(text_hash_field: str) -> str:
+    return (
+        "exists ("
+        "select 1 from dialogue d "
+        "join voice v on v.dialogueId = d.dialogueId "
+        f"where d.textHash = {text_hash_field} limit 1"
+        ") or exists ("
+        "select 1 from fetters f "
+        "join voice v on v.dialogueId = f.voiceFile "
+        "and (v.avatarId = f.avatarId or v.avatarId = 0) "
+        f"where f.voiceFileTextTextMapHash = {text_hash_field} limit 1"
+        ")"
+    )
+
+
+def selectTextMapFromKeyword(keyWord: str, langCode: int, limit: int | None = None):
     with closing(conn.cursor()) as cursor:
         exact, fuzzy = _build_like_patterns(keyWord, langCode)
         sql1 = (
             "select hash, content from textMap "
             "where lang=? and (content like ? escape '\\' or content like ? escape '\\') "
-            "order by case when content like ? escape '\\' then 0 else 1 end, length(content) "
-            "limit 200"
+            "order by case when content like ? escape '\\' then 0 else 1 end, length(content)"
         )
-        cursor.execute(sql1, (langCode, exact, fuzzy, exact))
+        params = [langCode, exact, fuzzy, exact]
+        if limit is not None:
+            sql1 += " limit ?"
+            params.append(limit)
+        cursor.execute(sql1, params)
         return cursor.fetchall()
+
+
+def selectTextMapFromKeywordPaged(
+    keyWord: str,
+    langCode: int,
+    limit: int,
+    offset: int,
+    hash_value: int | None = None,
+    voice_filter: str | None = None,
+):
+    with closing(conn.cursor()) as cursor:
+        exact, fuzzy = _build_like_patterns(keyWord, langCode)
+        hash_value = hash_value if hash_value is not None else -1
+        voice_expr = _voice_exists_expr("textMap.hash")
+        sql = (
+            "select hash, content from textMap "
+            "where lang=? and (content like ? escape '\\' or content like ? escape '\\') "
+        )
+        if voice_filter == "with":
+            sql += f"and ({voice_expr}) "
+        elif voice_filter == "without":
+            sql += f"and not ({voice_expr}) "
+        sql += (
+            "order by "
+            "case when hash = ? then 0 else 1 end, "
+            "case when content like ? escape '\\' then 0 else 1 end, "
+            "case when content like ? escape '\\' then 1 "
+            f"when {voice_expr} then 0 else 1 end, "
+            "length(content) "
+            "limit ? offset ?"
+        )
+        cursor.execute(
+            sql,
+            (langCode, exact, fuzzy, hash_value, exact, exact, limit, offset),
+        )
+        return cursor.fetchall()
+
+
+def countTextMapFromKeyword(keyWord: str, langCode: int) -> int:
+    with closing(conn.cursor()) as cursor:
+        exact, fuzzy = _build_like_patterns(keyWord, langCode)
+        sql = (
+            "select count(*) from textMap "
+            "where lang=? and (content like ? escape '\\' or content like ? escape '\\')"
+        )
+        cursor.execute(sql, (langCode, exact, fuzzy))
+        row = cursor.fetchone()
+        return int(row[0]) if row else 0
+
+
+def countTextMapFromKeywordVoice(keyWord: str, langCode: int, voice_filter: str | None) -> int:
+    with closing(conn.cursor()) as cursor:
+        exact, fuzzy = _build_like_patterns(keyWord, langCode)
+        voice_expr = _voice_exists_expr("textMap.hash")
+        sql = (
+            "select count(*) from textMap "
+            "where lang=? and (content like ? escape '\\' or content like ? escape '\\') "
+        )
+        if voice_filter == "with":
+            sql += f"and ({voice_expr})"
+        elif voice_filter == "without":
+            sql += f"and not ({voice_expr})"
+        cursor.execute(sql, (langCode, exact, fuzzy))
+        row = cursor.fetchone()
+        return int(row[0]) if row else 0
+
+
+def hasVoiceForTextHashDb(textHash: int) -> bool:
+    with closing(conn.cursor()) as cursor:
+        sql = "select 1 where " + _voice_exists_expr(str(textHash)) + " limit 1"
+        cursor.execute(sql)
+        return cursor.fetchone() is not None
+
+
+def isTextMapHashInKeyword(textHash: int, keyword: str, langCode: int) -> bool:
+    with closing(conn.cursor()) as cursor:
+        exact, fuzzy = _build_like_patterns(keyword, langCode)
+        sql = (
+            "select 1 from textMap "
+            "where hash=? and lang=? and (content like ? escape '\\' or content like ? escape '\\') "
+            "limit 1"
+        )
+        cursor.execute(sql, (textHash, langCode, exact, fuzzy))
+        return cursor.fetchone() is not None
 
 
 def selectTextMapFromTextHash(textHash: int, langs: list[int] | None = None):
@@ -311,17 +413,41 @@ def getLangCodeMap():
         return mapping
 
 
-def selectReadableFromKeyword(keyword: str, langCode: int, langStr: str):
+def selectReadableFromKeyword(
+    keyword: str,
+    langCode: int,
+    langStr: str,
+    limit: int | None = None,
+    offset: int | None = None,
+):
     with closing(conn.cursor()) as cursor:
         exact, fuzzy = _build_like_patterns(keyword, langCode)
         sql = (
             "select fileName, content, titleTextMapHash, readableId from readable "
             "where lang=? and (content like ? escape '\\' or content like ? escape '\\') "
-            "order by case when content like ? escape '\\' then 0 else 1 end, length(content) "
-            "limit 200"
+            "order by case when content like ? escape '\\' then 0 else 1 end, length(content)"
         )
-        cursor.execute(sql, (langStr, exact, fuzzy, exact))
+        params = [langStr, exact, fuzzy, exact]
+        if limit is not None:
+            sql += " limit ?"
+            params.append(limit)
+        if offset is not None and offset > 0:
+            sql += " offset ?"
+            params.append(offset)
+        cursor.execute(sql, params)
         return cursor.fetchall()
+
+
+def countReadableFromKeyword(keyword: str, langCode: int, langStr: str) -> int:
+    with closing(conn.cursor()) as cursor:
+        exact, fuzzy = _build_like_patterns(keyword, langCode)
+        sql = (
+            "select count(*) from readable "
+            "where lang=? and (content like ? escape '\\' or content like ? escape '\\')"
+        )
+        cursor.execute(sql, (langStr, exact, fuzzy))
+        row = cursor.fetchone()
+        return int(row[0]) if row else 0
 
 
 def selectReadableFromFileName(fileName: str, langs: list[str]):
@@ -522,6 +648,46 @@ def selectQuestTalkIds(questId: int):
         return [row[0] for row in cursor.fetchall()]
 
 
+def countQuestDialogues(questId: int) -> int:
+    with closing(conn.cursor()) as cursor:
+        sql = (
+            "select count(*) from dialogue d "
+            "join (select distinct talkId from questTalk where questId=?) qt "
+            "on qt.talkId = d.talkId "
+            "where d.coopQuestId is null"
+        )
+        cursor.execute(sql, (questId,))
+        row = cursor.fetchone()
+        return row[0] if row else 0
+
+
+def selectQuestDialoguesPaged(
+    questId: int,
+    limit: int | None = None,
+    offset: int | None = None,
+):
+    with closing(conn.cursor()) as cursor:
+        sql = (
+            "select d.textHash, d.talkerType, d.talkerId, d.dialogueId, d.talkId "
+            "from dialogue d "
+            "join (select distinct talkId from questTalk where questId=?) qt "
+            "on qt.talkId = d.talkId "
+            "where d.coopQuestId is null "
+            "order by d.talkId, d.dialogueId"
+        )
+        params = [questId]
+        if limit is not None:
+            sql += " limit ?"
+            params.append(limit)
+        if offset is not None and offset > 0:
+            if limit is None:
+                sql += " limit -1"
+            sql += " offset ?"
+            params.append(offset)
+        cursor.execute(sql, params)
+        return cursor.fetchall()
+
+
 def selectReadableByTitleKeyword(keyword: str, langCode: int, langStr: str):
     with closing(conn.cursor()) as cursor:
         exact, fuzzy = _build_like_patterns(keyword, langCode)
@@ -553,20 +719,43 @@ def selectReadableByFileNameContains(keyword: str, langCode: int, langStr: str):
         return cursor.fetchall()
 
 
-def selectSubtitleFromKeyword(keyword: str, langCode: int):
+def selectSubtitleFromKeyword(
+    keyword: str,
+    langCode: int,
+    limit: int | None = None,
+    offset: int | None = None,
+):
     with closing(conn.cursor()) as cursor:
         exact, fuzzy = _build_like_patterns(keyword, langCode)
         sql = (
             "select fileName, content, startTime, endTime, subtitleId from subtitle "
             "where lang=? and (content like ? escape '\\' or content like ? escape '\\') "
-            "order by case when content like ? escape '\\' then 0 else 1 end, length(content) "
-            "limit 200"
+            "order by case when content like ? escape '\\' then 0 else 1 end, length(content)"
         )
-        cursor.execute(sql, (langCode, exact, fuzzy, exact))
+        params = [langCode, exact, fuzzy, exact]
+        if limit is not None:
+            sql += " limit ?"
+            params.append(limit)
+        if offset is not None and offset > 0:
+            sql += " offset ?"
+            params.append(offset)
+        cursor.execute(sql, params)
         return cursor.fetchall()
 
 
-def selectDialogueByTalkerKeyword(keyword: str, langCode: int):
+def countSubtitleFromKeyword(keyword: str, langCode: int) -> int:
+    with closing(conn.cursor()) as cursor:
+        exact, fuzzy = _build_like_patterns(keyword, langCode)
+        sql = (
+            "select count(*) from subtitle "
+            "where lang=? and (content like ? escape '\\' or content like ? escape '\\')"
+        )
+        cursor.execute(sql, (langCode, exact, fuzzy))
+        row = cursor.fetchone()
+        return int(row[0]) if row else 0
+
+
+def selectDialogueByTalkerKeyword(keyword: str, langCode: int, limit: int | None = None):
     with closing(conn.cursor()) as cursor:
         exact, fuzzy = _build_like_patterns(keyword, langCode)
         sql = (
@@ -575,22 +764,228 @@ def selectDialogueByTalkerKeyword(keyword: str, langCode: int):
             "join npc on dialogue.talkerType = 'TALK_ROLE_NPC' and dialogue.talkerId = npc.npcId "
             "join textMap on npc.textHash = textMap.hash "
             "where textMap.lang=? and (textMap.content like ? escape '\\' or textMap.content like ? escape '\\') "
-            "order by case when textMap.content like ? escape '\\' then 0 else 1 end, length(textMap.content), dialogue.dialogueId "
-            "limit 200"
+            "order by case when textMap.content like ? escape '\\' then 0 else 1 end, length(textMap.content), dialogue.dialogueId"
         )
-        cursor.execute(sql, (langCode, exact, fuzzy, exact))
+        params = [langCode, exact, fuzzy, exact]
+        if limit is not None:
+            sql += " limit ?"
+            params.append(limit)
+        cursor.execute(sql, params)
         return cursor.fetchall()
 
 
-def selectDialogueByTalkerType(talkerType: str, limit: int = 200):
+def countDialogueByTalkerKeyword(keyword: str, langCode: int) -> int:
+    with closing(conn.cursor()) as cursor:
+        exact, fuzzy = _build_like_patterns(keyword, langCode)
+        sql = (
+            "select count(*) "
+            "from dialogue "
+            "join npc on dialogue.talkerType = 'TALK_ROLE_NPC' and dialogue.talkerId = npc.npcId "
+            "join textMap on npc.textHash = textMap.hash "
+            "where textMap.lang=? and (textMap.content like ? escape '\\' or textMap.content like ? escape '\\')"
+        )
+        cursor.execute(sql, (langCode, exact, fuzzy))
+        row = cursor.fetchone()
+        return int(row[0]) if row else 0
+
+
+def selectDialogueByTalkerAndKeyword(
+    speaker_keyword: str,
+    keyword: str,
+    langCode: int,
+    limit: int | None = None,
+):
+    with closing(conn.cursor()) as cursor:
+        speaker_exact, speaker_fuzzy = _build_like_patterns(speaker_keyword, langCode)
+        keyword_exact, keyword_fuzzy = _build_like_patterns(keyword, langCode)
+        sql = (
+            "select dialogue.textHash, dialogue.talkerType, dialogue.talkerId, dialogue.dialogueId "
+            "from dialogue "
+            "join textMap as dialogueText on dialogue.textHash = dialogueText.hash "
+            "and dialogueText.lang = ? "
+            "join npc on dialogue.talkerType = 'TALK_ROLE_NPC' and dialogue.talkerId = npc.npcId "
+            "join textMap as npcName on npc.textHash = npcName.hash and npcName.lang = ? "
+            "where (dialogueText.content like ? escape '\\' or dialogueText.content like ? escape '\\') "
+            "and (npcName.content like ? escape '\\' or npcName.content like ? escape '\\') "
+            "order by case when dialogueText.content like ? escape '\\' then 0 else 1 end, "
+            "length(dialogueText.content), dialogue.dialogueId"
+        )
+        params = [
+            langCode,
+            langCode,
+            keyword_exact,
+            keyword_fuzzy,
+            speaker_exact,
+            speaker_fuzzy,
+            keyword_exact,
+        ]
+        if limit is not None:
+            sql += " limit ?"
+            params.append(limit)
+        cursor.execute(sql, params)
+        return cursor.fetchall()
+
+
+def selectDialogueByTalkerTypeAndKeyword(
+    talkerType: str,
+    keyword: str,
+    langCode: int,
+    limit: int | None = None,
+):
+    with closing(conn.cursor()) as cursor:
+        exact, fuzzy = _build_like_patterns(keyword, langCode)
+        sql = (
+            "select dialogue.textHash, dialogue.talkerType, dialogue.talkerId, dialogue.dialogueId "
+            "from dialogue "
+            "join textMap as dialogueText on dialogue.textHash = dialogueText.hash "
+            "and dialogueText.lang = ? "
+            "where dialogue.talkerType = ? "
+            "and (dialogueText.content like ? escape '\\' or dialogueText.content like ? escape '\\') "
+            "order by case when dialogueText.content like ? escape '\\' then 0 else 1 end, "
+            "length(dialogueText.content), dialogue.dialogueId"
+        )
+        params = [langCode, talkerType, exact, fuzzy, exact]
+        if limit is not None:
+            sql += " limit ?"
+            params.append(limit)
+        cursor.execute(sql, params)
+        return cursor.fetchall()
+
+
+def selectFetterBySpeakerAndKeyword(
+    speaker_keyword: str,
+    keyword: str,
+    langCode: int,
+    limit: int | None = None,
+):
+    with closing(conn.cursor()) as cursor:
+        speaker_exact, speaker_fuzzy = _build_like_patterns(speaker_keyword, langCode)
+        keyword_exact, keyword_fuzzy = _build_like_patterns(keyword, langCode)
+        sql = (
+            "select fetters.voiceFileTextTextMapHash, fetters.avatarId "
+            "from fetters "
+            "join textMap as voiceText on fetters.voiceFileTextTextMapHash = voiceText.hash "
+            "and voiceText.lang = ? "
+            "join avatar on fetters.avatarId = avatar.avatarId "
+            "join textMap as avatarName on avatar.nameTextMapHash = avatarName.hash "
+            "and avatarName.lang = ? "
+            "where (voiceText.content like ? escape '\\' or voiceText.content like ? escape '\\') "
+            "and (avatarName.content like ? escape '\\' or avatarName.content like ? escape '\\') "
+            "order by case when voiceText.content like ? escape '\\' then 0 else 1 end, "
+            "length(voiceText.content), fetters.fetterId"
+        )
+        params = [
+            langCode,
+            langCode,
+            keyword_exact,
+            keyword_fuzzy,
+            speaker_exact,
+            speaker_fuzzy,
+            keyword_exact,
+        ]
+        if limit is not None:
+            sql += " limit ?"
+            params.append(limit)
+        cursor.execute(sql, params)
+        return cursor.fetchall()
+
+
+def selectDialogueByTalkerType(talkerType: str, limit: int | None = None):
     with closing(conn.cursor()) as cursor:
         sql = (
             "select textHash, talkerType, talkerId, dialogueId "
             "from dialogue where talkerType=? "
-            "order by dialogueId limit ?"
+            "order by dialogueId"
         )
-        cursor.execute(sql, (talkerType, limit))
+        params = [talkerType]
+        if limit is not None:
+            sql += " limit ?"
+            params.append(limit)
+        cursor.execute(sql, params)
         return cursor.fetchall()
+
+
+def countDialogueByTalkerAndKeyword(speaker_keyword: str, keyword: str, langCode: int) -> int:
+    with closing(conn.cursor()) as cursor:
+        speaker_exact, speaker_fuzzy = _build_like_patterns(speaker_keyword, langCode)
+        keyword_exact, keyword_fuzzy = _build_like_patterns(keyword, langCode)
+        sql = (
+            "select count(*) "
+            "from dialogue "
+            "join textMap as dialogueText on dialogue.textHash = dialogueText.hash "
+            "and dialogueText.lang = ? "
+            "join npc on dialogue.talkerType = 'TALK_ROLE_NPC' and dialogue.talkerId = npc.npcId "
+            "join textMap as npcName on npc.textHash = npcName.hash and npcName.lang = ? "
+            "where (dialogueText.content like ? escape '\\' or dialogueText.content like ? escape '\\') "
+            "and (npcName.content like ? escape '\\' or npcName.content like ? escape '\\')"
+        )
+        cursor.execute(
+            sql,
+            (
+                langCode,
+                langCode,
+                keyword_exact,
+                keyword_fuzzy,
+                speaker_exact,
+                speaker_fuzzy,
+            ),
+        )
+        row = cursor.fetchone()
+        return int(row[0]) if row else 0
+
+
+def countDialogueByTalkerTypeAndKeyword(talkerType: str, keyword: str, langCode: int) -> int:
+    with closing(conn.cursor()) as cursor:
+        exact, fuzzy = _build_like_patterns(keyword, langCode)
+        sql = (
+            "select count(*) "
+            "from dialogue "
+            "join textMap as dialogueText on dialogue.textHash = dialogueText.hash "
+            "and dialogueText.lang = ? "
+            "where dialogue.talkerType = ? "
+            "and (dialogueText.content like ? escape '\\' or dialogueText.content like ? escape '\\')"
+        )
+        cursor.execute(sql, (langCode, talkerType, exact, fuzzy))
+        row = cursor.fetchone()
+        return int(row[0]) if row else 0
+
+
+def countFetterBySpeakerAndKeyword(speaker_keyword: str, keyword: str, langCode: int) -> int:
+    with closing(conn.cursor()) as cursor:
+        speaker_exact, speaker_fuzzy = _build_like_patterns(speaker_keyword, langCode)
+        keyword_exact, keyword_fuzzy = _build_like_patterns(keyword, langCode)
+        sql = (
+            "select count(*) "
+            "from fetters "
+            "join textMap as voiceText on fetters.voiceFileTextTextMapHash = voiceText.hash "
+            "and voiceText.lang = ? "
+            "join avatar on fetters.avatarId = avatar.avatarId "
+            "join textMap as avatarName on avatar.nameTextMapHash = avatarName.hash "
+            "and avatarName.lang = ? "
+            "where (voiceText.content like ? escape '\\' or voiceText.content like ? escape '\\') "
+            "and (avatarName.content like ? escape '\\' or avatarName.content like ? escape '\\')"
+        )
+        cursor.execute(
+            sql,
+            (
+                langCode,
+                langCode,
+                keyword_exact,
+                keyword_fuzzy,
+                speaker_exact,
+                speaker_fuzzy,
+            ),
+        )
+        row = cursor.fetchone()
+        return int(row[0]) if row else 0
+
+
+def countDialogueByTalkerType(talkerType: str) -> int:
+    with closing(conn.cursor()) as cursor:
+        sql = "select count(*) from dialogue where talkerType=?"
+        cursor.execute(sql, (talkerType,))
+        row = cursor.fetchone()
+        return int(row[0]) if row else 0
 
 
 def selectSubtitleTranslations(fileName: str, startTime: float, langs: list[int]):

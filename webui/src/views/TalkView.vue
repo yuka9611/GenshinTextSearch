@@ -20,6 +20,10 @@ const isReadable = ref(false)
 const readableTitle = ref("")
 const readableFileName = ref("")
 const readableTranslates = ref({})
+const pageSize = ref(200)
+const currentPage = ref(1)
+const totalCount = ref(0)
+const totalPages = computed(() => Math.max(1, Math.ceil(totalCount.value / pageSize.value)))
 
 let playVoiceButtonDict = {}
 let playableDialogueIdList = []
@@ -38,6 +42,7 @@ const reloadPage = () => {
     keyword.value = route.query.keyword
     playVoiceButtonDict = {}
     playableDialogueIdList = []
+    totalCount.value = 0
     const readableId = route.query.readableId
     const fileName = route.query.fileName
     const questId = route.query.questId
@@ -52,6 +57,7 @@ const reloadPage = () => {
         isReadable.value = false
         showPlayer.value = false
         updateContentScrollClass()
+        currentPage.value = 1
         reloadQuest()
         return
     }
@@ -102,15 +108,33 @@ const reloadReadable = () => {
 }
 
 const reloadQuest = () => {
-    api.getQuestDialogues(route.query.questId, route.query.searchLang).then(res => {
+    api.getQuestDialogues(
+        route.query.questId,
+        route.query.searchLang,
+        currentPage.value,
+        pageSize.value
+    ).then(res => {
         let resJson = res.json
         queryTime.value = resJson.time.toFixed(2)
         let talkContents = resJson.contents
         questName.value = talkContents.talkQuestName
         dialogues.value = talkContents.dialogues
+        totalCount.value = resJson.total || 0
+        currentPage.value = resJson.page || currentPage.value
     }).catch(err => {
         if(!err.network) err.defaultHandler()
     })
+}
+
+const goToPage = (page) => {
+    if (!route.query.questId) return
+    if (page < 1) {
+        page = 1
+    } else if (page > totalPages.value) {
+        page = totalPages.value
+    }
+    currentPage.value = page
+    reloadQuest()
 }
 
 const normalizeCopyText = (text) => {
@@ -387,6 +411,13 @@ onDeactivated(() => {
         </div>
 
         <div v-else class="dialogueScroll">
+            <div class="resultControls" v-if="totalCount > 0">
+                <span class="resultCount">共 {{ totalCount }} 条，当前 {{ currentPage }} / {{ totalPages }} 页</span>
+                <el-button size="small" :disabled="currentPage <= 1" @click="goToPage(1)">首页</el-button>
+                <el-button size="small" :disabled="currentPage <= 1" @click="goToPage(currentPage - 1)">上一页</el-button>
+                <el-button size="small" :disabled="currentPage >= totalPages" @click="goToPage(currentPage + 1)">下一页</el-button>
+                <el-button size="small" :disabled="currentPage >= totalPages" @click="goToPage(totalPages)">末页</el-button>
+            </div>
             <div class="dialogueGroups">
             <div v-for="group in dialogueGroups" :key="group.talkId || 'single'" class="dialogueGroup">
                 <h3 v-if="group.talkId" class="dialogueGroupTitle">Talk ID: {{ group.talkId }}</h3>
@@ -427,6 +458,13 @@ onDeactivated(() => {
                 </el-table>
             </div>
         </div>
+            <div class="resultControls" v-if="totalCount > 0">
+                <span class="resultCount">共 {{ totalCount }} 条，当前 {{ currentPage }} / {{ totalPages }} 页</span>
+                <el-button size="small" :disabled="currentPage <= 1" @click="goToPage(1)">首页</el-button>
+                <el-button size="small" :disabled="currentPage <= 1" @click="goToPage(currentPage - 1)">上一页</el-button>
+                <el-button size="small" :disabled="currentPage >= totalPages" @click="goToPage(currentPage + 1)">下一页</el-button>
+                <el-button size="small" :disabled="currentPage >= totalPages" @click="goToPage(totalPages)">末页</el-button>
+            </div>
         </div>
 
         <el-form v-if="!isReadable" style="margin-top: 10px;" :inline="true">
@@ -529,6 +567,20 @@ onDeactivated(() => {
 .dialogueScroll {
     overflow-x: visible;
     width: 100%;
+}
+
+.resultControls {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex-wrap: wrap;
+    margin: 6px 0 12px;
+    color: #666;
+    font-size: 13px;
+}
+
+.resultCount {
+    margin-right: 4px;
 }
 
 .dialogueView {

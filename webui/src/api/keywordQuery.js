@@ -11,7 +11,7 @@ const queryBaidu = (keyword) => {
     // });
 };
 
-const queryByKeyword = (keyword, langCode, speaker) => {
+const queryByKeyword = (keyword, langCode, speaker, page = 1, pageSize = 50, voiceFilter = "all") => {
     // return {contents: [
     //         {
     //             "type": "Dialogue",
@@ -38,7 +38,10 @@ const queryByKeyword = (keyword, langCode, speaker) => {
     return request.post("/api/keywordQuery", {
         keyword: keyword,
         langCode: langCode,
-        speaker: speaker
+        speaker: speaker,
+        page: page,
+        pageSize: pageSize,
+        voiceFilter: voiceFilter
     });
 };
 
@@ -119,10 +122,12 @@ const getReadableContent = (readableId, fileName, searchLang) => {
     });
 };
 
-const getQuestDialogues = (questId, searchLang) => {
+const getQuestDialogues = (questId, searchLang, page = 1, pageSize = 200) => {
     return request.post("/api/getQuestDialogues", {
         questId: questId,
-        searchLang: searchLang
+        searchLang: searchLang,
+        page: page,
+        pageSize: pageSize
     });
 };
 

@@ -126,7 +126,14 @@ def _build_text_map_translates(text_hash: int | None, langs: 'list[int]'):
     return result if result else None
 
 
-def getTranslateObj(keyword: str, langCode: int, speaker: str | None = None):
+def getTranslateObj(
+    keyword: str,
+    langCode: int,
+    speaker: str | None = None,
+    page: int = 1,
+    page_size: int = 50,
+    voice_filter: str = "all",
+):
     speaker_keyword = (speaker or "").strip()
     keyword_trim = keyword.strip()
 
@@ -135,6 +142,26 @@ def getTranslateObj(keyword: str, langCode: int, speaker: str | None = None):
         if langCode in databaseHelper.CHINESE_LANG_CODES:
             normalized = "".join(normalized.split())
         return normalized
+
+    safe_page = page if page and page > 0 else 1
+    safe_size = page_size if page_size and page_size > 0 else 50
+    page_end = safe_page * safe_size
+    candidate_limit = page_end if voice_filter == "all" else page_end * 3
+
+    def apply_voice_filter(entries: list[dict]) -> list[dict]:
+        if voice_filter == "with":
+            return [entry for entry in entries if len(entry.get('voicePaths', [])) > 0]
+        if voice_filter == "without":
+            return [entry for entry in entries if len(entry.get('voicePaths', [])) == 0]
+        return entries
+
+    def paginate(entries: list[dict], total: int | None = None) -> tuple[list[dict], int]:
+        total_count = total if total is not None else len(entries)
+        safe_page = page if page and page > 0 else 1
+        safe_size = page_size if page_size and page_size > 0 else 50
+        start = (safe_page - 1) * safe_size
+        end = start + safe_size
+        return entries[start:end], total_count
 
     if keyword_trim == "" and speaker_keyword:
         ans = []
@@ -146,7 +173,9 @@ def getTranslateObj(keyword: str, langCode: int, speaker: str | None = None):
         seen_hashes = set()
         speaker_norm = normalize_speaker(speaker_keyword)
 
-        dialogue_rows = databaseHelper.selectDialogueByTalkerKeyword(speaker_keyword, langCode)
+        dialogue_rows = databaseHelper.selectDialogueByTalkerKeyword(
+            speaker_keyword, langCode, candidate_limit
+        )
         for textHash, talkerType, talkerId, _dialogueId in dialogue_rows:
             if textHash in seen_hashes:
                 continue
@@ -155,6 +184,8 @@ def getTranslateObj(keyword: str, langCode: int, speaker: str | None = None):
             obj['talker'] = databaseHelper.getTalkerName(talkerType, talkerId, sourceLangCode)
             ans.append(obj)
 
+        total = databaseHelper.countDialogueByTalkerKeyword(speaker_keyword, langCode)
+
         for talkerType in ("TALK_ROLE_PLAYER", "TALK_ROLE_MATE_AVATAR"):
             talkerName = databaseHelper.getTalkerName(talkerType, 0, langCode)
             if not talkerName:
@@ -162,7 +193,7 @@ def getTranslateObj(keyword: str, langCode: int, speaker: str | None = None):
             talker_norm = normalize_speaker(talkerName)
             if speaker_norm not in talker_norm:
                 continue
-            talker_rows = databaseHelper.selectDialogueByTalkerType(talkerType)
+            talker_rows = databaseHelper.selectDialogueByTalkerType(talkerType, candidate_limit)
             for textHash, talkerType, talkerId, _dialogueId in talker_rows:
                 if textHash in seen_hashes:
                     continue
@@ -170,8 +201,66 @@ def getTranslateObj(keyword: str, langCode: int, speaker: str | None = None):
                 obj = queryTextHashInfo(textHash, langs, sourceLangCode)
                 obj['talker'] = databaseHelper.getTalkerName(talkerType, talkerId, sourceLangCode)
                 ans.append(obj)
+            total += databaseHelper.countDialogueByTalkerType(talkerType)
 
-        return ans[:200]
+        ans = apply_voice_filter(ans)
+        return paginate(ans, total)
+    if keyword_trim != "" and speaker_keyword:
+        ans = []
+        langs = config.getResultLanguages().copy()
+        if langCode not in langs:
+            langs.append(langCode)
+        sourceLangCode = config.getSourceLanguage()
+
+        seen_hashes = set()
+
+        dialogue_rows = databaseHelper.selectDialogueByTalkerAndKeyword(
+            speaker_keyword, keyword_trim, langCode, candidate_limit
+        )
+        for textHash, talkerType, talkerId, _dialogueId in dialogue_rows:
+            if textHash in seen_hashes:
+                continue
+            seen_hashes.add(textHash)
+            obj = queryTextHashInfo(textHash, langs, sourceLangCode)
+            obj['talker'] = databaseHelper.getTalkerName(talkerType, talkerId, langCode)
+            ans.append(obj)
+
+        total = databaseHelper.countDialogueByTalkerAndKeyword(speaker_keyword, keyword_trim, langCode)
+
+        speaker_norm = normalize_speaker(speaker_keyword)
+        for talkerType in ("TALK_ROLE_PLAYER", "TALK_ROLE_MATE_AVATAR"):
+            talkerName = databaseHelper.getTalkerName(talkerType, 0, langCode)
+            if not talkerName:
+                continue
+            talker_norm = normalize_speaker(talkerName)
+            if speaker_norm not in talker_norm:
+                continue
+            talker_rows = databaseHelper.selectDialogueByTalkerTypeAndKeyword(
+                talkerType, keyword_trim, langCode, candidate_limit
+            )
+            for textHash, talkerType, talkerId, _dialogueId in talker_rows:
+                if textHash in seen_hashes:
+                    continue
+                seen_hashes.add(textHash)
+                obj = queryTextHashInfo(textHash, langs, sourceLangCode)
+                obj['talker'] = databaseHelper.getTalkerName(talkerType, talkerId, langCode)
+                ans.append(obj)
+            total += databaseHelper.countDialogueByTalkerTypeAndKeyword(talkerType, keyword_trim, langCode)
+
+        fetter_rows = databaseHelper.selectFetterBySpeakerAndKeyword(
+            speaker_keyword, keyword_trim, langCode, candidate_limit
+        )
+        for textHash, avatarId in fetter_rows:
+            if textHash in seen_hashes:
+                continue
+            seen_hashes.add(textHash)
+            obj = queryTextHashInfo(textHash, langs, sourceLangCode)
+            obj['talker'] = databaseHelper.getCharterName(avatarId, langCode)
+            ans.append(obj)
+        total += databaseHelper.countFetterBySpeakerAndKeyword(speaker_keyword, keyword_trim, langCode)
+
+        ans = apply_voice_filter(ans)
+        return paginate(ans, total)
     # 找出目标语言的textMap包含keyword的文本
     ans = []
 
@@ -183,15 +272,261 @@ def getTranslateObj(keyword: str, langCode: int, speaker: str | None = None):
     hash_value = _parse_int_keyword(keyword_trim)
     is_hash_query = hash_value is not None
     text_hashes_seen = set()
+    hash_obj = None
+    hash_extra = False
 
     if hash_value is not None:
         hash_obj = queryTextHashInfo(hash_value, langs, sourceLangCode)
         if hash_obj.get('translates'):
             hash_obj['hashMatch'] = True
+            hash_extra = not databaseHelper.isTextMapHashInKeyword(
+                hash_value, keyword_trim, langCode
+            )
+
+    langMap = databaseHelper.getLangCodeMap()
+    langStr = langMap.get(langCode)
+    targetLangStrs = []
+    for l in langs:
+        if l in langMap:
+            targetLangStrs.append(langMap[l])
+    strToLangId = {v: k for k, v in langMap.items()}
+    prefix_labels = {
+        "Book": "书籍",
+        "Costume": "衣装",
+        "Relic": "圣遗物",
+        "Weapon": "武器",
+        "Wings": "风之翼",
+    }
+
+    if voice_filter == "all":
+        total_textmap = databaseHelper.countTextMapFromKeyword(keyword, langCode)
+        total_readable = 0
+        if langStr:
+            total_readable = databaseHelper.countReadableFromKeyword(keyword, langCode, langStr)
+        total_subtitle = databaseHelper.countSubtitleFromKeyword(keyword, langCode)
+        total = total_textmap + total_readable + total_subtitle + (1 if hash_extra else 0)
+
+        offset = (safe_page - 1) * safe_size
+        remaining = safe_size
+
+        if hash_extra and offset == 0 and hash_obj is not None:
             ans.append(hash_obj)
             text_hashes_seen.add(hash_value)
+            remaining -= 1
 
-    contents = databaseHelper.selectTextMapFromKeyword(keyword, langCode)
+        offset_after_hash = offset - (1 if hash_extra else 0)
+        if offset_after_hash < 0:
+            offset_after_hash = 0
+
+        if remaining > 0 and offset_after_hash < total_textmap:
+            rows = databaseHelper.selectTextMapFromKeywordPaged(
+                keyword,
+                langCode,
+                remaining,
+                offset_after_hash,
+                hash_value if is_hash_query else None,
+            )
+            for text_hash, _content in rows:
+                if text_hash in text_hashes_seen:
+                    continue
+                text_hashes_seen.add(text_hash)
+                obj = queryTextHashInfo(text_hash, langs, sourceLangCode)
+                ans.append(obj)
+            remaining = safe_size - len(ans)
+            offset_after_hash = 0
+        else:
+            offset_after_hash -= total_textmap
+
+        if remaining > 0 and langStr and offset_after_hash < total_readable:
+            readableContents = databaseHelper.selectReadableFromKeyword(
+                keyword, langCode, langStr, remaining, offset_after_hash
+            )
+            for fileName, content, titleTextMapHash, readableId in readableContents:
+                fileHash = zlib.crc32(fileName.encode('utf-8'))
+                origin_label = "阅读物"
+                for prefix, label in prefix_labels.items():
+                    if fileName.startswith(prefix):
+                        origin_label = label
+                        break
+
+                origin = f"{origin_label}: {fileName}"
+                if titleTextMapHash:
+                    title = databaseHelper.getTextMapContent(titleTextMapHash, sourceLangCode)
+                    if title:
+                        origin = f"{origin_label}: {fileName} ({title})"
+
+                obj = {
+                    'translates': {},
+                    'voicePaths': [],
+                    'hash': fileHash,
+                    'isTalk': False,
+                    'origin': origin
+                }
+
+                translations = databaseHelper.selectReadableFromFileName(fileName, targetLangStrs)
+                for transContent, transLangStr in translations:
+                    if transLangStr in strToLangId:
+                        obj['translates'][strToLangId[transLangStr]] = transContent
+
+                ans.append(obj)
+
+            remaining = safe_size - len(ans)
+            offset_after_hash = 0
+        else:
+            offset_after_hash -= total_readable
+
+        if remaining > 0 and offset_after_hash < total_subtitle:
+            subtitleContents = databaseHelper.selectSubtitleFromKeyword(
+                keyword, langCode, remaining, offset_after_hash
+            )
+            for fileName, content, startTime, endTime, subtitleId in subtitleContents:
+                fileHash = zlib.crc32(f"{fileName}_{startTime}".encode('utf-8'))
+                origin = f"字幕: {fileName}"
+                obj = {
+                    'translates': {},
+                    'voicePaths': [],
+                    'hash': fileHash,
+                    'isTalk': False,
+                    'origin': origin,
+                    'isSubtitle': True,
+                    'fileName': fileName,
+                    'subtitleId': subtitleId
+                }
+                translations = []
+                if subtitleId:
+                    translations = databaseHelper.selectSubtitleTranslationsBySubtitleId(subtitleId, startTime, langs)
+                if not translations:
+                    translations = databaseHelper.selectSubtitleTranslations(fileName, startTime, langs)
+                for transContent, transLangCode in translations:
+                    obj['translates'][transLangCode] = transContent
+                ans.append(obj)
+
+        return ans, total
+
+    if voice_filter != "all":
+        hash_extra_filtered = False
+        if hash_extra and hash_obj is not None:
+            hash_has_voice = databaseHelper.hasVoiceForTextHashDb(hash_value)
+            if (voice_filter == "with" and hash_has_voice) or (
+                voice_filter == "without" and not hash_has_voice
+            ):
+                hash_extra_filtered = True
+
+        total_textmap = databaseHelper.countTextMapFromKeywordVoice(keyword, langCode, voice_filter)
+        total_readable = 0
+        total_subtitle = 0
+        if voice_filter == "without":
+            if langStr:
+                total_readable = databaseHelper.countReadableFromKeyword(keyword, langCode, langStr)
+            total_subtitle = databaseHelper.countSubtitleFromKeyword(keyword, langCode)
+
+        total = total_textmap + total_readable + total_subtitle + (1 if hash_extra_filtered else 0)
+
+        offset = (safe_page - 1) * safe_size
+        remaining = safe_size
+
+        if hash_extra_filtered and offset == 0 and hash_obj is not None:
+            ans.append(hash_obj)
+            remaining -= 1
+
+        offset_after_hash = offset - (1 if hash_extra_filtered else 0)
+        if offset_after_hash < 0:
+            offset_after_hash = 0
+
+        if remaining > 0 and offset_after_hash < total_textmap:
+            rows = databaseHelper.selectTextMapFromKeywordPaged(
+                keyword,
+                langCode,
+                remaining,
+                offset_after_hash,
+                hash_value if is_hash_query else None,
+                voice_filter,
+            )
+            for text_hash, _content in rows:
+                if text_hash in text_hashes_seen:
+                    continue
+                text_hashes_seen.add(text_hash)
+                obj = queryTextHashInfo(text_hash, langs, sourceLangCode)
+                ans.append(obj)
+            remaining = safe_size - len(ans)
+            offset_after_hash = 0
+        else:
+            offset_after_hash -= total_textmap
+
+        if voice_filter == "without":
+            if remaining > 0 and langStr and offset_after_hash < total_readable:
+                readableContents = databaseHelper.selectReadableFromKeyword(
+                    keyword, langCode, langStr, remaining, offset_after_hash
+                )
+                for fileName, content, titleTextMapHash, readableId in readableContents:
+                    fileHash = zlib.crc32(fileName.encode('utf-8'))
+                    origin_label = "阅读物"
+                    for prefix, label in prefix_labels.items():
+                        if fileName.startswith(prefix):
+                            origin_label = label
+                            break
+
+                    origin = f"{origin_label}: {fileName}"
+                    if titleTextMapHash:
+                        title = databaseHelper.getTextMapContent(titleTextMapHash, sourceLangCode)
+                        if title:
+                            origin = f"{origin_label}: {fileName} ({title})"
+
+                    obj = {
+                        'translates': {},
+                        'voicePaths': [],
+                        'hash': fileHash,
+                        'isTalk': False,
+                        'origin': origin
+                    }
+
+                    translations = databaseHelper.selectReadableFromFileName(fileName, targetLangStrs)
+                    for transContent, transLangStr in translations:
+                        if transLangStr in strToLangId:
+                            obj['translates'][strToLangId[transLangStr]] = transContent
+
+                    ans.append(obj)
+
+                remaining = safe_size - len(ans)
+                offset_after_hash = 0
+            else:
+                offset_after_hash -= total_readable
+
+            if remaining > 0 and offset_after_hash < total_subtitle:
+                subtitleContents = databaseHelper.selectSubtitleFromKeyword(
+                    keyword, langCode, remaining, offset_after_hash
+                )
+                for fileName, content, startTime, endTime, subtitleId in subtitleContents:
+                    fileHash = zlib.crc32(f"{fileName}_{startTime}".encode('utf-8'))
+                    origin = f"字幕: {fileName}"
+                    obj = {
+                        'translates': {},
+                        'voicePaths': [],
+                        'hash': fileHash,
+                        'isTalk': False,
+                        'origin': origin,
+                        'isSubtitle': True,
+                        'fileName': fileName,
+                        'subtitleId': subtitleId
+                    }
+                    translations = []
+                    if subtitleId:
+                        translations = databaseHelper.selectSubtitleTranslationsBySubtitleId(subtitleId, startTime, langs)
+                    if not translations:
+                        translations = databaseHelper.selectSubtitleTranslations(fileName, startTime, langs)
+                    for transContent, transLangCode in translations:
+                        obj['translates'][transLangCode] = transContent
+                    ans.append(obj)
+
+        return ans, total
+
+    if hash_obj and hash_obj.get('translates'):
+        ans.append(hash_obj)
+        text_hashes_seen.add(hash_value)
+
+    contents = databaseHelper.selectTextMapFromKeywordPaged(
+        keyword, langCode, candidate_limit, 0, hash_value if is_hash_query else None
+    )
 
     for content in contents:
         text_hash = content[0]
@@ -200,32 +535,13 @@ def getTranslateObj(keyword: str, langCode: int, speaker: str | None = None):
         text_hashes_seen.add(text_hash)
         obj = queryTextHashInfo(text_hash, langs, sourceLangCode)
         ans.append(obj)
-    # Search readable
-    langMap = databaseHelper.getLangCodeMap()
-    if langCode in langMap:
-        langStr = langMap[langCode]
-        readableContents = databaseHelper.selectReadableFromKeyword(keyword, langCode, langStr)
-        
-        targetLangStrs = []
-        for l in langs:
-            if l in langMap:
-                targetLangStrs.append(langMap[l])
-        
-        # Reverse map for result construction
-        strToLangId = {v: k for k, v in langMap.items()}
 
-        prefix_labels = {
-            "Book": "书籍",
-            "Costume": "衣装",
-            "Relic": "圣遗物",
-            "Weapon": "武器",
-            "Wings": "风之翼",
-        }
-
+    if langStr:
+        readableContents = databaseHelper.selectReadableFromKeyword(
+            keyword, langCode, langStr, candidate_limit
+        )
         for fileName, content, titleTextMapHash, readableId in readableContents:
-            # Generate a stable hash for the filename
             fileHash = zlib.crc32(fileName.encode('utf-8'))
-            
             origin_label = "阅读物"
             for prefix, label in prefix_labels.items():
                 if fileName.startswith(prefix):
@@ -245,25 +561,17 @@ def getTranslateObj(keyword: str, langCode: int, speaker: str | None = None):
                 'isTalk': False,
                 'origin': origin
             }
-            
-            # Get translations
-            translations = databaseHelper.selectReadableFromFileName(fileName, targetLangStrs)
 
+            translations = databaseHelper.selectReadableFromFileName(fileName, targetLangStrs)
             for transContent, transLangStr in translations:
                 if transLangStr in strToLangId:
                     obj['translates'][strToLangId[transLangStr]] = transContent
-            
             ans.append(obj)
 
-    # Search subtitles
-    subtitleContents = databaseHelper.selectSubtitleFromKeyword(keyword, langCode)
+    subtitleContents = databaseHelper.selectSubtitleFromKeyword(keyword, langCode, candidate_limit)
     for fileName, content, startTime, endTime, subtitleId in subtitleContents:
-        # Generate a stable hash for the subtitle line
-        # Use fileName + startTime to be unique
         fileHash = zlib.crc32(f"{fileName}_{startTime}".encode('utf-8'))
-        
         origin = f"字幕: {fileName}"
-        
         obj = {
             'translates': {},
             'voicePaths': [],
@@ -274,18 +582,13 @@ def getTranslateObj(keyword: str, langCode: int, speaker: str | None = None):
             'fileName': fileName,
             'subtitleId': subtitleId
         }
-        
-        # Get translations
         translations = []
         if subtitleId:
             translations = databaseHelper.selectSubtitleTranslationsBySubtitleId(subtitleId, startTime, langs)
-        
         if not translations:
             translations = databaseHelper.selectSubtitleTranslations(fileName, startTime, langs)
-        
         for transContent, transLangCode in translations:
             obj['translates'][transLangCode] = transContent
-            
         ans.append(obj)
 
     keyword_lower = keyword.strip().lower()
@@ -314,25 +617,16 @@ def getTranslateObj(keyword: str, langCode: int, speaker: str | None = None):
         )
 
     ans.sort(key=sort_key)
+    ans = apply_voice_filter(ans)
 
-    if speaker_keyword:
-        speaker_norm = normalize_speaker(speaker_keyword)
+    total = databaseHelper.countTextMapFromKeyword(keyword, langCode)
+    if langStr:
+        total += databaseHelper.countReadableFromKeyword(keyword, langCode, langStr)
+    total += databaseHelper.countSubtitleFromKeyword(keyword, langCode)
+    if hash_extra:
+        total += 1
 
-        filtered = []
-        for entry in ans:
-            text_hash = entry.get('hash')
-            if text_hash is None:
-                continue
-            talker_name = databaseHelper.getTalkerNameFromTextHash(text_hash, langCode)
-            entry['talker'] = talker_name
-            if not talker_name:
-                continue
-            talker_norm = normalize_speaker(talker_name)
-            if speaker_norm in talker_norm:
-                filtered.append(entry)
-        ans = filtered
-
-    return ans
+    return paginate(ans, total)
 
 
 def searchNameEntries(keyword: str, langCode: int):
@@ -549,35 +843,41 @@ def getAvatarStories(avatarId: int, searchLang: int | None = None):
     }
 
 
-def getQuestDialogues(questId: int, searchLang: int | None = None):
+def getQuestDialogues(
+    questId: int,
+    searchLang: int | None = None,
+    page: int = 1,
+    page_size: int = 200,
+):
     langs = config.getResultLanguages().copy()
     if searchLang and searchLang not in langs:
         langs.append(searchLang)
     sourceLangCode = config.getSourceLanguage()
 
     questCompleteName = databaseHelper.getQuestName(questId, sourceLangCode)
-    talkIds = databaseHelper.selectQuestTalkIds(questId)
+
+    if page < 1:
+        page = 1
+    if page_size < 1:
+        page_size = 200
+
+    total = databaseHelper.countQuestDialogues(questId)
+    offset = (page - 1) * page_size
+    rows = databaseHelper.selectQuestDialoguesPaged(questId, page_size, offset)
     dialogues = []
 
-    for talkId in talkIds:
-        rawDialogues = databaseHelper.getTalkContent(talkId, None)
-        if rawDialogues is None:
-            continue
-        for rawDialogue in rawDialogues:
-            textHash, talkerType, talkerId, dialogueId = rawDialogue
-            obj = queryTextHashInfo(textHash, langs, sourceLangCode, False)
-            obj['talker'] = databaseHelper.getTalkerName(talkerType, talkerId, sourceLangCode)
-            obj['dialogueId'] = dialogueId
-            obj['talkId'] = talkId
-            dialogues.append(obj)
-
-    dialogues.sort(key=lambda item: (item.get('talkId', 0), item.get('dialogueId', 0)))
+    for textHash, talkerType, talkerId, dialogueId, talkId in rows:
+        obj = queryTextHashInfo(textHash, langs, sourceLangCode, False)
+        obj['talker'] = databaseHelper.getTalkerName(talkerType, talkerId, sourceLangCode)
+        obj['dialogueId'] = dialogueId
+        obj['talkId'] = talkId
+        dialogues.append(obj)
 
     return {
         "talkQuestName": questCompleteName,
         "talkId": 0,
-        "dialogues": dialogues
-    }
+        "dialogues": dialogues,
+    }, total
 
 
 # 根据hash值查询整个对话的内容
