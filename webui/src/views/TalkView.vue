@@ -176,13 +176,13 @@ const copyReadableContent = async (langCode) => {
 const copyDialogueText = async (text) => {
     const normalized = normalizeCopyText(text)
     if (!normalized) {
-        ElMessage.warning("豐｡譛牙庄螟榊宛逧・枚譛ｬ")
+        ElMessage.warning("没有可复制的文本")
         return
     }
     try {
         if (navigator.clipboard?.writeText) {
             await navigator.clipboard.writeText(normalized)
-            ElMessage.success("蟾ｲ螟榊宛")
+            ElMessage.success("已复制")
             return
         }
 
@@ -195,10 +195,10 @@ const copyDialogueText = async (text) => {
         textarea.select()
         document.execCommand('copy')
         document.body.removeChild(textarea)
-        ElMessage.success("蟾ｲ螟榊宛")
+        ElMessage.success("已复制")
     } catch (error) {
         console.error(error)
-        ElMessage.error("螟榊宛螟ｱ雍･・瑚ｯｷ謇句勘騾画叫譁・悽")
+        ElMessage.error("复制失败，请手动选择文本")
     }
 }
 
