@@ -43,10 +43,11 @@ const reloadPage = () => {
     playVoiceButtonDict = {}
     playableDialogueIdList = []
     totalCount.value = 0
+    const isSubtitle = !!route.query.isSubtitle
     const readableId = route.query.readableId
     const fileName = route.query.fileName
     const questId = route.query.questId
-    if (readableId || fileName) {
+    if ((readableId || fileName) && !isSubtitle) {
         isReadable.value = true
         showPlayer.value = false
         updateContentScrollClass()
@@ -200,6 +201,11 @@ const copyDialogueText = async (text) => {
         console.error(error)
         ElMessage.error("复制失败，请手动选择文本")
     }
+}
+
+const isCopyableText = (text) => {
+    const normalized = normalizeCopyText(text)
+    return normalized.trim().length > 0
 }
 
 const displayLanguages = computed(() => {
@@ -445,6 +451,7 @@ onDeactivated(() => {
                                 <div class="dialogueCell">
                                     <StylizedText :text="scope.row.translates[langCode]" :keyword="keyword"/>
                                     <el-button
+                                        v-if="isCopyableText(scope.row.translates[langCode])"
                                         class="copyDialogueButton"
                                         :icon="CopyDocument"
                                         circle
