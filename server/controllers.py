@@ -1,11 +1,155 @@
 import io
 import re
 import zlib
+from functools import lru_cache
 
 import databaseHelper
 import languagePackReader
 import config
 import placeholderHandler
+
+
+@lru_cache(maxsize=1024)
+def _count_dialogue_by_talker_keyword_cached(
+    speaker_keyword: str,
+    lang_code: int,
+    created_version: str | None,
+    updated_version: str | None,
+) -> int:
+    return databaseHelper.countDialogueByTalkerKeyword(
+        speaker_keyword,
+        lang_code,
+        created_version,
+        updated_version,
+    )
+
+
+@lru_cache(maxsize=1024)
+def _count_dialogue_by_talker_type_cached(
+    talker_type: str,
+    created_version: str | None,
+    updated_version: str | None,
+) -> int:
+    return databaseHelper.countDialogueByTalkerType(
+        talker_type,
+        created_version,
+        updated_version,
+    )
+
+
+@lru_cache(maxsize=1024)
+def _count_dialogue_by_talker_and_keyword_cached(
+    speaker_keyword: str,
+    keyword: str,
+    lang_code: int,
+    created_version: str | None,
+    updated_version: str | None,
+) -> int:
+    return databaseHelper.countDialogueByTalkerAndKeyword(
+        speaker_keyword,
+        keyword,
+        lang_code,
+        created_version,
+        updated_version,
+    )
+
+
+@lru_cache(maxsize=1024)
+def _count_dialogue_by_talker_type_and_keyword_cached(
+    talker_type: str,
+    keyword: str,
+    lang_code: int,
+    created_version: str | None,
+    updated_version: str | None,
+) -> int:
+    return databaseHelper.countDialogueByTalkerTypeAndKeyword(
+        talker_type,
+        keyword,
+        lang_code,
+        created_version,
+        updated_version,
+    )
+
+
+@lru_cache(maxsize=1024)
+def _count_fetter_by_speaker_and_keyword_cached(
+    speaker_keyword: str,
+    keyword: str,
+    lang_code: int,
+    created_version: str | None,
+    updated_version: str | None,
+) -> int:
+    return databaseHelper.countFetterBySpeakerAndKeyword(
+        speaker_keyword,
+        keyword,
+        lang_code,
+        created_version,
+        updated_version,
+    )
+
+
+@lru_cache(maxsize=2048)
+def _count_textmap_from_keyword_cached(
+    keyword: str,
+    lang_code: int,
+    created_version: str | None,
+    updated_version: str | None,
+) -> int:
+    return databaseHelper.countTextMapFromKeyword(
+        keyword,
+        lang_code,
+        created_version,
+        updated_version,
+    )
+
+
+@lru_cache(maxsize=2048)
+def _count_textmap_from_keyword_voice_cached(
+    keyword: str,
+    lang_code: int,
+    voice_filter: str,
+    created_version: str | None,
+    updated_version: str | None,
+) -> int:
+    return databaseHelper.countTextMapFromKeywordVoice(
+        keyword,
+        lang_code,
+        voice_filter,
+        created_version,
+        updated_version,
+    )
+
+
+@lru_cache(maxsize=2048)
+def _count_readable_from_keyword_cached(
+    keyword: str,
+    lang_code: int,
+    lang_str: str,
+    created_version: str | None,
+    updated_version: str | None,
+) -> int:
+    return databaseHelper.countReadableFromKeyword(
+        keyword,
+        lang_code,
+        lang_str,
+        created_version,
+        updated_version,
+    )
+
+
+@lru_cache(maxsize=2048)
+def _count_subtitle_from_keyword_cached(
+    keyword: str,
+    lang_code: int,
+    created_version: str | None,
+    updated_version: str | None,
+) -> int:
+    return databaseHelper.countSubtitleFromKeyword(
+        keyword,
+        lang_code,
+        created_version,
+        updated_version,
+    )
 
 
 def pickAssetDirViaDialog() -> str | None:
@@ -33,7 +177,7 @@ def pickAssetDirViaDialog() -> str | None:
         return picked
     except Exception:
         return None
-    
+
 
 def selectVoicePathFromTextHash(textHash: int):
     voicePath: str | None = databaseHelper.selectVoicePathFromTextHashInDialogue(textHash)
@@ -62,7 +206,14 @@ def selectVoiceOriginFromTextHash(textHash: int, langCode: int) -> tuple[str, bo
 
 def queryTextHashInfo(textHash: int, langs: 'list[int]', sourceLangCode: int, queryOrigin=True):
     obj = {'translates': {}, 'voicePaths': [], 'hash': textHash}
-    translates = databaseHelper.selectTextMapFromTextHash(textHash, langs)
+    lang_list = list(dict.fromkeys(langs or []))
+    if sourceLangCode and sourceLangCode not in lang_list:
+        lang_list.append(sourceLangCode)
+
+    translates = databaseHelper.selectTextMapFromTextHash(textHash, lang_list)
+    if not translates:
+        # Fallback: selected langs may be missing, return at least one available language.
+        translates = databaseHelper.selectTextMapFromTextHash(textHash, None)
     for translate in translates:
         # #开头的要进行占位符替换
         if translate[0].startswith("#"):
@@ -78,7 +229,7 @@ def queryTextHashInfo(textHash: int, langs: 'list[int]', sourceLangCode: int, qu
     voicePath = selectVoicePathFromTextHash(textHash)
     if voicePath is not None:
         voiceExist = False
-        for lang in langs:
+        for lang in lang_list:
             if lang in languagePackReader.langPackages and languagePackReader.checkAudioBin(voicePath, lang):
                 voiceExist = True
                 break
@@ -86,7 +237,18 @@ def queryTextHashInfo(textHash: int, langs: 'list[int]', sourceLangCode: int, qu
         if voiceExist:
             obj['voicePaths'].append(voicePath)
 
+    created_raw, updated_raw = databaseHelper.getTextMapVersionInfo(textHash, sourceLangCode)
+    obj.update(_build_version_fields(created_raw, updated_raw))
     return obj
+
+
+def _resolve_avatar_query_langs(search_lang: int | None = None) -> tuple[list[int], int, int]:
+    langs = config.getResultLanguages().copy()
+    if search_lang and search_lang not in langs:
+        langs.append(search_lang)
+    source_lang_code = config.getSourceLanguage()
+    keyword_lang_code = search_lang if search_lang else source_lang_code
+    return langs, source_lang_code, keyword_lang_code
 
 
 def _normalize_text_map_content(content: str | None, lang_code: int):
@@ -97,8 +259,46 @@ def _normalize_text_map_content(content: str | None, lang_code: int):
     return content
 
 
+def _get_text_map_content_with_fallback(
+    text_hash: int | None,
+    preferred_lang: int | None = None,
+    fallback_langs: list[int] | None = None,
+) -> str | None:
+    if not text_hash:
+        return None
+
+    ordered_langs: list[int] = []
+    seen_langs: set[int] = set()
+
+    def _push_lang(lang: int | None):
+        if lang is None:
+            return
+        if lang in seen_langs:
+            return
+        seen_langs.add(lang)
+        ordered_langs.append(lang)
+
+    _push_lang(preferred_lang)
+    for lang in (fallback_langs or []):
+        _push_lang(lang)
+
+    for lang in ordered_langs:
+        content = databaseHelper.getTextMapContent(text_hash, lang)
+        normalized = _normalize_text_map_content(content, lang)
+        if normalized:
+            return normalized
+
+    translations = databaseHelper.selectTextMapFromTextHash(text_hash, None)
+    for content, lang in translations:
+        normalized = _normalize_text_map_content(content, lang)
+        if normalized:
+            return normalized
+    return None
+
+
 _INT_PATTERN = re.compile(r"^[+-]?\d+$")
 _HEX_PATTERN = re.compile(r"^[+-]?0x[0-9a-fA-F]+$")
+_VERSION_PATTERN = re.compile(r"(\d+)\.(\d+)(?:\.\d+)?")
 
 
 def _parse_int_keyword(value: str | None) -> int | None:
@@ -114,6 +314,55 @@ def _parse_int_keyword(value: str | None) -> int | None:
     return None
 
 
+def _extract_version_tag(raw_version: str | None) -> str | None:
+    if raw_version is None:
+        return None
+    text = str(raw_version).strip()
+    if not text:
+        return None
+    matches = _VERSION_PATTERN.findall(text)
+    if not matches:
+        return None
+    major, minor = matches[-1]
+    return f"{major}.{minor}"
+
+
+def _normalize_version_filter(value: str | None) -> str | None:
+    if value is None:
+        return None
+    text = str(value).strip()
+    if not text:
+        return None
+    extracted = _extract_version_tag(text)
+    return extracted or text
+
+
+def _build_version_fields(created_raw: str | None, updated_raw: str | None) -> dict:
+    return {
+        "createdVersionRaw": created_raw,
+        "updatedVersionRaw": updated_raw,
+        "createdVersion": _extract_version_tag(created_raw),
+        "updatedVersion": _extract_version_tag(updated_raw),
+    }
+
+
+def _entry_version_match(entry: dict, created_filter: str | None, updated_filter: str | None) -> bool:
+    if created_filter:
+        created_tag = entry.get("createdVersion")
+        if created_tag != created_filter:
+            return False
+    if updated_filter:
+        # Updated-version queries should exclude rows whose created/updated are equal.
+        created_tag = entry.get("createdVersion")
+        updated_tag = entry.get("updatedVersion")
+        if created_tag and updated_tag:
+            if created_tag == updated_tag:
+                return False
+        if updated_tag != updated_filter:
+            return False
+    return True
+
+
 def _build_text_map_translates(text_hash: int | None, langs: 'list[int]'):
     if not text_hash:
         return None
@@ -126,6 +375,36 @@ def _build_text_map_translates(text_hash: int | None, langs: 'list[int]'):
     return result if result else None
 
 
+def _build_lang_str_to_id_map() -> dict[str, int]:
+    result: dict[str, int] = {}
+    lang_map = databaseHelper.getLangCodeMap()
+
+    def add_alias(alias: str, lang_id: int):
+        if not alias:
+            return
+        result[alias] = lang_id
+        result[alias.upper()] = lang_id
+
+    for lang_id, code_name in lang_map.items():
+        if not code_name:
+            continue
+        code_text = str(code_name).strip()
+        if not code_text:
+            continue
+        add_alias(code_text, lang_id)
+        m = re.match(r"^Text(?:Map)?([A-Za-z0-9_]+)\.json$", code_text, re.IGNORECASE)
+        if m:
+            short = m.group(1)
+            add_alias(short, lang_id)
+            add_alias(f"TextMap{short.upper()}.json", lang_id)
+            add_alias(f"Text{short.upper()}.json", lang_id)
+        elif re.fullmatch(r"[A-Za-z0-9_]{2,8}", code_text):
+            upper = code_text.upper()
+            add_alias(f"TextMap{upper}.json", lang_id)
+            add_alias(f"Text{upper}.json", lang_id)
+    return result
+
+
 def getTranslateObj(
     keyword: str,
     langCode: int,
@@ -133,9 +412,13 @@ def getTranslateObj(
     page: int = 1,
     page_size: int = 50,
     voice_filter: str = "all",
+    created_version: str | None = None,
+    updated_version: str | None = None,
 ):
     speaker_keyword = (speaker or "").strip()
     keyword_trim = keyword.strip()
+    created_version_filter = _normalize_version_filter(created_version)
+    updated_version_filter = _normalize_version_filter(updated_version)
 
     def normalize_speaker(value: str) -> str:
         normalized = value.strip().lower()
@@ -174,7 +457,11 @@ def getTranslateObj(
         speaker_norm = normalize_speaker(speaker_keyword)
 
         dialogue_rows = databaseHelper.selectDialogueByTalkerKeyword(
-            speaker_keyword, langCode, candidate_limit
+            speaker_keyword,
+            langCode,
+            candidate_limit,
+            created_version_filter,
+            updated_version_filter,
         )
         for textHash, talkerType, talkerId, _dialogueId in dialogue_rows:
             if textHash in seen_hashes:
@@ -184,7 +471,12 @@ def getTranslateObj(
             obj['talker'] = databaseHelper.getTalkerName(talkerType, talkerId, sourceLangCode)
             ans.append(obj)
 
-        total = databaseHelper.countDialogueByTalkerKeyword(speaker_keyword, langCode)
+        total = _count_dialogue_by_talker_keyword_cached(
+            speaker_keyword,
+            langCode,
+            created_version_filter,
+            updated_version_filter,
+        )
 
         for talkerType in ("TALK_ROLE_PLAYER", "TALK_ROLE_MATE_AVATAR"):
             talkerName = databaseHelper.getTalkerName(talkerType, 0, langCode)
@@ -193,7 +485,12 @@ def getTranslateObj(
             talker_norm = normalize_speaker(talkerName)
             if speaker_norm not in talker_norm:
                 continue
-            talker_rows = databaseHelper.selectDialogueByTalkerType(talkerType, candidate_limit)
+            talker_rows = databaseHelper.selectDialogueByTalkerType(
+                talkerType,
+                candidate_limit,
+                created_version_filter,
+                updated_version_filter,
+            )
             for textHash, talkerType, talkerId, _dialogueId in talker_rows:
                 if textHash in seen_hashes:
                     continue
@@ -201,7 +498,11 @@ def getTranslateObj(
                 obj = queryTextHashInfo(textHash, langs, sourceLangCode)
                 obj['talker'] = databaseHelper.getTalkerName(talkerType, talkerId, sourceLangCode)
                 ans.append(obj)
-            total += databaseHelper.countDialogueByTalkerType(talkerType)
+            total += _count_dialogue_by_talker_type_cached(
+                talkerType,
+                created_version_filter,
+                updated_version_filter,
+            )
 
         ans = apply_voice_filter(ans)
         return paginate(ans, total)
@@ -215,7 +516,12 @@ def getTranslateObj(
         seen_hashes = set()
 
         dialogue_rows = databaseHelper.selectDialogueByTalkerAndKeyword(
-            speaker_keyword, keyword_trim, langCode, candidate_limit
+            speaker_keyword,
+            keyword_trim,
+            langCode,
+            candidate_limit,
+            created_version_filter,
+            updated_version_filter,
         )
         for textHash, talkerType, talkerId, _dialogueId in dialogue_rows:
             if textHash in seen_hashes:
@@ -225,7 +531,13 @@ def getTranslateObj(
             obj['talker'] = databaseHelper.getTalkerName(talkerType, talkerId, langCode)
             ans.append(obj)
 
-        total = databaseHelper.countDialogueByTalkerAndKeyword(speaker_keyword, keyword_trim, langCode)
+        total = _count_dialogue_by_talker_and_keyword_cached(
+            speaker_keyword,
+            keyword_trim,
+            langCode,
+            created_version_filter,
+            updated_version_filter,
+        )
 
         speaker_norm = normalize_speaker(speaker_keyword)
         for talkerType in ("TALK_ROLE_PLAYER", "TALK_ROLE_MATE_AVATAR"):
@@ -236,7 +548,12 @@ def getTranslateObj(
             if speaker_norm not in talker_norm:
                 continue
             talker_rows = databaseHelper.selectDialogueByTalkerTypeAndKeyword(
-                talkerType, keyword_trim, langCode, candidate_limit
+                talkerType,
+                keyword_trim,
+                langCode,
+                candidate_limit,
+                created_version_filter,
+                updated_version_filter,
             )
             for textHash, talkerType, talkerId, _dialogueId in talker_rows:
                 if textHash in seen_hashes:
@@ -245,10 +562,21 @@ def getTranslateObj(
                 obj = queryTextHashInfo(textHash, langs, sourceLangCode)
                 obj['talker'] = databaseHelper.getTalkerName(talkerType, talkerId, langCode)
                 ans.append(obj)
-            total += databaseHelper.countDialogueByTalkerTypeAndKeyword(talkerType, keyword_trim, langCode)
+            total += _count_dialogue_by_talker_type_and_keyword_cached(
+                talkerType,
+                keyword_trim,
+                langCode,
+                created_version_filter,
+                updated_version_filter,
+            )
 
         fetter_rows = databaseHelper.selectFetterBySpeakerAndKeyword(
-            speaker_keyword, keyword_trim, langCode, candidate_limit
+            speaker_keyword,
+            keyword_trim,
+            langCode,
+            candidate_limit,
+            created_version_filter,
+            updated_version_filter,
         )
         for textHash, avatarId in fetter_rows:
             if textHash in seen_hashes:
@@ -257,7 +585,13 @@ def getTranslateObj(
             obj = queryTextHashInfo(textHash, langs, sourceLangCode)
             obj['talker'] = databaseHelper.getCharterName(avatarId, langCode)
             ans.append(obj)
-        total += databaseHelper.countFetterBySpeakerAndKeyword(speaker_keyword, keyword_trim, langCode)
+        total += _count_fetter_by_speaker_and_keyword_cached(
+            speaker_keyword,
+            keyword_trim,
+            langCode,
+            created_version_filter,
+            updated_version_filter,
+        )
 
         ans = apply_voice_filter(ans)
         return paginate(ans, total)
@@ -279,9 +613,12 @@ def getTranslateObj(
         hash_obj = queryTextHashInfo(hash_value, langs, sourceLangCode)
         if hash_obj.get('translates'):
             hash_obj['hashMatch'] = True
-            hash_extra = not databaseHelper.isTextMapHashInKeyword(
-                hash_value, keyword_trim, langCode
-            )
+            if _entry_version_match(hash_obj, created_version_filter, updated_version_filter):
+                hash_extra = not databaseHelper.isTextMapHashInKeyword(
+                    hash_value, keyword_trim, langCode
+                )
+            else:
+                hash_obj = None
 
     langMap = databaseHelper.getLangCodeMap()
     langStr = langMap.get(langCode)
@@ -289,7 +626,7 @@ def getTranslateObj(
     for l in langs:
         if l in langMap:
             targetLangStrs.append(langMap[l])
-    strToLangId = {v: k for k, v in langMap.items()}
+    strToLangId = _build_lang_str_to_id_map()
     prefix_labels = {
         "Book": "书籍",
         "Costume": "衣装",
@@ -299,11 +636,27 @@ def getTranslateObj(
     }
 
     if voice_filter == "all":
-        total_textmap = databaseHelper.countTextMapFromKeyword(keyword, langCode)
+        total_textmap = _count_textmap_from_keyword_cached(
+            keyword,
+            langCode,
+            created_version_filter,
+            updated_version_filter,
+        )
         total_readable = 0
         if langStr:
-            total_readable = databaseHelper.countReadableFromKeyword(keyword, langCode, langStr)
-        total_subtitle = databaseHelper.countSubtitleFromKeyword(keyword, langCode)
+            total_readable = _count_readable_from_keyword_cached(
+                keyword,
+                langCode,
+                langStr,
+                created_version_filter,
+                updated_version_filter,
+            )
+        total_subtitle = _count_subtitle_from_keyword_cached(
+            keyword,
+            langCode,
+            created_version_filter,
+            updated_version_filter,
+        )
         total = total_textmap + total_readable + total_subtitle + (1 if hash_extra else 0)
 
         offset = (safe_page - 1) * safe_size
@@ -325,8 +678,11 @@ def getTranslateObj(
                 remaining,
                 offset_after_hash,
                 hash_value if is_hash_query else None,
+                None,
+                created_version_filter,
+                updated_version_filter,
             )
-            for text_hash, _content in rows:
+            for text_hash, _content, _created_raw, _updated_raw in rows:
                 if text_hash in text_hashes_seen:
                     continue
                 text_hashes_seen.add(text_hash)
@@ -339,9 +695,15 @@ def getTranslateObj(
 
         if remaining > 0 and langStr and offset_after_hash < total_readable:
             readableContents = databaseHelper.selectReadableFromKeyword(
-                keyword, langCode, langStr, remaining, offset_after_hash
+                keyword,
+                langCode,
+                langStr,
+                remaining,
+                offset_after_hash,
+                created_version_filter,
+                updated_version_filter,
             )
-            for fileName, content, titleTextMapHash, readableId in readableContents:
+            for fileName, content, titleTextMapHash, readableId, created_raw, updated_raw in readableContents:
                 fileHash = zlib.crc32(fileName.encode('utf-8'))
                 origin_label = "阅读物"
                 for prefix, label in prefix_labels.items():
@@ -349,11 +711,12 @@ def getTranslateObj(
                         origin_label = label
                         break
 
-                origin = f"{origin_label}: {fileName}"
-                if titleTextMapHash:
-                    title = databaseHelper.getTextMapContent(titleTextMapHash, sourceLangCode)
-                    if title:
-                        origin = f"{origin_label}: {fileName} ({title})"
+                title = _get_text_map_content_with_fallback(
+                    titleTextMapHash,
+                    sourceLangCode,
+                    [langCode],
+                )
+                origin = f"{origin_label}: {title}" if title else f"{origin_label}: {fileName}"
 
                 obj = {
                     'translates': {},
@@ -362,6 +725,7 @@ def getTranslateObj(
                     'isTalk': False,
                     'origin': origin
                 }
+                obj.update(_build_version_fields(created_raw, updated_raw))
 
                 translations = databaseHelper.selectReadableFromFileName(fileName, targetLangStrs)
                 for transContent, transLangStr in translations:
@@ -377,9 +741,14 @@ def getTranslateObj(
 
         if remaining > 0 and offset_after_hash < total_subtitle:
             subtitleContents = databaseHelper.selectSubtitleFromKeyword(
-                keyword, langCode, remaining, offset_after_hash
+                keyword,
+                langCode,
+                remaining,
+                offset_after_hash,
+                created_version_filter,
+                updated_version_filter,
             )
-            for fileName, content, startTime, endTime, subtitleId in subtitleContents:
+            for fileName, content, startTime, endTime, subtitleId, created_raw, updated_raw in subtitleContents:
                 fileHash = zlib.crc32(f"{fileName}_{startTime}".encode('utf-8'))
                 origin = f"字幕: {fileName}"
                 obj = {
@@ -392,6 +761,7 @@ def getTranslateObj(
                     'fileName': fileName,
                     'subtitleId': subtitleId
                 }
+                obj.update(_build_version_fields(created_raw, updated_raw))
                 translations = []
                 if subtitleId:
                     translations = databaseHelper.selectSubtitleTranslationsBySubtitleId(subtitleId, startTime, langs)
@@ -412,13 +782,30 @@ def getTranslateObj(
             ):
                 hash_extra_filtered = True
 
-        total_textmap = databaseHelper.countTextMapFromKeywordVoice(keyword, langCode, voice_filter)
+        total_textmap = _count_textmap_from_keyword_voice_cached(
+            keyword,
+            langCode,
+            voice_filter,
+            created_version_filter,
+            updated_version_filter,
+        )
         total_readable = 0
         total_subtitle = 0
         if voice_filter == "without":
             if langStr:
-                total_readable = databaseHelper.countReadableFromKeyword(keyword, langCode, langStr)
-            total_subtitle = databaseHelper.countSubtitleFromKeyword(keyword, langCode)
+                total_readable = _count_readable_from_keyword_cached(
+                    keyword,
+                    langCode,
+                    langStr,
+                    created_version_filter,
+                    updated_version_filter,
+                )
+            total_subtitle = _count_subtitle_from_keyword_cached(
+                keyword,
+                langCode,
+                created_version_filter,
+                updated_version_filter,
+            )
 
         total = total_textmap + total_readable + total_subtitle + (1 if hash_extra_filtered else 0)
 
@@ -441,8 +828,10 @@ def getTranslateObj(
                 offset_after_hash,
                 hash_value if is_hash_query else None,
                 voice_filter,
+                created_version_filter,
+                updated_version_filter,
             )
-            for text_hash, _content in rows:
+            for text_hash, _content, _created_raw, _updated_raw in rows:
                 if text_hash in text_hashes_seen:
                     continue
                 text_hashes_seen.add(text_hash)
@@ -456,9 +845,15 @@ def getTranslateObj(
         if voice_filter == "without":
             if remaining > 0 and langStr and offset_after_hash < total_readable:
                 readableContents = databaseHelper.selectReadableFromKeyword(
-                    keyword, langCode, langStr, remaining, offset_after_hash
+                    keyword,
+                    langCode,
+                    langStr,
+                    remaining,
+                    offset_after_hash,
+                    created_version_filter,
+                    updated_version_filter,
                 )
-                for fileName, content, titleTextMapHash, readableId in readableContents:
+                for fileName, content, titleTextMapHash, readableId, created_raw, updated_raw in readableContents:
                     fileHash = zlib.crc32(fileName.encode('utf-8'))
                     origin_label = "阅读物"
                     for prefix, label in prefix_labels.items():
@@ -466,11 +861,12 @@ def getTranslateObj(
                             origin_label = label
                             break
 
-                    origin = f"{origin_label}: {fileName}"
-                    if titleTextMapHash:
-                        title = databaseHelper.getTextMapContent(titleTextMapHash, sourceLangCode)
-                        if title:
-                            origin = f"{origin_label}: {fileName} ({title})"
+                    title = _get_text_map_content_with_fallback(
+                        titleTextMapHash,
+                        sourceLangCode,
+                        [langCode],
+                    )
+                    origin = f"{origin_label}: {title}" if title else f"{origin_label}: {fileName}"
 
                     obj = {
                         'translates': {},
@@ -479,6 +875,7 @@ def getTranslateObj(
                         'isTalk': False,
                         'origin': origin
                     }
+                    obj.update(_build_version_fields(created_raw, updated_raw))
 
                     translations = databaseHelper.selectReadableFromFileName(fileName, targetLangStrs)
                     for transContent, transLangStr in translations:
@@ -494,9 +891,14 @@ def getTranslateObj(
 
             if remaining > 0 and offset_after_hash < total_subtitle:
                 subtitleContents = databaseHelper.selectSubtitleFromKeyword(
-                    keyword, langCode, remaining, offset_after_hash
+                    keyword,
+                    langCode,
+                    remaining,
+                    offset_after_hash,
+                    created_version_filter,
+                    updated_version_filter,
                 )
-                for fileName, content, startTime, endTime, subtitleId in subtitleContents:
+                for fileName, content, startTime, endTime, subtitleId, created_raw, updated_raw in subtitleContents:
                     fileHash = zlib.crc32(f"{fileName}_{startTime}".encode('utf-8'))
                     origin = f"字幕: {fileName}"
                     obj = {
@@ -509,6 +911,7 @@ def getTranslateObj(
                         'fileName': fileName,
                         'subtitleId': subtitleId
                     }
+                    obj.update(_build_version_fields(created_raw, updated_raw))
                     translations = []
                     if subtitleId:
                         translations = databaseHelper.selectSubtitleTranslationsBySubtitleId(subtitleId, startTime, langs)
@@ -525,7 +928,14 @@ def getTranslateObj(
         text_hashes_seen.add(hash_value)
 
     contents = databaseHelper.selectTextMapFromKeywordPaged(
-        keyword, langCode, candidate_limit, 0, hash_value if is_hash_query else None
+        keyword,
+        langCode,
+        candidate_limit,
+        0,
+        hash_value if is_hash_query else None,
+        None,
+        created_version_filter,
+        updated_version_filter,
     )
 
     for content in contents:
@@ -538,9 +948,15 @@ def getTranslateObj(
 
     if langStr:
         readableContents = databaseHelper.selectReadableFromKeyword(
-            keyword, langCode, langStr, candidate_limit
+            keyword,
+            langCode,
+            langStr,
+            candidate_limit,
+            None,
+            created_version_filter,
+            updated_version_filter,
         )
-        for fileName, content, titleTextMapHash, readableId in readableContents:
+        for fileName, content, titleTextMapHash, readableId, created_raw, updated_raw in readableContents:
             fileHash = zlib.crc32(fileName.encode('utf-8'))
             origin_label = "阅读物"
             for prefix, label in prefix_labels.items():
@@ -548,11 +964,12 @@ def getTranslateObj(
                     origin_label = label
                     break
 
-            origin = f"{origin_label}: {fileName}"
-            if titleTextMapHash:
-                title = databaseHelper.getTextMapContent(titleTextMapHash, sourceLangCode)
-                if title:
-                    origin = f"{origin_label}: {fileName} ({title})"
+            title = _get_text_map_content_with_fallback(
+                titleTextMapHash,
+                sourceLangCode,
+                [langCode],
+            )
+            origin = f"{origin_label}: {title}" if title else f"{origin_label}: {fileName}"
 
             obj = {
                 'translates': {},
@@ -561,6 +978,7 @@ def getTranslateObj(
                 'isTalk': False,
                 'origin': origin
             }
+            obj.update(_build_version_fields(created_raw, updated_raw))
 
             translations = databaseHelper.selectReadableFromFileName(fileName, targetLangStrs)
             for transContent, transLangStr in translations:
@@ -568,8 +986,15 @@ def getTranslateObj(
                     obj['translates'][strToLangId[transLangStr]] = transContent
             ans.append(obj)
 
-    subtitleContents = databaseHelper.selectSubtitleFromKeyword(keyword, langCode, candidate_limit)
-    for fileName, content, startTime, endTime, subtitleId in subtitleContents:
+    subtitleContents = databaseHelper.selectSubtitleFromKeyword(
+        keyword,
+        langCode,
+        candidate_limit,
+        None,
+        created_version_filter,
+        updated_version_filter,
+    )
+    for fileName, content, startTime, endTime, subtitleId, created_raw, updated_raw in subtitleContents:
         fileHash = zlib.crc32(f"{fileName}_{startTime}".encode('utf-8'))
         origin = f"字幕: {fileName}"
         obj = {
@@ -582,6 +1007,7 @@ def getTranslateObj(
             'fileName': fileName,
             'subtitleId': subtitleId
         }
+        obj.update(_build_version_fields(created_raw, updated_raw))
         translations = []
         if subtitleId:
             translations = databaseHelper.selectSubtitleTranslationsBySubtitleId(subtitleId, startTime, langs)
@@ -619,19 +1045,48 @@ def getTranslateObj(
     ans.sort(key=sort_key)
     ans = apply_voice_filter(ans)
 
-    total = databaseHelper.countTextMapFromKeyword(keyword, langCode)
+    total = _count_textmap_from_keyword_cached(
+        keyword,
+        langCode,
+        created_version_filter,
+        updated_version_filter,
+    )
     if langStr:
-        total += databaseHelper.countReadableFromKeyword(keyword, langCode, langStr)
-    total += databaseHelper.countSubtitleFromKeyword(keyword, langCode)
+        total += _count_readable_from_keyword_cached(
+            keyword,
+            langCode,
+            langStr,
+            created_version_filter,
+            updated_version_filter,
+        )
+    total += _count_subtitle_from_keyword_cached(
+        keyword,
+        langCode,
+        created_version_filter,
+        updated_version_filter,
+    )
     if hash_extra:
         total += 1
 
     return paginate(ans, total)
 
 
-def searchNameEntries(keyword: str, langCode: int):
+def searchNameEntries(
+    keyword: str,
+    langCode: int,
+    created_version: str | None = None,
+    updated_version: str | None = None,
+):
     quests = []
     readables = []
+    keyword_trim = (keyword or "").strip()
+    created_version_filter = _normalize_version_filter(created_version)
+    updated_version_filter = _normalize_version_filter(updated_version)
+    if not keyword_trim and not created_version_filter and not updated_version_filter:
+        return {
+            "quests": [],
+            "readables": []
+        }
 
     def format_chapter_name(chapter_num: str | None, chapter_title: str | None):
         if chapter_num and chapter_title:
@@ -642,63 +1097,179 @@ def searchNameEntries(keyword: str, langCode: int):
             return chapter_num
         return None
     quest_map = {}
-    questMatches = databaseHelper.selectQuestByTitleKeyword(keyword, langCode)
-    for questId, questTitle in questMatches:
-        chapterName = databaseHelper.getQuestChapterName(questId, langCode)
-        quest_map[questId] = {
-            "questId": questId,
-            "title": questTitle,
-            "chapterName": chapterName
-        }
+    if keyword_trim:
+        questMatches = databaseHelper.selectQuestByTitleKeyword(
+            keyword_trim,
+            langCode,
+            created_version_filter,
+            updated_version_filter,
+        )
+        for questId, questTitle, created_raw, updated_raw in questMatches:
+            chapterName = databaseHelper.getQuestChapterName(questId, langCode)
+            quest_map[questId] = {
+                "questId": questId,
+                "title": questTitle,
+                "chapterName": chapterName,
+                **_build_version_fields(created_raw, updated_raw),
+            }
 
-    chapterMatches = databaseHelper.selectQuestByChapterKeyword(keyword, langCode)
-    for questId, questTitle, chapterTitle, chapterNum in chapterMatches:
-        if questId in quest_map:
-            continue
-        chapterName = format_chapter_name(chapterNum, chapterTitle)
-        quest_map[questId] = {
-            "questId": questId,
-            "title": questTitle,
-            "chapterName": chapterName
-        }
-    questIdMatches = databaseHelper.selectQuestByIdContains(keyword, langCode)
-    for questId, questTitle in questIdMatches:
-        if questId in quest_map:
-            continue
-        chapterName = databaseHelper.getQuestChapterName(questId, langCode)
-        quest_map[questId] = {
-            "questId": questId,
-            "title": questTitle,
-            "chapterName": chapterName
-        }
+        chapterMatches = databaseHelper.selectQuestByChapterKeyword(
+            keyword_trim,
+            langCode,
+            created_version_filter,
+            updated_version_filter,
+        )
+        for questId, questTitle, chapterTitle, chapterNum, created_raw, updated_raw in chapterMatches:
+            if questId in quest_map:
+                continue
+            chapterName = format_chapter_name(chapterNum, chapterTitle)
+            quest_map[questId] = {
+                "questId": questId,
+                "title": questTitle,
+                "chapterName": chapterName,
+                **_build_version_fields(created_raw, updated_raw),
+            }
+        questIdMatches = databaseHelper.selectQuestByIdContains(
+            keyword_trim,
+            langCode,
+            created_version_filter,
+            updated_version_filter,
+        )
+        for questId, questTitle, created_raw, updated_raw in questIdMatches:
+            if questId in quest_map:
+                continue
+            chapterName = databaseHelper.getQuestChapterName(questId, langCode)
+            quest_map[questId] = {
+                "questId": questId,
+                "title": questTitle,
+                "chapterName": chapterName,
+                **_build_version_fields(created_raw, updated_raw),
+            }
+    else:
+        questMatches = databaseHelper.selectQuestByVersion(
+            langCode,
+            created_version_filter,
+            updated_version_filter,
+        )
+        for questId, questTitle, created_raw, updated_raw in questMatches:
+            chapterName = databaseHelper.getQuestChapterName(questId, langCode)
+            quest_map[questId] = {
+                "questId": questId,
+                "title": questTitle,
+                "chapterName": chapterName,
+                **_build_version_fields(created_raw, updated_raw),
+            }
 
     quests.extend(quest_map.values())
 
     langMap = databaseHelper.getLangCodeMap()
     if langCode in langMap:
         langStr = langMap[langCode]
-        readableMatches = databaseHelper.selectReadableByTitleKeyword(keyword, langCode, langStr)
         readable_seen = set()
-        for fileName, readableId, titleTextMapHash, title in readableMatches:
-            readables.append({
-                "fileName": fileName,
-                "readableId": readableId,
-                "title": title,
-                "titleTextMapHash": titleTextMapHash
-            })
-            readable_seen.add((readableId, fileName))
-        readableFileMatches = databaseHelper.selectReadableByFileNameContains(keyword, langCode, langStr)
-        for fileName, readableId, titleTextMapHash, title in readableFileMatches:
-            key = (readableId, fileName)
-            if key in readable_seen:
-                continue
-            readable_seen.add(key)
-            readables.append({
-                "fileName": fileName,
-                "readableId": readableId,
-                "title": title or fileName,
-                "titleTextMapHash": titleTextMapHash
-            })
+        if keyword_trim:
+            readableMatches = databaseHelper.selectReadableByTitleKeyword(
+                keyword_trim,
+                langCode,
+                langStr,
+                created_version_filter,
+                updated_version_filter,
+            )
+            for fileName, readableId, titleTextMapHash, title, created_raw, updated_raw in readableMatches:
+                resolved_hash = titleTextMapHash
+                if resolved_hash is None:
+                    resolved_hash = databaseHelper.resolveReadableTitleHash(readableId, fileName)
+                resolved_title = title or _get_text_map_content_with_fallback(
+                    resolved_hash,
+                    langCode,
+                    [config.getSourceLanguage()],
+                )
+                readables.append({
+                    "fileName": fileName,
+                    "readableId": readableId,
+                    "title": resolved_title or fileName,
+                    "titleTextMapHash": resolved_hash,
+                    **_build_version_fields(created_raw, updated_raw),
+                })
+                readable_seen.add((readableId, fileName))
+            readableFileMatches = databaseHelper.selectReadableByFileNameContains(
+                keyword_trim,
+                langCode,
+                langStr,
+                created_version_filter,
+                updated_version_filter,
+            )
+            for fileName, readableId, titleTextMapHash, title, created_raw, updated_raw in readableFileMatches:
+                key = (readableId, fileName)
+                if key in readable_seen:
+                    continue
+                readable_seen.add(key)
+                resolved_hash = titleTextMapHash
+                if resolved_hash is None:
+                    resolved_hash = databaseHelper.resolveReadableTitleHash(readableId, fileName)
+                resolved_title = title or _get_text_map_content_with_fallback(
+                    resolved_hash,
+                    langCode,
+                    [config.getSourceLanguage()],
+                )
+                readables.append({
+                    "fileName": fileName,
+                    "readableId": readableId,
+                    "title": resolved_title or fileName,
+                    "titleTextMapHash": resolved_hash,
+                    **_build_version_fields(created_raw, updated_raw),
+                })
+            readableContentMatches = databaseHelper.selectReadableFromKeyword(
+                keyword_trim,
+                langCode,
+                langStr,
+                limit=200,
+                offset=None,
+                created_version=created_version_filter,
+                updated_version=updated_version_filter,
+            )
+            for fileName, _content, titleTextMapHash, readableId, created_raw, updated_raw in readableContentMatches:
+                key = (readableId, fileName)
+                if key in readable_seen:
+                    continue
+                readable_seen.add(key)
+                resolved_hash = titleTextMapHash
+                if resolved_hash is None:
+                    resolved_hash = databaseHelper.resolveReadableTitleHash(readableId, fileName)
+                title = _get_text_map_content_with_fallback(
+                    resolved_hash,
+                    langCode,
+                    [config.getSourceLanguage()],
+                )
+                readables.append({
+                    "fileName": fileName,
+                    "readableId": readableId,
+                    "title": title or fileName,
+                    "titleTextMapHash": resolved_hash,
+                    **_build_version_fields(created_raw, updated_raw),
+                })
+        else:
+            readableMatches = databaseHelper.selectReadableByVersion(
+                langCode,
+                langStr,
+                created_version_filter,
+                updated_version_filter,
+            )
+            for fileName, readableId, titleTextMapHash, title, created_raw, updated_raw in readableMatches:
+                resolved_hash = titleTextMapHash
+                if resolved_hash is None:
+                    resolved_hash = databaseHelper.resolveReadableTitleHash(readableId, fileName)
+                resolved_title = title or _get_text_map_content_with_fallback(
+                    resolved_hash,
+                    langCode,
+                    [config.getSourceLanguage()],
+                )
+                readables.append({
+                    "fileName": fileName,
+                    "readableId": readableId,
+                    "title": resolved_title or fileName,
+                    "titleTextMapHash": resolved_hash,
+                    **_build_version_fields(created_raw, updated_raw),
+                })
 
     return {
         "quests": quests,
@@ -720,10 +1291,7 @@ def searchAvatarEntries(keyword: str, langCode: int):
 
 
 def getAvatarVoices(avatarId: int, searchLang: int | None = None):
-    langs = config.getResultLanguages().copy()
-    if searchLang and searchLang not in langs:
-        langs.append(searchLang)
-    sourceLangCode = config.getSourceLanguage()
+    langs, sourceLangCode, _keywordLangCode = _resolve_avatar_query_langs(searchLang)
 
     avatarName = databaseHelper.getCharterName(avatarId, sourceLangCode)
     voice_rows = databaseHelper.selectAvatarVoiceItems(avatarId)
@@ -732,15 +1300,19 @@ def getAvatarVoices(avatarId: int, searchLang: int | None = None):
     seen_hashes = set()
 
     for titleHash, textHash, voicePath in voice_rows:
+        if textHash is None:
+            continue
         if textHash in seen_hashes:
             continue
         seen_hashes.add(textHash)
 
         obj = queryTextHashInfo(textHash, langs, sourceLangCode)
         obj['isTalk'] = False
+        obj['viewAsTextHash'] = True
+        obj['disableDetail'] = True
         if avatarName:
             if titleHash:
-                title = databaseHelper.getTextMapContent(titleHash, sourceLangCode)
+                title = _get_text_map_content_with_fallback(titleHash, sourceLangCode, langs)
                 if title:
                     obj['origin'] = f"{avatarName} · {title}"
                     obj['voiceTitle'] = title
@@ -752,6 +1324,8 @@ def getAvatarVoices(avatarId: int, searchLang: int | None = None):
                 obj['voiceTitle'] = ""
         else:
             obj['voiceTitle'] = ""
+        created_raw, updated_raw = databaseHelper.getTextMapVersionInfo(textHash, sourceLangCode)
+        obj.update(_build_version_fields(created_raw, updated_raw))
 
         if voicePath and voicePath not in obj.get('voicePaths', []):
             voiceExist = False
@@ -772,15 +1346,13 @@ def getAvatarVoices(avatarId: int, searchLang: int | None = None):
 
 
 def getAvatarStories(avatarId: int, searchLang: int | None = None):
-    langs = config.getResultLanguages().copy()
-    if searchLang and searchLang not in langs:
-        langs.append(searchLang)
-    sourceLangCode = config.getSourceLanguage()
+    langs, sourceLangCode, _keywordLangCode = _resolve_avatar_query_langs(searchLang)
 
     avatarName = databaseHelper.getCharterName(avatarId, sourceLangCode)
     story_rows = databaseHelper.selectAvatarStories(avatarId)
 
     stories = []
+    version_cache: dict[int | None, tuple[str | None, str | None]] = {}
 
     for (fetterId,
          storyTitleHash,
@@ -806,18 +1378,12 @@ def getAvatarStories(avatarId: int, searchLang: int | None = None):
 
             title = None
             if title_hash:
-                title = _normalize_text_map_content(
-                    databaseHelper.getTextMapContent(title_hash, sourceLangCode),
-                    sourceLangCode
-                )
+                title = _get_text_map_content_with_fallback(title_hash, sourceLangCode, langs)
             if not title and storyTitleLockedHash:
-                title = _normalize_text_map_content(
-                    databaseHelper.getTextMapContent(storyTitleLockedHash, sourceLangCode),
-                    sourceLangCode
-                )
+                title = _get_text_map_content_with_fallback(storyTitleLockedHash, sourceLangCode, langs)
 
             if avatarName and title:
-                origin = f"{avatarName} ﾂｷ {title}"
+                origin = f"{avatarName} · {title}"
             elif avatarName:
                 origin = avatarName
             elif title:
@@ -825,20 +1391,200 @@ def getAvatarStories(avatarId: int, searchLang: int | None = None):
             else:
                 origin = "角色故事"
 
+            if context_hash in version_cache:
+                created_raw, updated_raw = version_cache[context_hash]
+            else:
+                created_raw, updated_raw = databaseHelper.getTextMapVersionInfo(context_hash, sourceLangCode)
+                version_cache[context_hash] = (created_raw, updated_raw)
+
             stories.append({
                 "translates": translates,
                 "voicePaths": [],
                 "hash": context_hash,
                 "isTalk": False,
+                "viewAsTextHash": True,
+                "disableDetail": True,
                 "origin": origin,
                 "storyTitle": title or "",
                 "fetterId": fetterId,
-                "avatarName": avatarName or ""
+                "avatarName": avatarName or "",
+                **_build_version_fields(created_raw, updated_raw),
             })
 
     return {
         "avatarId": avatarId,
         "avatarName": avatarName,
+        "stories": stories
+    }
+
+
+def searchAvatarVoicesByFilters(
+    title_keyword: str | None = None,
+    searchLang: int | None = None,
+    created_version: str | None = None,
+    updated_version: str | None = None,
+    limit: int = 1200,
+):
+    langs, sourceLangCode, keywordLangCode = _resolve_avatar_query_langs(searchLang)
+
+    voice_rows = databaseHelper.selectAvatarVoiceItemsByFilters(
+        title_keyword,
+        keywordLangCode,
+        limit=limit,
+        created_version=created_version,
+        updated_version=updated_version,
+    )
+
+    voices = []
+    seen_keys = set()
+    avatar_name_cache: dict[int, str | None] = {}
+    title_cache: dict[int, str | None] = {}
+
+    for avatarId, titleHash, textHash, voicePath in voice_rows:
+        if textHash is None:
+            continue
+        dedupe_key = (avatarId, textHash)
+        if dedupe_key in seen_keys:
+            continue
+        seen_keys.add(dedupe_key)
+
+        if avatarId not in avatar_name_cache:
+            avatar_name_cache[avatarId] = databaseHelper.getCharterName(avatarId, sourceLangCode)
+        avatarName = avatar_name_cache[avatarId]
+
+        if titleHash and titleHash not in title_cache:
+            title_cache[titleHash] = _normalize_text_map_content(
+                databaseHelper.getTextMapContent(titleHash, sourceLangCode),
+                sourceLangCode,
+            )
+        title = title_cache.get(titleHash) if titleHash else None
+
+        obj = queryTextHashInfo(textHash, langs, sourceLangCode)
+        obj['isTalk'] = False
+        obj['viewAsTextHash'] = True
+        obj['disableDetail'] = True
+        if avatarName and title:
+            obj['origin'] = f"{avatarName} · {title}"
+            obj['voiceTitle'] = title
+        elif avatarName:
+            obj['origin'] = avatarName
+            obj['voiceTitle'] = ""
+        elif title:
+            obj['origin'] = title
+            obj['voiceTitle'] = title
+        else:
+            obj['origin'] = "角色语音"
+            obj['voiceTitle'] = ""
+        created_raw, updated_raw = databaseHelper.getTextMapVersionInfo(textHash, sourceLangCode)
+        obj.update(_build_version_fields(created_raw, updated_raw))
+
+        obj['avatarId'] = avatarId
+        obj['avatarName'] = avatarName or ""
+
+        if voicePath and voicePath not in obj.get('voicePaths', []):
+            voiceExist = False
+            for lang in langs:
+                if lang in languagePackReader.langPackages and languagePackReader.checkAudioBin(voicePath, lang):
+                    voiceExist = True
+                    break
+            if voiceExist:
+                obj['voicePaths'].append(voicePath)
+
+        voices.append(obj)
+
+    return {
+        "voices": voices
+    }
+
+
+def searchAvatarStoriesByFilters(
+    title_keyword: str | None = None,
+    searchLang: int | None = None,
+    created_version: str | None = None,
+    updated_version: str | None = None,
+    limit: int = 1600,
+):
+    langs, sourceLangCode, keywordLangCode = _resolve_avatar_query_langs(searchLang)
+
+    story_rows = databaseHelper.selectAvatarStoryItemsByFilters(
+        title_keyword,
+        keywordLangCode,
+        limit=limit,
+        created_version=created_version,
+        updated_version=updated_version,
+    )
+
+    stories = []
+    seen_keys = set()
+    version_cache: dict[int | None, tuple[str | None, str | None]] = {}
+    avatar_name_cache: dict[int, str | None] = {}
+    title_cache: dict[int, str | None] = {}
+
+    for avatarId, fetterId, titleHash, lockedTitleHash, contextHash in story_rows:
+        if contextHash is None:
+            continue
+        dedupe_key = (avatarId, contextHash)
+        if dedupe_key in seen_keys:
+            continue
+        seen_keys.add(dedupe_key)
+
+        translates = _build_text_map_translates(contextHash, langs)
+        if not translates:
+            continue
+
+        if avatarId not in avatar_name_cache:
+            avatar_name_cache[avatarId] = databaseHelper.getCharterName(avatarId, sourceLangCode)
+        avatarName = avatar_name_cache[avatarId]
+
+        title = None
+        if titleHash:
+            if titleHash not in title_cache:
+                title_cache[titleHash] = _get_text_map_content_with_fallback(
+                    titleHash,
+                    sourceLangCode,
+                    langs,
+                )
+            title = title_cache.get(titleHash)
+        if not title and lockedTitleHash:
+            if lockedTitleHash not in title_cache:
+                title_cache[lockedTitleHash] = _get_text_map_content_with_fallback(
+                    lockedTitleHash,
+                    sourceLangCode,
+                    langs,
+                )
+            title = title_cache.get(lockedTitleHash)
+
+        if avatarName and title:
+            origin = f"{avatarName} · {title}"
+        elif avatarName:
+            origin = avatarName
+        elif title:
+            origin = title
+        else:
+            origin = "角色故事"
+
+        if contextHash in version_cache:
+            created_raw, updated_raw = version_cache[contextHash]
+        else:
+            created_raw, updated_raw = databaseHelper.getTextMapVersionInfo(contextHash, sourceLangCode)
+            version_cache[contextHash] = (created_raw, updated_raw)
+
+        stories.append({
+            "translates": translates,
+            "voicePaths": [],
+            "hash": contextHash,
+            "isTalk": False,
+            "viewAsTextHash": True,
+            "disableDetail": True,
+            "origin": origin,
+            "storyTitle": title or "",
+            "fetterId": fetterId,
+            "avatarId": avatarId,
+            "avatarName": avatarName or "",
+            **_build_version_fields(created_raw, updated_raw),
+        })
+
+    return {
         "stories": stories
     }
 
@@ -883,14 +1629,26 @@ def getQuestDialogues(
 # 根据hash值查询整个对话的内容
 def getTalkFromHash(textHash: int, searchLang: int | None = None):
     # 先查到文本所属的talk，然后查询对话所属的任务的标题，然后查询对话所有的内容，对于每一句话，查询多语言翻译、说话者
-    talkInfo = databaseHelper.getTalkInfo(textHash)
-    if talkInfo is None:
-        raise Exception("内容不属于任何对话！")
-
     langs = config.getResultLanguages().copy()
     if searchLang and searchLang not in langs:
         langs.append(searchLang)
     sourceLangCode = config.getSourceLanguage()
+    if sourceLangCode and sourceLangCode not in langs:
+        langs.append(sourceLangCode)
+
+    talkInfo = databaseHelper.getTalkInfo(textHash)
+    if talkInfo is None:
+        # Fallback for non-dialogue text hashes, e.g. avatar story entries.
+        obj = queryTextHashInfo(textHash, langs, sourceLangCode, False)
+        if not obj.get("translates"):
+            raise Exception("内容不属于任何对话！")
+        obj['talker'] = "文本"
+        obj['dialogueId'] = textHash
+        return {
+            "talkQuestName": "文本详情",
+            "talkId": 0,
+            "dialogues": [obj]
+        }
 
     talkId, talkerType, talkerId, coopQuestId = talkInfo
     if coopQuestId is None:
@@ -914,7 +1672,8 @@ def getTalkFromHash(textHash: int, searchLang: int | None = None):
     ans = {
         "talkQuestName": questCompleteName,
         "talkId": talkId,
-        "dialogues": dialogues
+        "dialogues": dialogues,
+        **_build_version_fields(created_raw, updated_raw),
     }
 
     return ans
@@ -932,23 +1691,27 @@ def getReadableContent(readableId: int | None, fileName: str | None, searchLang:
         if l in langMap:
             targetLangStrs.append(langMap[l])
 
-    if fileName:
+    if readableId:
+        readableInfo = databaseHelper.getReadableInfo(readableId, None)
+    elif fileName:
         readableInfo = databaseHelper.getReadableInfo(None, fileName)
     else:
-        readableInfo = databaseHelper.getReadableInfo(readableId, None)
+        readableInfo = None
     readableTitle = None
+    created_raw = None
+    updated_raw = None
     if readableInfo:
         fileName, titleTextMapHash, readableId = readableInfo
-        if titleTextMapHash:
-            readableTitle = databaseHelper.getTextMapContent(titleTextMapHash, sourceLangCode)
+        readableTitle = _get_text_map_content_with_fallback(titleTextMapHash, sourceLangCode, langs)
+        created_raw, updated_raw = databaseHelper.getReadableVersionInfo(readableId, fileName)
 
     translations = []
-    if fileName:
-        translations = databaseHelper.selectReadableFromFileName(fileName, targetLangStrs)
-    elif readableId:
+    if readableId:
         translations = databaseHelper.selectReadableFromReadableId(readableId, targetLangStrs)
+    elif fileName:
+        translations = databaseHelper.selectReadableFromFileName(fileName, targetLangStrs)
 
-    strToLangId = {v: k for k, v in langMap.items()}
+    strToLangId = _build_lang_str_to_id_map()
     translateMap = {}
     for transContent, transLangStr in translations:
         if transLangStr in strToLangId:
@@ -958,55 +1721,64 @@ def getReadableContent(readableId: int | None, fileName: str | None, searchLang:
         "fileName": fileName,
         "readableId": readableId,
         "readableTitle": readableTitle,
-        "translates": translateMap
+        "translates": translateMap,
+        **_build_version_fields(created_raw, updated_raw),
     }
 
-def getSubtitleContext(fileName: str, subtitleId: int | None = None, searchLang: int | None = None):
+def getSubtitleContext(fileName: str, _subtitleId: int | None = None, searchLang: int | None = None):
     langs = config.getResultLanguages().copy()
     if searchLang and searchLang not in langs:
         langs.append(searchLang)
-    
-    # Fetch all lines
-    if subtitleId:
-        lines = databaseHelper.selectSubtitleContextBySubtitleId(subtitleId, langs)
-    else:
-        lines = databaseHelper.selectSubtitleContext(fileName, langs)
-        
-    # Group by startTime (cluster within <threshold> seconds)
-    clusters = []
-    
-    # Sort lines by startTime
-    lines.sort(key=lambda x: x[2])
 
-    threshold = 0.5
-    
+    # Always load subtitle context by file base to keep multi-language lines available.
+    lines = databaseHelper.selectSubtitleContext(fileName, langs)
+
+    # Subtitle versions are file-level.
+    created_raw, updated_raw = databaseHelper.getSubtitleFileVersionInfo(fileName)
+
+    # Group by per-language line index (more stable than timestamp across language variants).
+    lines_by_lang: dict[int, list[tuple[str, float, float]]] = {}
     for content, lang, startTime, endTime in lines:
-        # Check last cluster
-        if clusters and abs(clusters[-1]['time'] - startTime) < threshold and lang not in clusters[-1]['translates']:
-            clusters[-1]['translates'][lang] = content
-        else:
-            clusters.append({
-                'time': startTime,
-                'translates': {lang: content},
-                'voicePaths': [],
-                'talker': '', # Subtitles usually don't have talker info in the text
-                'dialogueId': int(startTime * 1000) # Use ms as ID
-            })
-            
-    # Format for frontend
+        lines_by_lang.setdefault(lang, []).append((content, startTime, endTime))
+    for lang in lines_by_lang:
+        lines_by_lang[lang].sort(key=lambda x: x[1])
+
+    max_line_count = 0
+    for lang_lines in lines_by_lang.values():
+        if len(lang_lines) > max_line_count:
+            max_line_count = len(lang_lines)
+
     dialogues = []
-    for cluster in clusters:
+    ordered_langs = [lang for lang in langs if lang in lines_by_lang]
+    if not ordered_langs:
+        ordered_langs = sorted(lines_by_lang.keys())
+
+    for idx in range(max_line_count):
+        translates = {}
+        start_time = None
+        for lang in ordered_langs:
+            lang_lines = lines_by_lang.get(lang) or []
+            if idx >= len(lang_lines):
+                continue
+            content, line_start, _line_end = lang_lines[idx]
+            translates[lang] = content
+            if start_time is None:
+                start_time = line_start
+        if not translates:
+            continue
         dialogues.append({
             'talker': '',
-            'translates': cluster['translates'],
+            'translates': translates,
             'voicePaths': [],
-            'dialogueId': cluster['dialogueId']
+            'dialogueId': int((start_time or 0) * 1000) + idx,
+            **_build_version_fields(created_raw, updated_raw),
         })
-        
+
     return {
         "talkQuestName": f"字幕: {fileName}",
         "talkId": 0,
-        "dialogues": dialogues
+        "dialogues": dialogues,
+        **_build_version_fields(created_raw, updated_raw),
     }
 
 
@@ -1032,6 +1804,26 @@ def getImportedTextMapLangs():
         ans[langItem[0]] = langItem[1]
 
     return ans
+
+
+def getAvailableVersions():
+    raw_versions = databaseHelper.getAllVersionValues()
+    tags: set[str] = set()
+    for raw in raw_versions:
+        tag = _extract_version_tag(raw)
+        if tag:
+            tags.add(tag)
+
+    def _version_sort_key(version_tag: str):
+        parts = version_tag.split(".")
+        try:
+            major = int(parts[0])
+            minor = int(parts[1]) if len(parts) > 1 else 0
+        except Exception:
+            major, minor = -1, -1
+        return major, minor
+
+    return sorted(tags, key=_version_sort_key, reverse=True)
 
 
 def getConfig():
