@@ -1,103 +1,240 @@
 import os
-import re
-from tqdm import tqdm
 import json
+import sys
+from tqdm import tqdm
+
 from DBConfig import conn, LANG_PATH
+from import_utils import (
+    DEFAULT_BATCH_SIZE,
+    build_versioned_upsert_sql,
+    drop_temp_table,
+    executemany_batched,
+    iter_batches,
+    reset_temp_table,
+    to_hash_value,
+)
+from versioning import ensure_version_schema, get_current_version, get_or_create_version_id
+from textmap_name_utils import parse_textmap_file_name, textmap_file_sort_key
 
 
-def importTextMap(baseMapName: str, fileList: list):
+def _print_issue_summary(title: str, items: list[str], sample_size: int = 10):
+    if not items:
+        return
+    samples = items[: max(1, sample_size)]
+    sample_text = ", ".join(samples)
+    remaining = len(items) - len(samples)
+    if remaining > 0:
+        sample_text += f", ...(+{remaining})"
+    print(f"[SUMMARY] {title}: {len(items)}. samples: {sample_text}")
+
+
+def _print_skip_summary(title: str, skipped_files: list[str], sample_size: int = 10):
+    if not skipped_files:
+        return
+    _print_issue_summary(title, skipped_files, sample_size=sample_size)
+
+
+def _load_existing_textmap_content_by_hash(
+    cursor,
+    lang_id: int,
+    hashes: list,
+    *,
+    chunk_size: int = 900,
+) -> dict:
     """
-    :param baseMapName: 数据库 langCode 表中对应的 codeName (例如 TextMapRU.json)
-    :param fileList: 实际要读取的文件列表 (例如 ['TextMapRU_0.json', 'TextMapRU_1.json'])
+    Load existing textMap content for target hashes in chunks.
+    SQLite has a bound parameter limit, so keep IN list size conservative.
     """
+    existing: dict = {}
+    if not hashes:
+        return existing
+
+    dedup_hashes = list(dict.fromkeys(hashes))
+    safe_chunk_size = max(1, min(int(chunk_size), 900))
+    for batch in iter_batches(dedup_hashes, safe_chunk_size):
+        placeholders = ",".join(["?"] * len(batch))
+        sql = f"SELECT hash, content FROM textMap WHERE lang=? AND hash IN ({placeholders})"
+        cursor.execute(sql, (lang_id, *batch))
+        for row_hash, row_content in cursor.fetchall():
+            existing[row_hash] = row_content
+    return existing
+
+
+def importTextMap(
+    baseMapName: str,
+    fileList: list[str],
+    *,
+    commit: bool = True,
+    batch_size: int = DEFAULT_BATCH_SIZE,
+    force_reimport: bool = False,
+    prune_missing: bool = True,
+    current_version: str | None = None,
+    write_versions: bool = True,
+):
+    """
+    :param baseMapName: Base language config entry name, e.g. TextMapRU.json
+    :param fileList: Split files for that base map, e.g. [TextMapRU_0.json, TextMapRU_1.json]
+    """
+    ensure_version_schema()
+    version_id: int | None = None
+    if write_versions:
+        version = current_version or get_current_version()
+        version_id = get_or_create_version_id(version)
+
     cursor = conn.cursor()
-
-    # 1. 检查 baseMapName 是否在 langCode 表中
-    sql2 = "select id,imported from langCode where codeName = ?"
-    cursor.execute(sql2, (baseMapName,))
+    sql_lang = "select id, imported from langCode where codeName = ?"
+    cursor.execute(sql_lang, (baseMapName,))
     ans2 = cursor.fetchall()
     if len(ans2) == 0:
-        print("{} (Base for {}) 不是预定义的语言文件，已跳过".format(baseMapName, fileList))
+        print(f"{baseMapName} (Base for {fileList}) not found in langCode table")
+        cursor.close()
         return
 
     langId = ans2[0][0]
     imported = ans2[0][1]
 
-    # 2. 检查导入状态
-    if imported == 1:
-        ans = input("{} 似乎已经导入到数据库了，要重新导入吗？输入y清空该语言并重新导入，输入n取消该语言的导入: ".format(baseMapName))
-        if ans != 'y':
+    if imported == 1 and not force_reimport:
+        ans = input(
+            f"{baseMapName} already imported. Reimport and overwrite this language? (y/n): "
+        )
+        if ans != "y":
+            cursor.close()
             return
 
-    # 3. 清空旧数据 (只执行一次)
-    print(f"正在清空 {baseMapName} (ID: {langId}) 的旧数据...")
-    sql1 = 'delete from textMap where lang=?'
-    cursor.execute(sql1, (langId,))
+    print(f"Reimporting {baseMapName} (ID: {langId})...")
+    reset_temp_table(
+        cursor,
+        "CREATE TEMP TABLE IF NOT EXISTS _seen_textmap_hash(hash INTEGER PRIMARY KEY)",
+        "_seen_textmap_hash",
+    )
 
-    # 4. 循环读取所有分卷文件并插入数据
-    sql3 = "insert or ignore into textMap(hash, content, lang) values (?,?,?)"
-    
-    for fileName in fileList:
+    sql_seen = "INSERT OR IGNORE INTO _seen_textmap_hash(hash) VALUES (?)"
+    sql_upsert = build_versioned_upsert_sql(
+        table="textMap",
+        insert_columns=["hash", "content", "lang", "created_version_id", "updated_version_id"],
+        conflict_columns=["lang", "hash"],
+        update_columns=["content"],
+        compare_columns=["content"],
+    )
+    missing_files: list[str] = []
+    import_errors: list[str] = []
+    compared_hash_count = 0
+    changed_hash_count = 0
+
+    for fileName in tqdm(
+        fileList,
+        total=len(fileList),
+        desc=f"{baseMapName} files",
+        leave=False,
+        position=0,
+        dynamic_ncols=True,
+        file=sys.stdout,
+    ):
         filePath = os.path.join(LANG_PATH, fileName)
         if not os.path.exists(filePath):
-            print(f"文件不存在: {filePath}")
+            missing_files.append(fileName)
             continue
 
-        print(f"正在读取文件: {fileName} ...")
         try:
-            textMap = json.load(open(filePath, encoding='utf-8'))
-            print(f"正在导入 {fileName} 的数据...")
-            
-            # 使用 tqdm 显示进度
-            for hashVal, content in tqdm(textMap.items(), total=len(textMap), desc=fileName):
-                cursor.execute(sql3, (hashVal, content, langId))
-                
+            with open(filePath, encoding="utf-8") as f:
+                textMap = json.load(f)
+
+            parsed_rows: list[tuple] = []
+            parsed_hashes: list = []
+            for hashVal, content in textMap.items():
+                parsed_hash = to_hash_value(hashVal)
+                parsed_rows.append((parsed_hash, content))
+                parsed_hashes.append(parsed_hash)
+
+            existing_map = _load_existing_textmap_content_by_hash(
+                cursor,
+                langId,
+                parsed_hashes,
+            )
+            compared_hash_count += len(parsed_rows)
+
+            changed_rows = (
+                (row_hash, content, langId, version_id, version_id)
+                for row_hash, content in parsed_rows
+                if existing_map.get(row_hash) != content
+            )
+            changed_hash_count += executemany_batched(
+                cursor,
+                sql_upsert,
+                changed_rows,
+                batch_size=batch_size,
+            )
+
+            seen_iter = ((row_hash,) for row_hash in parsed_hashes)
+            executemany_batched(cursor, sql_seen, seen_iter, batch_size=batch_size)
+
         except Exception as e:
-            print(f"读取或导入 {fileName} 时发生错误: {e}")
+            import_errors.append(f"{fileName} ({e})")
 
-    # 5. 设置为已导入状态
-    sql4 = 'update langCode set imported=1 where id=?'
-    cursor.execute(sql4, (langId,))
-
+    if prune_missing:
+        cursor.execute(
+            "DELETE FROM textMap WHERE lang=? AND hash NOT IN (SELECT hash FROM _seen_textmap_hash)",
+            (langId,),
+        )
+    cursor.execute("update langCode set imported=1 where id=?", (langId,))
+    drop_temp_table(cursor, "_seen_textmap_hash")
     cursor.close()
-    conn.commit()
-    print(f"完成 {baseMapName} 的导入。")
+    _print_issue_summary(f"textmap missing files ({baseMapName})", missing_files)
+    _print_issue_summary(f"textmap import errors ({baseMapName})", import_errors)
+
+    if commit:
+        conn.commit()
+    print(
+        f"TextMap diff summary ({baseMapName}): "
+        f"checked={compared_hash_count}, changed={changed_hash_count}"
+    )
+    print(f"Done importing {baseMapName}.")
 
 
-def importAllTextMap():
+def importAllTextMap(
+    *,
+    commit: bool = True,
+    batch_size: int = DEFAULT_BATCH_SIZE,
+    prune_missing: bool = True,
+    current_version: str | None = None,
+    write_versions: bool = True,
+):
     if not os.path.exists(LANG_PATH):
-        print(f"语言文件夹 {LANG_PATH} 不存在")
+        print(f"TextMap directory not found: {LANG_PATH}")
         return
 
     files = os.listdir(LANG_PATH)
-    
-    # 分组字典: { 'TextMapRU.json': ['TextMapRU_0.json', 'TextMapRU_1.json'], 'TextMapCHS.json': ['TextMapCHS.json'] }
-    file_groups = {}
+    file_groups: dict[str, list[str]] = {}
+    unsupported_files: list[str] = []
 
     for fileName in files:
         if not fileName.endswith(".json"):
             continue
 
-        # 使用正则提取基础名称
-        # 匹配: TextMapXX_0.json 或 TextMapXX.json -> 提取 TextMapXX
-        match = re.match(r"^(TextMap[a-zA-Z]+)(?:_\d+)?\.json$", fileName)
-        
-        if match:
-            # 构造基础名称，例如 TextMapRU -> TextMapRU.json
-            base_name = match.group(1) + ".json"
-            
-            if base_name not in file_groups:
-                file_groups[base_name] = []
-            file_groups[base_name].append(fileName)
+        parsed = parse_textmap_file_name(fileName)
+        if parsed is not None:
+            base_name, _split_part = parsed
+            file_groups.setdefault(base_name, []).append(fileName)
         else:
-            print(f"跳过不符合命名规则的文件: {fileName}")
+            unsupported_files.append(fileName)
 
-    # 遍历每个组进行导入
+    _print_skip_summary("textmap unsupported filename", unsupported_files)
+
     for baseMapName, fileList in file_groups.items():
-        # 排序文件，确保按 0, 1, 2 顺序读取 (虽然对 Hash Map 影响不大，但更稳妥)
-        fileList.sort()
-        importTextMap(baseMapName, fileList)
+        fileList.sort(key=textmap_file_sort_key)
+        importTextMap(
+            baseMapName,
+            fileList,
+            commit=False,
+            batch_size=batch_size,
+            prune_missing=prune_missing,
+            current_version=current_version,
+            write_versions=write_versions,
+        )
+
+    if commit:
+        conn.commit()
 
 
 if __name__ == "__main__":
-    importAllTextMap()
+    importAllTextMap(write_versions=False)

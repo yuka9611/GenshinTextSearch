@@ -1,161 +1,326 @@
 import os
-import json
-import re
-from DBConfig import conn, DATA_PATH
+import sys
 from tqdm import tqdm
 
-# 语言文件夹名到数据库 langCode ID 的映射
-LANG_MAP = {
-    'CHS': 1, 'CHT': 2, 'DE': 3, 'EN': 4, 'ES': 5,
-    'FR': 6, 'ID': 7, 'IT': 8, 'JP': 9, 'KR': 10,
-    'PT': 11, 'RU': 12, 'TH': 13, 'TR': 14, 'VI': 15
-}
+from DBConfig import conn, DATA_PATH
+from import_utils import (
+    DEFAULT_BATCH_SIZE,
+    BufferedExecutemany,
+    build_versioned_upsert_sql,
+    drop_temp_table,
+    reset_temp_table,
+)
+from lang_constants import LANG_CODE_MAP
+from localization_utils import build_subtitle_filename_map, load_localization_entries
+from subtitle_utils import iter_srt_entries, subtitle_key
+from subtitle_version_utils import assign_subtitle_versions_by_text
+from versioning import ensure_version_schema, get_current_version, get_or_create_version_id
 
-def load_localization_config():
-    """
-    Loads LocalizationExcelConfigData.json and creates a mapping from filename to info (subtitleId).
-    """
-    loc_path = os.path.join(DATA_PATH, "ExcelBinOutput", "LocalizationExcelConfigData.json")
-    if not os.path.exists(loc_path):
-        print(f"Localization config not found: {loc_path}")
-        return {}
 
-    try:
-        with open(loc_path, 'r', encoding='utf-8') as f:
-            data = json.load(f)
-    except Exception as e:
-        print(f"Error loading LocalizationExcelConfigData.json: {e}")
-        return {}
+def _print_summary(title: str, items: list[str], sample_size: int = 10):
+    if not items:
+        return
+    samples = items[: max(1, sample_size)]
+    sample_text = ", ".join(samples)
+    remaining = len(items) - len(samples)
+    if remaining > 0:
+        sample_text += f", ...(+{remaining})"
+    print(f"[SUMMARY] {title}: {len(items)}. samples: {sample_text}")
 
-    # Map filename to info
-    filename_to_info = {}
-    
-    # Keys that might contain paths
-    path_keys = [
-        "dePath", "enPath", "esPath", "frPath", "idPath", "itPath", 
-        "jpPath", "krPath", "ptPath", "ruPath", "tcPath", "thPath", 
-        "trPath", "viPath", "EDPAFDDJJNM", "FNIFOPDJMMG"
-    ]
 
-    for entry in data:
-        # Only care about LOC_SUBTITLE
-        if entry.get('assetType') != 'LOC_SUBTITLE':
-            continue
-
-        subtitle_id = entry.get('id')
-        
-        for key in path_keys:
-            if key in entry:
-                path = entry[key]
-                if isinstance(path, str):
-                    # Extract filename from path
-                    # Path example: "CHS/Ambor_Readings_CHS.mihoyobin"
-                    # We need to match this with the actual .srt filename
-                    # Actual .srt filename: Ambor_Readings_CHS.srt
-                    # So we extract the basename without extension
-                    filename_no_ext = os.path.splitext(os.path.basename(path))[0]
-                    
-                    filename_to_info[filename_no_ext] = {
-                        'subtitleId': subtitle_id
-                    }
-
+def _load_subtitle_filename_map() -> dict:
+    print("Loading localization configs for subtitles...")
+    localization_entries = load_localization_entries(DATA_PATH)
+    filename_to_info = build_subtitle_filename_map(localization_entries)
+    print(f"Loaded {len(filename_to_info)} subtitle file mappings.")
     return filename_to_info
 
-def parse_srt_time(time_str):
-    """将 SRT 时间字符串 (00:00:01,500) 转换为秒 (1.5)"""
-    try:
-        time_str = time_str.replace(',', '.')
-        parts = time_str.split(':')
-        h = float(parts[0])
-        m = float(parts[1])
-        s = float(parts[2])
-        return h * 3600 + m * 60 + s
-    except:
-        return 0.0
 
-def importSubtitles():
-    print("Loading localization configs for subtitles...")
-    filename_to_info = load_localization_config()
-    print(f"Loaded {len(filename_to_info)} subtitle file mappings.")
+def _build_subtitle_upsert_sql() -> str:
+    return build_versioned_upsert_sql(
+        table="subtitle",
+        insert_columns=[
+            "fileName",
+            "lang",
+            "startTime",
+            "endTime",
+            "content",
+            "subtitleId",
+            "subtitleKey",
+            "created_version_id",
+            "updated_version_id",
+        ],
+        conflict_columns=["subtitleKey"],
+        update_columns=["fileName", "lang", "startTime", "endTime", "content", "subtitleId"],
+    )
+
+
+def _normalize_subtitle_rel_path(rel_path: str) -> tuple[str, int, str, str] | None:
+    normalized = rel_path.replace("\\", "/").strip("/")
+    parts = normalized.split("/", 1)
+    if len(parts) != 2:
+        return None
+    lang_name, rel_under_lang = parts
+    if not lang_name or not rel_under_lang:
+        return None
+    lang_id = LANG_CODE_MAP.get(lang_name)
+    if lang_id is None:
+        return None
+    if not rel_under_lang.lower().endswith(".srt"):
+        return None
+    clean_file_name = os.path.splitext(rel_under_lang)[0].replace("\\", "/")
+    full_path = os.path.join(DATA_PATH, "Subtitle", lang_name, rel_under_lang.replace("/", os.sep))
+    return lang_name, lang_id, clean_file_name, full_path
+
+
+def importSubtitlesByFiles(
+    changed_files: list[str] | set[str],
+    deleted_files: list[str] | set[str],
+    *,
+    commit: bool = True,
+    batch_size: int = DEFAULT_BATCH_SIZE,
+    current_version: str | None = None,
+    refresh_mapping: bool = False,
+    write_versions: bool = True,
+):
+    ensure_version_schema()
+    version_id: int | None = None
+    if write_versions:
+        version = current_version or get_current_version()
+        version_id = get_or_create_version_id(version)
+
+    changed_list = sorted({p for p in (changed_files or []) if p})
+    deleted_list = sorted({p for p in (deleted_files or []) if p})
+    if not changed_list and not deleted_list and not refresh_mapping:
+        return
+
+    filename_to_info = _load_subtitle_filename_map() if (changed_list or refresh_mapping) else {}
+    cursor = conn.cursor()
+    upsert_sql = _build_subtitle_upsert_sql()
+    flush_size = max(100, batch_size)
+    writer = BufferedExecutemany(cursor, upsert_sql, flush_size=flush_size)
+
+    process_errors: list[str] = []
+    skipped_paths: list[str] = []
+    changed_tasks: list[tuple[str, int, str, str]] = []
+    for rel_path in changed_list:
+        parsed = _normalize_subtitle_rel_path(rel_path)
+        if parsed is None:
+            skipped_paths.append(rel_path)
+            continue
+        changed_tasks.append(parsed)
+
+    print(
+        "Subtitle diff import: "
+        f"changed={len(changed_tasks)}, deleted={len(deleted_list)}, remap={'yes' if refresh_mapping else 'no'}"
+    )
+
+    for lang_name, lang_id, clean_file_name, full_path in tqdm(
+        changed_tasks,
+        total=len(changed_tasks),
+        desc="subtitle diff files",
+        leave=False,
+        position=0,
+        dynamic_ncols=True,
+        file=sys.stdout,
+    ):
+        if not os.path.isfile(full_path):
+            skipped_paths.append(f"{lang_name}/{clean_file_name}.srt (missing)")
+            continue
+        base_stem = os.path.splitext(os.path.basename(full_path))[0]
+        info = filename_to_info.get(base_stem)
+        subtitle_id = info["subtitleId"] if info else None
+        try:
+            existing_rows = cursor.execute(
+                """
+                SELECT subtitleKey, content, created_version_id, updated_version_id
+                FROM subtitle
+                WHERE fileName=? AND lang=?
+                """,
+                (clean_file_name, lang_id),
+            ).fetchall()
+            with open(full_path, "r", encoding="utf-8", errors="ignore") as f:
+                content = f.read()
+            parsed_rows: list[tuple[str, float, float, str]] = []
+            for start_time, end_time, text_content in iter_srt_entries(content):
+                key = subtitle_key(clean_file_name, lang_id, start_time, end_time)
+                parsed_rows.append((key, start_time, end_time, text_content))
+
+            assigned_rows = assign_subtitle_versions_by_text(
+                existing_rows,
+                parsed_rows,
+                version_id,
+            )
+
+            cursor.execute("DELETE FROM subtitle WHERE fileName=? AND lang=?", (clean_file_name, lang_id))
+            for key, start_time, end_time, text_content, created_id, updated_id in assigned_rows:
+                writer.add(
+                    (
+                        clean_file_name,
+                        lang_id,
+                        start_time,
+                        end_time,
+                        text_content,
+                        subtitle_id,
+                        key,
+                        created_id,
+                        updated_id,
+                    )
+                )
+        except Exception as e:
+            process_errors.append(f"{lang_name}/{os.path.basename(full_path)} ({e})")
+    writer.flush()
+
+    delete_rows: list[tuple[str, int]] = []
+    for rel_path in deleted_list:
+        parsed = _normalize_subtitle_rel_path(rel_path)
+        if parsed is None:
+            skipped_paths.append(rel_path)
+            continue
+        _, lang_id, clean_file_name, _ = parsed
+        delete_rows.append((clean_file_name, lang_id))
+    if delete_rows:
+        cursor.executemany("DELETE FROM subtitle WHERE fileName=? AND lang=?", delete_rows)
+
+    mapping_updated_rows = 0
+    if refresh_mapping and not filename_to_info:
+        print("Subtitle mapping refresh skipped: mapping table is empty.")
+    elif refresh_mapping:
+        mapping_rows: list[tuple[int | None, str, int | None]] = []
+        for (file_name,) in cursor.execute("SELECT DISTINCT fileName FROM subtitle"):
+            base_stem = os.path.splitext(os.path.basename(file_name))[0]
+            info = filename_to_info.get(base_stem)
+            subtitle_id = info["subtitleId"] if info else None
+            mapping_rows.append((subtitle_id, file_name, subtitle_id))
+        if mapping_rows:
+            before = conn.total_changes
+            cursor.executemany(
+                """
+                UPDATE subtitle
+                SET subtitleId=?
+                WHERE fileName=?
+                  AND NOT (subtitleId IS ?)
+                """,
+                mapping_rows,
+            )
+            mapping_updated_rows = conn.total_changes - before
+
+    cursor.close()
+    _print_summary("subtitle diff parse/import errors", process_errors)
+    _print_summary("subtitle diff skipped paths", skipped_paths)
+    if refresh_mapping:
+        print(f"Subtitle mapping refresh rows: {mapping_updated_rows}")
+
+    if commit:
+        conn.commit()
+
+
+def importSubtitles(
+    *,
+    commit: bool = True,
+    reset: bool = False,
+    prune_missing: bool = True,
+    batch_size: int = DEFAULT_BATCH_SIZE,
+    current_version: str | None = None,
+):
+    ensure_version_schema()
+
+    filename_to_info = _load_subtitle_filename_map()
 
     print("Importing Subtitles (srt)...")
     cursor = conn.cursor()
-    subtitle_root = os.path.join(DATA_PATH, "Subtitle")
+    if reset:
+        cursor.execute("DELETE FROM subtitle")
 
+    reset_temp_table(
+        cursor,
+        "CREATE TEMP TABLE IF NOT EXISTS _seen_subtitle_key(subtitleKey TEXT PRIMARY KEY)",
+        "_seen_subtitle_key",
+    )
+
+    subtitle_root = os.path.join(DATA_PATH, "Subtitle")
     if not os.path.exists(subtitle_root):
         print(f"Subtitle path not found: {subtitle_root}")
+        cursor.close()
         return
 
-    sql_insert = "insert into subtitle(fileName, lang, startTime, endTime, content, subtitleId) values (?,?,?,?,?,?)"
+    upsert_sql = _build_subtitle_upsert_sql()
+    seen_sql = "INSERT OR IGNORE INTO _seen_subtitle_key(subtitleKey) VALUES (?)"
 
-    for lang_name, lang_id in LANG_MAP.items():
+    flush_size = max(100, batch_size)
+    writer = BufferedExecutemany(
+        cursor,
+        upsert_sql,
+        flush_size=flush_size,
+        secondary_sql=seen_sql,
+    )
+
+    subtitle_tasks: list[tuple[str, int, str, str]] = []
+    for lang_name, lang_id in LANG_CODE_MAP.items():
         lang_path = os.path.join(subtitle_root, lang_name)
         if not os.path.exists(lang_path):
             continue
-
-        subtitle_files = []
         for root, _, files in os.walk(lang_path):
             for file_name in files:
                 if file_name.endswith(".srt"):
-                    subtitle_files.append(os.path.join(root, file_name))
+                    subtitle_tasks.append((lang_name, lang_id, lang_path, os.path.join(root, file_name)))
 
-        print(f"  Processing {lang_name} ({len(subtitle_files)} files)...")
+    print(f"Processing subtitle files ({len(subtitle_tasks)})...")
+    process_errors: list[str] = []
+    for lang_name, lang_id, lang_path, full_path in tqdm(
+        subtitle_tasks,
+        total=len(subtitle_tasks),
+        desc="subtitle files",
+        leave=False,
+        position=0,
+        dynamic_ncols=True,
+        file=sys.stdout,
+    ):
+        file_name = os.path.basename(full_path)
+        name_without_ext = os.path.splitext(file_name)[0]
 
-        for full_path in tqdm(subtitle_files):
-            file_name = os.path.basename(full_path)
-            name_without_ext = os.path.splitext(file_name)[0]
+        rel_path = os.path.relpath(full_path, lang_path)
+        cleanFileName = os.path.splitext(rel_path)[0].replace(os.sep, "/")
 
-            # 文件名作为标识符 (去除后缀)，保留子目录以避免重名冲突
-            rel_path = os.path.relpath(full_path, lang_path)
-            cleanFileName = os.path.splitext(rel_path)[0].replace(os.sep, "/")
-            
-            # Look up info
-            info = filename_to_info.get(name_without_ext)
-            subtitle_id = None
-            if info:
-                subtitle_id = info['subtitleId']
+        info = filename_to_info.get(name_without_ext)
+        subtitle_id = info["subtitleId"] if info else None
 
-            try:
-                with open(full_path, 'r', encoding='utf-8', errors='ignore') as f:
-                    content = f.read()
+        try:
+            with open(full_path, "r", encoding="utf-8", errors="ignore") as f:
+                content = f.read()
 
-                # 简单的 SRT 解析: 按空行分割块
-                blocks = re.split(r'\r?\n\s*\r?\n', content.strip())
-                for block in blocks:
-                    lines = [line.strip() for line in block.splitlines() if line.strip()]
-                    if len(lines) < 2:
-                        continue
+            for start_time, end_time, text_content in iter_srt_entries(content):
+                key = subtitle_key(cleanFileName, lang_id, start_time, end_time)
+                writer.add(
+                    (
+                        cleanFileName,
+                        lang_id,
+                        start_time,
+                        end_time,
+                        text_content,
+                        subtitle_id,
+                        key,
+                        None,
+                        None,
+                    ),
+                    (key,),
+                )
 
-                    # 查找包含 '-->' 的时间行
-                    time_line_idx = -1
-                    for idx, line in enumerate(lines):
-                        if '-->' in line:
-                            time_line_idx = idx
-                            break
+        except Exception as e:
+            process_errors.append(f"{lang_name}/{file_name} ({e})")
 
-                    if time_line_idx == -1:
-                        continue
-
-                    # 解析时间
-                    time_parts = lines[time_line_idx].split('-->')
-                    if len(time_parts) != 2:
-                        continue
-
-                    start_time = parse_srt_time(time_parts[0].strip())
-                    end_time = parse_srt_time(time_parts[1].strip())
-
-                    # 获取文本内容 (时间行之后的所有行)
-                    text_lines = lines[time_line_idx + 1:]
-                    text_content = "\n".join(text_lines)
-
-                    if text_content:
-                        cursor.execute(
-                            sql_insert,
-                            (cleanFileName, lang_id, start_time, end_time, text_content, subtitle_id)
-                        )
-
-            except Exception as e:
-                print(f"Error processing {file_name} in {lang_name}: {e}")
-
+    writer.flush()
+    if prune_missing:
+        cursor.execute(
+            """
+            DELETE FROM subtitle
+            WHERE subtitleKey IS NULL
+               OR subtitleKey NOT IN (SELECT subtitleKey FROM _seen_subtitle_key)
+            """
+        )
+    drop_temp_table(cursor, "_seen_subtitle_key")
     cursor.close()
-    conn.commit()
+    _print_summary("subtitle parse/import errors", process_errors)
+
+    if commit:
+        conn.commit()
