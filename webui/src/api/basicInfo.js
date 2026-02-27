@@ -21,6 +21,11 @@ const getImportedVoiceLanguages = () => {
     return request.get("/api/getImportedVoiceLanguages");
 }
 
+const getAvailableVersions = () => {
+    // Version aggregation can be heavy on large databases.
+    return request.get("/api/getAvailableVersions", { timeout: 30000 });
+}
+
 const saveConfig = (resultLanguages, defaultSearchLanguage, sourceLanguage, isMale) => {
     let tmp = []
     for(let code of resultLanguages){
@@ -44,6 +49,7 @@ const getConfig = () => {
 export default {
     getImportedTextLanguages,
     getImportedVoiceLanguages,
+    getAvailableVersions,
     getConfig,
     saveConfig
 }

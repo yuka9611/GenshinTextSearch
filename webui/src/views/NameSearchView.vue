@@ -1,33 +1,102 @@
-<script setup>
-import { onBeforeMount, ref } from 'vue';
-import { Search } from '@element-plus/icons-vue';
-import { useRouter } from "vue-router";
-import global from "@/global/global";
-import api from "@/api/keywordQuery";
+﻿<script setup>
+import { onBeforeMount, ref, computed } from 'vue'
+import { Search } from '@element-plus/icons-vue'
+import { useRouter } from 'vue-router'
+import global from '@/global/global'
+import api from '@/api/keywordQuery'
+import basicInfoApi from '@/api/basicInfo'
+import StylizedText from '@/components/StylizedText.vue'
 
 const router = useRouter()
-const keyword = ref("")
-const keywordLast = ref("")
+const keyword = ref('')
+const keywordLast = ref('')
 const selectedInputLanguage = ref(global.config.defaultSearchLanguage + '')
 const supportedInputLanguage = ref({})
-const searchSummary = ref("")
+const searchSummary = ref('')
 
 const questResults = ref([])
 const readableResults = ref([])
+const createdVersionFilter = ref('')
+const updatedVersionFilter = ref('')
+const versionOptions = ref([])
 
 onBeforeMount(async () => {
     supportedInputLanguage.value = global.languages
+    try {
+        const ans = await basicInfoApi.getAvailableVersions()
+        versionOptions.value = ans.json || []
+    } catch (_) {
+        versionOptions.value = []
+    }
 })
 
+const normalizeText = (value) => {
+    if (!value) return ''
+    return String(value).trim().toLowerCase()
+}
+
+const normalizeVersion = (value) => normalizeText(value)
+
+const getNormalizedEntryVersion = (entry, kind) => {
+    if (kind === 'created') return normalizeVersion(entry.createdVersion || entry.createdVersionRaw || '')
+    return normalizeVersion(entry.updatedVersion || entry.updatedVersionRaw || '')
+}
+
+const isSameCreatedUpdatedVersion = (entry) => {
+    const createdValue = getNormalizedEntryVersion(entry, 'created')
+    const updatedValue = getNormalizedEntryVersion(entry, 'updated')
+    if (!createdValue || !updatedValue) return false
+    return createdValue === updatedValue
+}
+
+const matchVersionFilter = (entry) => {
+    const createdFilter = normalizeVersion(createdVersionFilter.value)
+    const updatedFilter = normalizeVersion(updatedVersionFilter.value)
+    const createdValue = getNormalizedEntryVersion(entry, 'created')
+    const updatedValue = getNormalizedEntryVersion(entry, 'updated')
+    if (createdFilter && !createdValue.includes(createdFilter)) return false
+    if (updatedFilter) {
+        if (!updatedValue.includes(updatedFilter)) return false
+        if (isSameCreatedUpdatedVersion(entry)) return false
+    }
+    return true
+}
+
+const filteredQuestResults = computed(() => {
+    return questResults.value.filter(matchVersionFilter)
+})
+
+const filteredReadableResults = computed(() => {
+    return readableResults.value.filter(matchVersionFilter)
+})
+
+const displayVersion = (entry, kind) => {
+    if (kind === 'created') return entry.createdVersion || entry.createdVersionRaw || '未知'
+    return entry.updatedVersion || entry.updatedVersionRaw || '未知'
+}
+
+const showUpdatedVersionTag = (entry) => {
+    return displayVersion(entry, 'created') !== displayVersion(entry, 'updated')
+}
+
 const onSearchClicked = async () => {
-    if (!keyword.value.trim()) {
-        searchSummary.value = "请输入关键词，中文支持模糊搜索。"
+    const keywordText = keyword.value.trim()
+    const createdText = createdVersionFilter.value.trim()
+    const updatedText = updatedVersionFilter.value.trim()
+
+    if (!keywordText && !createdText && !updatedText) {
+        searchSummary.value = '请输入关键词或版本'
         questResults.value = []
         readableResults.value = []
         return
     }
 
-    const ans = (await api.searchByName(keyword.value, selectedInputLanguage.value)).json
+    const ans = (await api.searchByName(
+        keyword.value,
+        selectedInputLanguage.value,
+        createdVersionFilter.value,
+        updatedVersionFilter.value,
+    )).json
     const contents = ans.contents
     keywordLast.value = keyword.value
     questResults.value = contents.quests || []
@@ -35,46 +104,49 @@ const onSearchClicked = async () => {
 
     const questCount = questResults.value.length
     const readableCount = readableResults.value.length
-    searchSummary.value = `查询用时: ${ans.time.toFixed(2)}ms，共 ${questCount} 条任务结果，${readableCount} 条阅读物结果。`
+    if (!keywordText && (createdText || updatedText)) {
+        searchSummary.value = `查询耗时: ${ans.time.toFixed(2)}ms，按版本筛选。任务 ${questCount} 条，阅读物 ${readableCount} 条`
+    } else {
+        searchSummary.value = `查询耗时: ${ans.time.toFixed(2)}ms，任务 ${questCount} 条，阅读物 ${readableCount} 条`
+    }
 }
 
 const gotoQuest = (questId) => {
     router.push({
-        path: "/talk",
+        path: '/talk',
         query: {
-            questId: questId,
+            questId,
             keyword: keywordLast.value,
-            searchLang: selectedInputLanguage.value
-        }
+            searchLang: selectedInputLanguage.value,
+        },
     })
 }
 
 const gotoReadable = (entry) => {
     router.push({
-        path: "/talk",
+        path: '/talk',
         query: {
             readableId: entry.readableId,
             fileName: entry.fileName,
             keyword: keywordLast.value,
-            searchLang: selectedInputLanguage.value
-        }
+            searchLang: selectedInputLanguage.value,
+        },
     })
 }
 </script>
 
 <template>
     <div class="viewWrapper">
-        <h1 class="pageTitle">任务/阅读物查询</h1>
+        <h1 class="pageTitle">任务/阅读物搜索</h1>
         <div class="helpText">
-            <p>支持检索任务名称与阅读物名称。</p>
-            <p>搜索结果可跳转到对应页面查看详细内容。</p>
+            <p>按任务标题、章节名、任务 ID 或阅读物标题/文件名检索。</p>
         </div>
 
         <div class="searchBar">
             <el-input
                 v-model="keyword"
                 style="max-width: 600px;"
-                placeholder="请输入关键词，中文支持模糊搜索"
+                placeholder="输入关键词"
                 class="input-with-select"
                 @keyup.enter.native="onSearchClicked"
                 clearable
@@ -88,38 +160,52 @@ const gotoReadable = (entry) => {
                     <el-button :icon="Search" @click="onSearchClicked" />
                 </template>
             </el-input>
-            <span class="searchSummary">
-                {{ searchSummary }}
-            </span>
+            <span class="searchSummary">{{ searchSummary }}</span>
+        </div>
+
+        <div class="filterBar">
+            <el-select v-model="createdVersionFilter" placeholder="创建版本" class="versionInput" clearable filterable>
+                <el-option v-for="version in versionOptions" :key="`created-${version}`" :label="version" :value="version" />
+            </el-select>
+            <el-select v-model="updatedVersionFilter" placeholder="更新版本" class="versionInput" clearable filterable>
+                <el-option v-for="version in versionOptions" :key="`updated-${version}`" :label="version" :value="version" />
+            </el-select>
         </div>
 
         <div class="searchSpacer"></div>
 
         <div class="resultSection">
-            <h2>任务名称</h2>
-            <el-empty v-if="questResults.length === 0" description="没有匹配的任务名称" />
+            <h2>任务结果</h2>
+            <el-empty v-if="filteredQuestResults.length === 0" description="没有任务结果" />
             <div v-else class="resultGrid">
-                <el-card v-for="quest in questResults" :key="quest.questId" class="resultCard">
-                    <div class="cardTitle">{{ quest.title }}</div>
+                <el-card v-for="quest in filteredQuestResults" :key="quest.questId" class="resultCard">
+                    <div class="cardTitle">
+                        <StylizedText :text="quest.title" :keyword="keywordLast" />
+                    </div>
                     <div class="cardMeta" v-if="quest.chapterName">章节: {{ quest.chapterName }}</div>
                     <div class="cardMeta">任务 ID: {{ quest.questId }}</div>
-                    <el-button size="small" type="primary" @click="gotoQuest(quest.questId)">
-                        查看剧情
-                    </el-button>
+                    <div class="versionTags">
+                        <el-tag size="small" effect="plain">创建: {{ displayVersion(quest, 'created') }}</el-tag>
+                        <el-tag v-if="showUpdatedVersionTag(quest)" size="small" effect="plain">更新: {{ displayVersion(quest, 'updated') }}</el-tag>
+                    </div>
+                    <el-button size="small" type="primary" @click="gotoQuest(quest.questId)">查看对话</el-button>
                 </el-card>
             </div>
         </div>
 
         <div class="resultSection">
-            <h2>阅读物名称</h2>
-            <el-empty v-if="readableResults.length === 0" description="没有匹配的阅读物名称" />
+            <h2>阅读物结果</h2>
+            <el-empty v-if="filteredReadableResults.length === 0" description="没有阅读物结果" />
             <div v-else class="resultGrid">
-                <el-card v-for="readable in readableResults" :key="readable.readableId" class="resultCard">
-                    <div class="cardTitle">{{ readable.title }}</div>
-                    <div class="cardMeta">文件名: {{ readable.fileName }}</div>
-                    <el-button size="small" type="primary" @click="gotoReadable(readable)">
-                        查看阅读物
-                    </el-button>
+                <el-card v-for="readable in filteredReadableResults" :key="`${readable.readableId}-${readable.fileName}`" class="resultCard">
+                    <div class="cardTitle">
+                        <StylizedText :text="readable.title" :keyword="keywordLast" />
+                    </div>
+                    <div class="versionTags">
+                        <el-tag size="small" effect="plain">创建: {{ displayVersion(readable, 'created') }}</el-tag>
+                        <el-tag v-if="showUpdatedVersionTag(readable)" size="small" effect="plain">更新: {{ displayVersion(readable, 'updated') }}</el-tag>
+                    </div>
+                    <el-button size="small" type="primary" @click="gotoReadable(readable)">查看内容</el-button>
                 </el-card>
             </div>
         </div>
@@ -175,6 +261,17 @@ const gotoReadable = (entry) => {
     display: none;
 }
 
+.filterBar {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    margin: 10px 0 6px;
+}
+
+.versionInput {
+    width: 180px;
+}
+
 .resultSection {
     margin-top: 20px;
 }
@@ -199,9 +296,19 @@ const gotoReadable = (entry) => {
     font-weight: 600;
 }
 
+.cardTitle :deep(p) {
+    margin: 0;
+}
+
 .cardMeta {
     color: #888;
     font-size: 13px;
+}
+
+.versionTags {
+    display: flex;
+    gap: 6px;
+    flex-wrap: wrap;
 }
 
 @media (max-width: 720px) {

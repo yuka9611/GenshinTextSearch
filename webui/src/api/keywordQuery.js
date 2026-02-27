@@ -11,7 +11,16 @@ const queryBaidu = (keyword) => {
     // });
 };
 
-const queryByKeyword = (keyword, langCode, speaker, page = 1, pageSize = 50, voiceFilter = "all") => {
+const queryByKeyword = (
+    keyword,
+    langCode,
+    speaker,
+    page = 1,
+    pageSize = 50,
+    voiceFilter = "all",
+    createdVersion = "",
+    updatedVersion = "",
+) => {
     // return {contents: [
     //         {
     //             "type": "Dialogue",
@@ -41,7 +50,9 @@ const queryByKeyword = (keyword, langCode, speaker, page = 1, pageSize = 50, voi
         speaker: speaker,
         page: page,
         pageSize: pageSize,
-        voiceFilter: voiceFilter
+        voiceFilter: voiceFilter,
+        createdVersion: createdVersion,
+        updatedVersion: updatedVersion,
     });
 };
 
@@ -86,10 +97,12 @@ const getSubtitleContext = (fileName, subtitleId, searchLang) => {
     });
 };
 
-const searchByName = (keyword, langCode) => {
+const searchByName = (keyword, langCode, createdVersion = "", updatedVersion = "") => {
     return request.post("/api/nameSearch", {
         keyword: keyword,
-        langCode: langCode
+        langCode: langCode,
+        createdVersion: createdVersion,
+        updatedVersion: updatedVersion,
     });
 };
 
@@ -107,9 +120,27 @@ const getAvatarVoices = (avatarId, searchLang) => {
     });
 };
 
+const searchAvatarVoices = (titleKeyword, createdVersion, updatedVersion, searchLang) => {
+    return request.post("/api/avatarVoiceSearch", {
+        titleKeyword: titleKeyword,
+        createdVersion: createdVersion,
+        updatedVersion: updatedVersion,
+        searchLang: searchLang
+    });
+};
+
 const getAvatarStories = (avatarId, searchLang) => {
     return request.post("/api/avatarStory", {
         avatarId: avatarId,
+        searchLang: searchLang
+    });
+};
+
+const searchAvatarStories = (titleKeyword, createdVersion, updatedVersion, searchLang) => {
+    return request.post("/api/avatarStorySearch", {
+        titleKeyword: titleKeyword,
+        createdVersion: createdVersion,
+        updatedVersion: updatedVersion,
         searchLang: searchLang
     });
 };
@@ -141,7 +172,9 @@ export default {
     searchByName,
     searchAvatar,
     getAvatarVoices,
+    searchAvatarVoices,
     getAvatarStories,
+    searchAvatarStories,
     getReadableContent,
     getQuestDialogues
 };
