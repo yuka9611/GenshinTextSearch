@@ -24,6 +24,22 @@ def buildResponse(data=None, code=200, msg="ok"):
     return jsonify({"data": data, "code": code, "msg": msg})
 
 
+def _has_non_empty(value) -> bool:
+    return not (value is None or str(value).strip() == "")
+
+
+def _to_int_or_default(value, default: int) -> int:
+    try:
+        return int(value)
+    except Exception:
+        return default
+
+
+def _to_positive_int_or_default(value, default: int) -> int:
+    result = _to_int_or_default(value, default)
+    return result if result > 0 else default
+
+
 def create_app() -> Flask:
     """
     工厂模式：把重 import/初始化从模块顶层挪走，提升 PyInstaller 启动速度
@@ -105,6 +121,11 @@ def create_app() -> Flask:
         import controllers
         return buildResponse(controllers.getLoadedVoicePacks())
 
+    @app.route("/api/getAvailableVersions")
+    def getAvailableVersions():
+        import controllers
+        return buildResponse(controllers.getAvailableVersions())
+
     @app.route("/api/keywordQuery", methods=["POST"])
     def keywordQuery():
         import controllers
@@ -112,29 +133,23 @@ def create_app() -> Flask:
         langCode = int(request.json["langCode"])
         keyword: str = request.json["keyword"]
         speaker = request.json.get("speaker")
+        createdVersion = request.json.get("createdVersion")
+        updatedVersion = request.json.get("updatedVersion")
         page = request.json.get("page", 1)
         pageSize = request.json.get("pageSize", 50)
         voiceFilter = request.json.get("voiceFilter", "all")
 
-        try:
-            page = int(page)
-        except Exception:
-            page = 1
-
-        try:
-            pageSize = int(pageSize)
-        except Exception:
-            pageSize = 50
-
-        if page < 1:
-            page = 1
-        if pageSize < 1:
-            pageSize = 50
+        page = _to_positive_int_or_default(page, 1)
+        pageSize = _to_positive_int_or_default(pageSize, 50)
 
         if voiceFilter not in ("all", "with", "without"):
             voiceFilter = "all"
 
-        if keyword.strip() == "" and (speaker is None or str(speaker).strip() == ""):
+        has_keyword = keyword.strip() != ""
+        has_speaker = _has_non_empty(speaker)
+        has_created = _has_non_empty(createdVersion)
+        has_updated = _has_non_empty(updatedVersion)
+        if not has_keyword and not has_speaker and not has_created and not has_updated:
             return buildResponse({
                 "contents": [],
                 "total": 0,
@@ -151,6 +166,8 @@ def create_app() -> Flask:
             page=page,
             page_size=pageSize,
             voice_filter=voiceFilter,
+            created_version=createdVersion,
+            updated_version=updatedVersion,
         )
         end = time.time()
 
@@ -216,6 +233,10 @@ def create_app() -> Flask:
         searchLang = request.json.get("searchLang")
         if searchLang:
             searchLang = int(searchLang)
+        if subtitleId is not None and str(subtitleId).strip() != "":
+            subtitleId = int(subtitleId)
+        else:
+            subtitleId = None
 
         start = time.time()
         contents = controllers.getSubtitleContext(fileName, subtitleId, searchLang)
@@ -231,16 +252,29 @@ def create_app() -> Flask:
         import controllers
 
         langCode = int(request.json["langCode"])
-        keyword: str = request.json["keyword"]
+        keyword: str = request.json.get("keyword", "")
+        createdVersion = request.json.get("createdVersion")
+        updatedVersion = request.json.get("updatedVersion")
 
-        if keyword.strip() == "":
+        has_keyword = keyword.strip() != ""
+        has_created = _has_non_empty(createdVersion)
+        has_updated = _has_non_empty(updatedVersion)
+        if not has_keyword and not has_created and not has_updated:
             return buildResponse({
-                "quests": [],
-                "readables": []
+                "contents": {
+                    "quests": [],
+                    "readables": []
+                },
+                "time": 0
             })
 
         start = time.time()
-        contents = controllers.searchNameEntries(keyword, langCode)
+        contents = controllers.searchNameEntries(
+            keyword,
+            langCode,
+            created_version=createdVersion,
+            updated_version=updatedVersion,
+        )
         end = time.time()
 
         return buildResponse({
@@ -292,6 +326,42 @@ def create_app() -> Flask:
             "time": (end - start) * 1000
         })
 
+    @app.route("/api/avatarVoiceSearch", methods=["POST"])
+    def avatarVoiceSearch():
+        import controllers
+
+        titleKeyword = request.json.get("titleKeyword", "")
+        createdVersion = request.json.get("createdVersion")
+        updatedVersion = request.json.get("updatedVersion")
+        searchLang = request.json.get("searchLang")
+        if searchLang:
+            searchLang = int(searchLang)
+
+        has_title = str(titleKeyword).strip() != ""
+        has_created = _has_non_empty(createdVersion)
+        has_updated = _has_non_empty(updatedVersion)
+        if not has_title and not has_created and not has_updated:
+            return buildResponse({
+                "contents": {
+                    "voices": []
+                },
+                "time": 0
+            })
+
+        start = time.time()
+        contents = controllers.searchAvatarVoicesByFilters(
+            title_keyword=titleKeyword,
+            searchLang=searchLang,
+            created_version=createdVersion,
+            updated_version=updatedVersion,
+        )
+        end = time.time()
+
+        return buildResponse({
+            "contents": contents,
+            "time": (end - start) * 1000
+        })
+
     @app.route("/api/avatarStory", methods=["POST"])
     def avatarStory():
         import controllers
@@ -308,6 +378,42 @@ def create_app() -> Flask:
 
         start = time.time()
         contents = controllers.getAvatarStories(avatarId, searchLang)
+        end = time.time()
+
+        return buildResponse({
+            "contents": contents,
+            "time": (end - start) * 1000
+        })
+
+    @app.route("/api/avatarStorySearch", methods=["POST"])
+    def avatarStorySearch():
+        import controllers
+
+        titleKeyword = request.json.get("titleKeyword", "")
+        createdVersion = request.json.get("createdVersion")
+        updatedVersion = request.json.get("updatedVersion")
+        searchLang = request.json.get("searchLang")
+        if searchLang:
+            searchLang = int(searchLang)
+
+        has_title = str(titleKeyword).strip() != ""
+        has_created = _has_non_empty(createdVersion)
+        has_updated = _has_non_empty(updatedVersion)
+        if not has_title and not has_created and not has_updated:
+            return buildResponse({
+                "contents": {
+                    "stories": []
+                },
+                "time": 0
+            })
+
+        start = time.time()
+        contents = controllers.searchAvatarStoriesByFilters(
+            title_keyword=titleKeyword,
+            searchLang=searchLang,
+            created_version=createdVersion,
+            updated_version=updatedVersion,
+        )
         end = time.time()
 
         return buildResponse({
