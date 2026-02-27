@@ -1,7 +1,7 @@
 import re
 
 
-_TEXTMAP_BASE_STEM_RE = re.compile(r"^(?:TextMap|Text)([A-Za-z0-9_]+)$", re.IGNORECASE)
+_TEXTMAP_BASE_STEM_RE = re.compile(r"^(?:TextMap|Text|textmap|text)([A-Za-z0-9_]+)$", re.IGNORECASE)
 _TEXTMAP_SPLIT_SUFFIX_RE = re.compile(r"^(?P<stem>.+?)_(?P<part>\d+)$")
 _LANG_ALIASES = {
     # Historical naming in some commits.
