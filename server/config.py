@@ -10,7 +10,7 @@ from pathlib import Path
 
 
 def is_packaged() -> bool:
-    # onedir 场景通常只有 sys.frozen，没有 _MEIPASS
+    # onedir usually has sys.frozen; onefile may also expose _MEIPASS.
     return bool(getattr(sys, "frozen", False) or hasattr(sys, "_MEIPASS"))
 
 def _resolve_server_dir() -> Path:
@@ -51,35 +51,24 @@ def _dir_writable(path: Path) -> bool:
 SERVER_DIR = _resolve_server_dir()
 RUNTIME_DIR = SERVER_DIR if _dir_writable(SERVER_DIR) else _fallback_user_dir()
 CONFIG_FILE = RUNTIME_DIR / "config.json"
-DB_FILE = RUNTIME_DIR / "data.db"
+# DB path is fixed to server/data.db.
+DB_FILE = SERVER_DIR / "data.db"
 
 
 def project_root() -> Path:
-    # config.py 在项目根目录时：root = config.py 所在目录
-    # 如果你把 config.py 放在 server/ 里，请相应调整 parent
-     return Path(__file__).resolve().parents[1]
+    # Project root. If config.py is moved, adjust this parent depth accordingly.
+    return Path(__file__).resolve().parents[1]
 
 
 def executable_dir() -> Path:
     """
-    打包后：exe 所在目录
-    源码：项目根目录
+    Runtime executable directory in packaged mode.
+    Falls back to project root in source mode.
     """
     if is_packaged():
         return Path(sys.executable).resolve().parent
     return project_root()
 
-
-def bundled_resource_path(rel: str) -> Path:
-    """
-    打包后：资源在 sys._MEIPASS
-    源码：资源在项目根目录
-    """
-    if hasattr(sys, "_MEIPASS"):
-        return Path(sys._MEIPASS) / rel  # type: ignore[attr-defined]
-    if is_packaged():
-        return executable_dir() / rel
-    return project_root() / rel
 
 
 # ----------------------------
@@ -89,11 +78,29 @@ def bundled_resource_path(rel: str) -> Path:
 config = {
     "resultLanguages": [1, 4, 9],
     "defaultSearchLanguage": 1,
-    # 默认空，让前端引导用户设置（比硬编码路径更“发行级”）
+    # Asset root directory, selected by user at first run.
     "assetDir": "",
     "sourceLanguage": 1,
-    # 兼容你现在的用法：bool / "both"
-    "isMale": "both"
+    # Keep compatibility with legacy values: bool or "both".
+    "isMale": "both",
+    # FTS settings.
+    "enableTextMapFts": True,
+    # Only build textMap FTS for these languages (e.g. CHS/EN/JP).
+    "ftsLangAllowList": [1, 4, 9],
+    "ftsTokenizer": "trigram",
+    # Extra tokenizer args string, extension-specific.
+    "ftsTokenizerArgs": "",
+    # Chinese query/index tokenization mode for non-trigram tokenizers.
+    # Supported: auto / jieba / char_bigram / none
+    "ftsChineseSegmenter": "auto",
+    # Optional jieba user dictionary path.
+    "ftsJiebaUserDict": "",
+    "ftsExtensionPath": "",
+    "ftsExtensionEntry": "",
+    # Query-time token filtering for non-trigram tokenizers.
+    "ftsStopwords": [],
+    "ftsMinTokenLength": 1,
+    "ftsMaxTokenLength": 32,
 }
 
 
@@ -118,12 +125,66 @@ def loadConfig():
 
     if "sourceLanguage" in fileJson and isinstance(fileJson['sourceLanguage'], int):
         config['sourceLanguage'] = fileJson['sourceLanguage']
-
-    # 兼容旧逻辑：bool 或 "both"
+    # Backward compatibility: bool in old config, or "both".
     if "isMale" in fileJson and isinstance(fileJson['isMale'], bool):
         config['isMale'] = fileJson['isMale']
     elif "isMale" in fileJson and fileJson['isMale'] == "both":
         config['isMale'] = "both"
+
+    if "ftsTokenizer" in fileJson and isinstance(fileJson["ftsTokenizer"], str):
+        config["ftsTokenizer"] = fileJson["ftsTokenizer"].strip() or "trigram"
+
+    if "enableTextMapFts" in fileJson:
+        config["enableTextMapFts"] = bool(fileJson["enableTextMapFts"])
+
+    if "ftsLangAllowList" in fileJson and isinstance(fileJson["ftsLangAllowList"], list):
+        normalized_langs = []
+        for raw in fileJson["ftsLangAllowList"]:
+            try:
+                normalized_langs.append(int(raw))
+            except Exception:
+                continue
+        if normalized_langs:
+            config["ftsLangAllowList"] = normalized_langs
+
+    if "ftsExtensionPath" in fileJson and isinstance(fileJson["ftsExtensionPath"], str):
+        config["ftsExtensionPath"] = fileJson["ftsExtensionPath"].strip()
+
+    if "ftsExtensionEntry" in fileJson and isinstance(fileJson["ftsExtensionEntry"], str):
+        config["ftsExtensionEntry"] = fileJson["ftsExtensionEntry"].strip()
+
+    if "ftsTokenizerArgs" in fileJson and isinstance(fileJson["ftsTokenizerArgs"], str):
+        config["ftsTokenizerArgs"] = fileJson["ftsTokenizerArgs"].strip()
+
+    if "ftsChineseSegmenter" in fileJson and isinstance(fileJson["ftsChineseSegmenter"], str):
+        mode = fileJson["ftsChineseSegmenter"].strip().lower()
+        if mode in ("auto", "jieba", "char_bigram", "none"):
+            config["ftsChineseSegmenter"] = mode
+
+    if "ftsJiebaUserDict" in fileJson and isinstance(fileJson["ftsJiebaUserDict"], str):
+        config["ftsJiebaUserDict"] = fileJson["ftsJiebaUserDict"].strip()
+
+    if "ftsStopwords" in fileJson and isinstance(fileJson["ftsStopwords"], list):
+        words = []
+        for raw in fileJson["ftsStopwords"]:
+            if raw is None:
+                continue
+            text = str(raw).strip()
+            if text:
+                words.append(text)
+        config["ftsStopwords"] = words
+
+    if "ftsMinTokenLength" in fileJson:
+        try:
+            config["ftsMinTokenLength"] = max(1, int(fileJson["ftsMinTokenLength"]))
+        except Exception:
+            pass
+
+    if "ftsMaxTokenLength" in fileJson:
+        try:
+            config["ftsMaxTokenLength"] = max(1, int(fileJson["ftsMaxTokenLength"]))
+        except Exception:
+            pass
 
 
 def saveConfig():
@@ -174,6 +235,74 @@ def getIsMale():
     return config['isMale']
 
 
+def getFtsTokenizer():
+    return str(config.get("ftsTokenizer") or "trigram")
+
+
+def getEnableTextMapFts():
+    return bool(config.get("enableTextMapFts", True))
+
+
+def getFtsLangAllowList():
+    raw = config.get("ftsLangAllowList") or []
+    result = []
+    for item in raw:
+        try:
+            result.append(int(item))
+        except Exception:
+            continue
+    return result
+
+
+def getFtsExtensionPath():
+    return str(config.get("ftsExtensionPath") or "")
+
+
+def getFtsExtensionEntry():
+    return str(config.get("ftsExtensionEntry") or "")
+
+
+def getFtsTokenizerArgs():
+    return str(config.get("ftsTokenizerArgs") or "")
+
+
+def getFtsChineseSegmenter():
+    mode = str(config.get("ftsChineseSegmenter") or "auto").strip().lower()
+    if mode in ("auto", "jieba", "char_bigram", "none"):
+        return mode
+    return "auto"
+
+
+def getFtsJiebaUserDict():
+    return str(config.get("ftsJiebaUserDict") or "").strip()
+
+
+def getFtsStopwords():
+    raw = config.get("ftsStopwords") or []
+    words = []
+    for item in raw:
+        if item is None:
+            continue
+        text = str(item).strip()
+        if text:
+            words.append(text)
+    return words
+
+
+def getFtsMinTokenLength():
+    try:
+        return max(1, int(config.get("ftsMinTokenLength", 1)))
+    except Exception:
+        return 1
+
+
+def getFtsMaxTokenLength():
+    try:
+        return max(1, int(config.get("ftsMaxTokenLength", 32)))
+    except Exception:
+        return 32
+
+
 def isAssetDirValid() -> bool:
     assetDir = getAssetDir()
     if not assetDir or not os.path.isdir(assetDir):
@@ -187,16 +316,14 @@ def isAssetDirValid() -> bool:
 
 def get_db_path() -> Path:
     """
-    实际运行使用的 DB 路径（用户目录，可写）
+    Runtime DB path (fixed to server/data.db).
     """
     return DB_FILE
 
 
 def ensure_db_exists(bundled_rel_path: str = "data.db"):
     """
-    发行版：把打包进 exe 的 data.db 复制到用户目录，避免:
-    - 相对路径找不到
-    - _MEIPASS 临时目录不可写/会丢失
+    If runtime DB file is missing, try copying from external locations.
     """
     db_path = get_db_path()
     if db_path.exists() and db_path.stat().st_size > 0:
@@ -214,7 +341,6 @@ def ensure_db_exists(bundled_rel_path: str = "data.db"):
         ]
 
     candidates: list[Path] = []
-    candidates.extend(_with_server_dir(bundled_resource_path("")))
     candidates.extend(_with_server_dir(exec_dir))
     candidates.extend(_with_server_dir(exec_dir.parent))
     candidates.extend(_with_server_dir(cwd))
@@ -222,8 +348,7 @@ def ensure_db_exists(bundled_rel_path: str = "data.db"):
 
     src = next((path for path in candidates if path.exists()), None)
     if src is None:
-        # 如果你开发时 db 还没放到项目根目录，也不强制报错
-        # 但此时 databaseHelper 连接会失败，建议你确保打包时带上 data.db
+        # No source DB found. Caller will surface a clear FileNotFoundError.
         return
 
     db_path.parent.mkdir(parents=True, exist_ok=True)
@@ -231,3 +356,4 @@ def ensure_db_exists(bundled_rel_path: str = "data.db"):
 
 
 loadConfig()
+
