@@ -9,3 +9,4 @@ GenshinTextSearch.spec
 build/
 dist/
 release/
+.trae/
