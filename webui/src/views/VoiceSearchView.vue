@@ -3,6 +3,7 @@ import { onBeforeMount, ref, computed, reactive, watch } from 'vue';
 import { Search, Close } from '@element-plus/icons-vue';
 import global from "@/global/global";
 import api from "@/api/keywordQuery";
+import basicInfoApi from "@/api/basicInfo";
 import TranslateDisplay from "@/components/ResultEntry.vue";
 import AudioPlayer from "@liripeng/vue-audio-player";
 import * as converter from "@/assets/wem2wav";
@@ -20,6 +21,9 @@ const loadingVoices = ref(false)
 
 const categoryFilter = ref("all")
 const textFilter = ref("")
+const createdVersionFilter = ref("")
+const updatedVersionFilter = ref("")
+const versionOptions = ref([])
 const selectedVoiceLanguage = ref("")
 
 const showPlayer = ref(false)
@@ -36,6 +40,12 @@ const playlistLoading = reactive({
 
 onBeforeMount(async () => {
     supportedInputLanguage.value = global.languages
+    try {
+        const ans = await basicInfoApi.getAvailableVersions()
+        versionOptions.value = ans.json || []
+    } catch (_) {
+        versionOptions.value = []
+    }
 })
 
 const availableVoiceLanguages = computed(() => global.voiceLanguages || {})
@@ -55,6 +65,20 @@ watch(voiceLanguageOptions, (options) => {
 const normalizeText = (value) => {
     if (!value) return ""
     return String(value).trim().toLowerCase()
+}
+
+const normalizeVersion = (value) => normalizeText(value)
+
+const getNormalizedEntryVersion = (entry, kind) => {
+    if (kind === "created") return normalizeVersion(entry.createdVersion || entry.createdVersionRaw || "")
+    return normalizeVersion(entry.updatedVersion || entry.updatedVersionRaw || "")
+}
+
+const isSameCreatedUpdatedVersion = (entry) => {
+    const createdVersion = getNormalizedEntryVersion(entry, "created")
+    const updatedVersion = getNormalizedEntryVersion(entry, "updated")
+    if (!createdVersion || !updatedVersion) return false
+    return createdVersion === updatedVersion
 }
 
 const deriveCategory = (title) => {
@@ -82,11 +106,22 @@ const categories = computed(() => {
 const filteredVoices = computed(() => {
     const category = categoryFilter.value
     const text = normalizeText(textFilter.value)
+    const createdVersion = normalizeVersion(createdVersionFilter.value)
+    const updatedVersion = normalizeVersion(updatedVersionFilter.value)
     return voiceEntries.value.filter((entry) => {
         if (category !== "all") {
             const title = entry.voiceTitle || ""
             const entryCategory = deriveCategory(title)
             if (entryCategory !== category) return false
+        }
+        if (createdVersion) {
+            const source = getNormalizedEntryVersion(entry, "created")
+            if (!source.includes(createdVersion)) return false
+        }
+        if (updatedVersion) {
+            const source = getNormalizedEntryVersion(entry, "updated")
+            if (!source.includes(updatedVersion)) return false
+            if (isSameCreatedUpdatedVersion(entry)) return false
         }
         if (text) {
             const title = normalizeText(entry.voiceTitle || "")
@@ -102,8 +137,16 @@ const filteredVoices = computed(() => {
     })
 })
 
+const highlightKeyword = computed(() => textFilter.value.trim())
+
 const onSearchClicked = async () => {
-    if (!keyword.value.trim()) {
+    const avatarKeyword = keyword.value.trim()
+    const titleKeyword = textFilter.value.trim()
+    const createdKeyword = createdVersionFilter.value.trim()
+    const updatedKeyword = updatedVersionFilter.value.trim()
+    const hasGlobalFilter = titleKeyword || createdKeyword || updatedKeyword
+
+    if (!avatarKeyword && !hasGlobalFilter) {
         searchSummary.value = "请输入角色名进行查询。"
         voiceSummary.value = ""
         avatarResults.value = []
@@ -112,14 +155,46 @@ const onSearchClicked = async () => {
         return
     }
 
-    const ans = (await api.searchAvatar(keyword.value, selectedInputLanguage.value)).json
+    if (avatarKeyword) {
+        const ans = (await api.searchAvatar(keyword.value, selectedInputLanguage.value)).json
+        const contents = ans.contents
+        avatarResults.value = contents.avatars || []
+        const avatarCount = avatarResults.value.length
+        searchSummary.value = `查询用时: ${ans.time.toFixed(2)}ms，共 ${avatarCount} 个角色结果。`
+        voiceEntries.value = []
+        voiceSummary.value = ""
+        selectedAvatar.value = null
+        return
+    }
+
+    loadingVoices.value = true
+    categoryFilter.value = "all"
+    avatarResults.value = []
+    selectedAvatar.value = { avatarId: null, name: "全角色（按筛选）" }
+
+    const ans = (await api.searchAvatarVoices(
+        titleKeyword,
+        createdVersionFilter.value,
+        updatedVersionFilter.value,
+        selectedInputLanguage.value,
+    )).json
     const contents = ans.contents
-    avatarResults.value = contents.avatars || []
+    voiceEntries.value = contents.voices || []
+    const avatarMap = new Map()
+    for (const entry of voiceEntries.value) {
+        if (entry.avatarId === null || entry.avatarId === undefined) continue
+        if (avatarMap.has(entry.avatarId)) continue
+        avatarMap.set(entry.avatarId, {
+            avatarId: entry.avatarId,
+            name: (entry.avatarName || "").trim() || `角色 ${entry.avatarId}`
+        })
+    }
+    avatarResults.value = Array.from(avatarMap.values()).sort((a, b) => a.name.localeCompare(b.name))
     const avatarCount = avatarResults.value.length
-    searchSummary.value = `查询用时: ${ans.time.toFixed(2)}ms，共 ${avatarCount} 个角色结果。`
-    voiceEntries.value = []
-    voiceSummary.value = ""
-    selectedAvatar.value = null
+    const voiceCount = voiceEntries.value.length
+    searchSummary.value = `查询用时: ${ans.time.toFixed(2)}ms，按标题/版本检索，涉及 ${avatarCount} 个角色。`
+    voiceSummary.value = `查询用时: ${ans.time.toFixed(2)}ms，共 ${voiceCount} 条语音结果。`
+    loadingVoices.value = false
 }
 
 const onAvatarClicked = async (avatar) => {
@@ -128,7 +203,6 @@ const onAvatarClicked = async (avatar) => {
     voiceSummary.value = ""
     loadingVoices.value = true
     categoryFilter.value = "all"
-    textFilter.value = ""
 
     const ans = (await api.getAvatarVoices(avatar.avatarId, selectedInputLanguage.value)).json
     const contents = ans.contents
@@ -249,9 +323,19 @@ const onShowPlayerButtonClicked = () => {
             </span>
         </div>
 
+        <div class="filterBar topFilterBar">
+            <el-input v-model="textFilter" placeholder="筛选关键词（标题/内容）" class="filterInput" clearable @keyup.enter.native="onSearchClicked" />
+            <el-select v-model="createdVersionFilter" placeholder="创建版本" class="versionInput" clearable filterable>
+                <el-option v-for="version in versionOptions" :key="`created-${version}`" :label="version" :value="version" />
+            </el-select>
+            <el-select v-model="updatedVersionFilter" placeholder="更新版本" class="versionInput" clearable filterable>
+                <el-option v-for="version in versionOptions" :key="`updated-${version}`" :label="version" :value="version" />
+            </el-select>
+        </div>
+
         <div class="searchSpacer"></div>
 
-        <div class="resultSection">
+        <div class="resultSection" v-if="keyword.trim() || textFilter.trim() || createdVersionFilter.trim() || updatedVersionFilter.trim()">
             <h2>角色列表</h2>
             <el-empty v-if="avatarResults.length === 0" description="暂无角色结果" />
             <div v-else class="resultGrid">
@@ -278,7 +362,6 @@ const onShowPlayerButtonClicked = () => {
                         :value="item"
                     />
                 </el-select>
-                <el-input v-model="textFilter" placeholder="筛选关键词（标题/内容）" class="filterInput" clearable />
                 <el-select v-model="selectedVoiceLanguage" placeholder="语音语言" class="filterSelect">
                     <el-option
                         v-for="item in voiceLanguageOptions"
@@ -297,7 +380,7 @@ const onShowPlayerButtonClicked = () => {
                     v-for="voice in filteredVoices"
                     :key="voice.hash"
                     :translate-obj="voice"
-                    :keyword="''"
+                    :keyword="highlightKeyword"
                     :search-lang="selectedInputLanguage"
                     @onVoicePlay="onVoicePlay"
                     class="translate"
@@ -428,6 +511,10 @@ const onShowPlayerButtonClicked = () => {
     margin-bottom: 12px;
 }
 
+.topFilterBar {
+    margin-top: 8px;
+}
+
 .filterSelect {
     min-width: 140px;
 }
@@ -435,6 +522,10 @@ const onShowPlayerButtonClicked = () => {
 .filterInput {
     flex: 1 1 240px;
     max-width: 320px;
+}
+
+.versionInput {
+    width: 180px;
 }
 
 .translate:not(:last-child) {

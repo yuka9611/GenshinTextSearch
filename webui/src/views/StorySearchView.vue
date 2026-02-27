@@ -3,6 +3,7 @@ import { onBeforeMount, ref, computed } from 'vue';
 import { Search } from '@element-plus/icons-vue';
 import global from "@/global/global";
 import api from "@/api/keywordQuery";
+import basicInfoApi from "@/api/basicInfo";
 import TranslateDisplay from "@/components/ResultEntry.vue";
 
 const keyword = ref("")
@@ -13,12 +14,23 @@ const storySummary = ref("")
 
 const avatarResults = ref([])
 const storyEntries = ref([])
+const globalStoryEntries = ref([])
+const useGlobalStoryEntries = ref(false)
 const selectedAvatar = ref(null)
 const loadingStories = ref(false)
 const textFilter = ref("")
+const createdVersionFilter = ref("")
+const updatedVersionFilter = ref("")
+const versionOptions = ref([])
 
 onBeforeMount(async () => {
     supportedInputLanguage.value = global.languages
+    try {
+        const ans = await basicInfoApi.getAvailableVersions()
+        versionOptions.value = ans.json || []
+    } catch (_) {
+        versionOptions.value = []
+    }
 })
 
 const normalizeText = (value) => {
@@ -26,10 +38,34 @@ const normalizeText = (value) => {
     return String(value).trim().toLowerCase()
 }
 
+const normalizeVersion = (value) => normalizeText(value)
+
+const getNormalizedEntryVersion = (entry, kind) => {
+    if (kind === "created") return normalizeVersion(entry.createdVersion || entry.createdVersionRaw || "")
+    return normalizeVersion(entry.updatedVersion || entry.updatedVersionRaw || "")
+}
+
+const isSameCreatedUpdatedVersion = (entry) => {
+    const createdVersion = getNormalizedEntryVersion(entry, "created")
+    const updatedVersion = getNormalizedEntryVersion(entry, "updated")
+    if (!createdVersion || !updatedVersion) return false
+    return createdVersion === updatedVersion
+}
+
 const filteredStories = computed(() => {
     const text = normalizeText(textFilter.value)
-    if (!text) return storyEntries.value
+    const createdFilter = normalizeVersion(createdVersionFilter.value)
+    const updatedFilter = normalizeVersion(updatedVersionFilter.value)
     return storyEntries.value.filter((entry) => {
+        const createdVersion = getNormalizedEntryVersion(entry, "created")
+        const updatedVersion = getNormalizedEntryVersion(entry, "updated")
+        if (createdFilter && !createdVersion.includes(createdFilter)) return false
+        if (updatedFilter) {
+            if (!updatedVersion.includes(updatedFilter)) return false
+            if (isSameCreatedUpdatedVersion(entry)) return false
+        }
+
+        if (!text) return true
         const title = normalizeText(entry.storyTitle || entry.origin || "")
         if (title.includes(text)) return true
         const translates = entry.translates || {}
@@ -41,39 +77,126 @@ const filteredStories = computed(() => {
     })
 })
 
+const highlightKeyword = computed(() => textFilter.value.trim())
+
 const onSearchClicked = async () => {
-    if (!keyword.value.trim()) {
+    const avatarKeyword = keyword.value.trim()
+    const titleKeyword = textFilter.value.trim()
+    const createdKeyword = createdVersionFilter.value.trim()
+    const updatedKeyword = updatedVersionFilter.value.trim()
+    const hasGlobalFilter = titleKeyword || createdKeyword || updatedKeyword
+
+    if (!avatarKeyword && !hasGlobalFilter) {
         searchSummary.value = "请输入角色名进行查询"
         storySummary.value = ""
         avatarResults.value = []
         storyEntries.value = []
+        globalStoryEntries.value = []
+        useGlobalStoryEntries.value = false
         selectedAvatar.value = null
         return
     }
 
-    const ans = (await api.searchAvatar(keyword.value, selectedInputLanguage.value)).json
-    const contents = ans.contents
-    avatarResults.value = contents.avatars || []
-    const avatarCount = avatarResults.value.length
-    searchSummary.value = `查询耗时: ${ans.time.toFixed(2)}ms，找到 ${avatarCount} 个角色`
-    storyEntries.value = []
-    storySummary.value = ""
-    selectedAvatar.value = null
+    if (avatarKeyword) {
+        try {
+            const ans = (await api.searchAvatar(keyword.value, selectedInputLanguage.value)).json
+            const contents = ans.contents
+            avatarResults.value = contents.avatars || []
+            const avatarCount = avatarResults.value.length
+            searchSummary.value = `查询耗时: ${ans.time.toFixed(2)}ms，找到 ${avatarCount} 个角色`
+            storyEntries.value = []
+            globalStoryEntries.value = []
+            useGlobalStoryEntries.value = false
+            storySummary.value = ""
+            selectedAvatar.value = null
+        } catch (err) {
+            searchSummary.value = "查询失败，请稍后重试"
+            avatarResults.value = []
+            storyEntries.value = []
+            globalStoryEntries.value = []
+            useGlobalStoryEntries.value = false
+            storySummary.value = ""
+            selectedAvatar.value = null
+            if (!err?.network) err?.defaultHandler?.()
+        }
+        return
+    }
+
+    loadingStories.value = true
+    avatarResults.value = []
+    selectedAvatar.value = { avatarId: null, name: "全角色（按筛选）" }
+
+    try {
+        const ans = (await api.searchAvatarStories(
+            titleKeyword,
+            createdVersionFilter.value,
+            updatedVersionFilter.value,
+            selectedInputLanguage.value,
+        )).json
+        const contents = ans.contents
+        storyEntries.value = contents.stories || []
+        globalStoryEntries.value = storyEntries.value
+        useGlobalStoryEntries.value = true
+        const avatarMap = new Map()
+        for (const entry of storyEntries.value) {
+            if (entry.avatarId === null || entry.avatarId === undefined) continue
+            if (avatarMap.has(entry.avatarId)) continue
+            avatarMap.set(entry.avatarId, {
+                avatarId: entry.avatarId,
+                name: (entry.avatarName || "").trim() || `角色 ${entry.avatarId}`
+            })
+        }
+        avatarResults.value = Array.from(avatarMap.values()).sort((a, b) => a.name.localeCompare(b.name))
+        const avatarCount = avatarResults.value.length
+        const storyCount = storyEntries.value.length
+        searchSummary.value = `查询耗时: ${ans.time.toFixed(2)}ms，按标题/版本检索，涉及 ${avatarCount} 个角色`
+        storySummary.value = `查询耗时: ${ans.time.toFixed(2)}ms，找到 ${storyCount} 条角色故事`
+    } catch (err) {
+        searchSummary.value = "查询失败，请稍后重试"
+        storySummary.value = ""
+        avatarResults.value = []
+        storyEntries.value = []
+        globalStoryEntries.value = []
+        useGlobalStoryEntries.value = false
+        selectedAvatar.value = null
+        if (!err?.network) err?.defaultHandler?.()
+    } finally {
+        loadingStories.value = false
+    }
 }
 
 const onAvatarClicked = async (avatar) => {
-    selectedAvatar.value = avatar
-    storyEntries.value = []
+    const avatarId = Number.parseInt(avatar?.avatarId, 10)
+    if (Number.isNaN(avatarId)) {
+        storySummary.value = "角色 ID 无效"
+        return
+    }
+    selectedAvatar.value = { ...avatar, avatarId }
     storySummary.value = ""
-    loadingStories.value = true
-    textFilter.value = ""
 
-    const ans = (await api.getAvatarStories(avatar.avatarId, selectedInputLanguage.value)).json
-    const contents = ans.contents
-    storyEntries.value = contents.stories || []
-    const storyCount = storyEntries.value.length
-    storySummary.value = `查询耗时: ${ans.time.toFixed(2)}ms，找到 ${storyCount} 条角色故事`
-    loadingStories.value = false
+    if (useGlobalStoryEntries.value) {
+        storyEntries.value = globalStoryEntries.value.filter((entry) => Number(entry.avatarId) === avatarId)
+        const storyCount = storyEntries.value.length
+        storySummary.value = `当前筛选下，找到 ${storyCount} 条角色故事`
+        return
+    }
+
+    storyEntries.value = []
+    loadingStories.value = true
+
+    try {
+        const ans = (await api.getAvatarStories(avatarId, selectedInputLanguage.value)).json
+        const contents = ans.contents
+        storyEntries.value = contents.stories || []
+        const storyCount = storyEntries.value.length
+        storySummary.value = `查询耗时: ${ans.time.toFixed(2)}ms，找到 ${storyCount} 条角色故事`
+    } catch (err) {
+        storyEntries.value = []
+        storySummary.value = "加载故事失败，请稍后重试"
+        if (!err?.network) err?.defaultHandler?.()
+    } finally {
+        loadingStories.value = false
+    }
 }
 </script>
 
@@ -107,9 +230,19 @@ const onAvatarClicked = async (avatar) => {
             </span>
         </div>
 
+        <div class="filterBar topFilterBar">
+            <el-input v-model="textFilter" placeholder="筛选标题或正文" class="filterInput" clearable @keyup.enter.native="onSearchClicked" />
+            <el-select v-model="createdVersionFilter" placeholder="创建版本" class="versionInput" clearable filterable>
+                <el-option v-for="version in versionOptions" :key="`created-${version}`" :label="version" :value="version" />
+            </el-select>
+            <el-select v-model="updatedVersionFilter" placeholder="更新版本" class="versionInput" clearable filterable>
+                <el-option v-for="version in versionOptions" :key="`updated-${version}`" :label="version" :value="version" />
+            </el-select>
+        </div>
+
         <div class="searchSpacer"></div>
 
-        <div class="resultSection">
+        <div class="resultSection" v-if="keyword.trim() || textFilter.trim() || createdVersionFilter.trim() || updatedVersionFilter.trim()">
             <h2>角色列表</h2>
             <el-empty v-if="avatarResults.length === 0" description="未找到角色" />
             <div v-else class="resultGrid">
@@ -127,17 +260,13 @@ const onAvatarClicked = async (avatar) => {
             <h2 v-if="selectedAvatar">角色故事 - {{ selectedAvatar.name }}</h2>
             <div class="storySummary" v-if="storySummary">{{ storySummary }}</div>
 
-            <div class="filterBar" v-if="selectedAvatar">
-                <el-input v-model="textFilter" placeholder="筛选标题或正文" class="filterInput" clearable />
-            </div>
-
             <el-empty v-if="!loadingStories && filteredStories.length === 0" description="未找到角色故事" />
             <div v-else>
                 <TranslateDisplay
                     v-for="story in filteredStories"
                     :key="story.hash"
                     :translate-obj="story"
-                    :keyword="''"
+                    :keyword="highlightKeyword"
                     :search-lang="selectedInputLanguage"
                     class="translate"
                 />
@@ -238,8 +367,16 @@ const onAvatarClicked = async (avatar) => {
     margin-bottom: 12px;
 }
 
+.topFilterBar {
+    margin-top: 8px;
+}
+
 .filterInput {
     max-width: 260px;
+}
+
+.versionInput {
+    width: 180px;
 }
 
 .translate:not(:last-child) {

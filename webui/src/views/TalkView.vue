@@ -10,9 +10,40 @@ import AudioPlayer from "@liripeng/vue-audio-player";
 import {Close, CopyDocument, VideoPlay} from "@element-plus/icons-vue";
 import {ElMessage} from "element-plus";
 
+const UI_TEXT = Object.freeze({
+    taskText: "任务文本",
+    readableFallback: "阅读物",
+    noTextToCopy: "没有可复制的文本",
+    copied: "已复制",
+    copyFailed: "复制失败，请手动选择文本",
+    pageTitleReadable: "阅读物内容",
+    pageTitleDialogue: "任务对话内容",
+    source: "来源",
+    queryTime: "查询耗时",
+    copy: "复制",
+    showTextVersion: "显示文本版本",
+    total: "共",
+    currentPage: "条，当前第",
+    page: "页",
+    first: "首页",
+    prev: "上一页",
+    next: "下一页",
+    last: "末页",
+    speaker: "说话人",
+    playAll: "播放全部",
+    voice: "语音",
+    autoLoop: "自动循环播放",
+    autoScroll: "自动滚动",
+    loadingVoices: "正在加载语音",
+    created: "创建",
+    updated: "更新",
+    unknown: "未知",
+    version: "版本",
+})
+
 const route = useRoute()
 const keyword = ref("")
-const questName = ref("对话文本")
+const questName = ref(UI_TEXT.taskText)
 const textHash = ref(0)
 const queryTime = ref("0")
 const dialogues = ref([])
@@ -20,6 +51,14 @@ const isReadable = ref(false)
 const readableTitle = ref("")
 const readableFileName = ref("")
 const readableTranslates = ref({})
+const readableCreatedVersion = ref("")
+const readableUpdatedVersion = ref("")
+const readableCreatedVersionRaw = ref("")
+const readableUpdatedVersionRaw = ref("")
+const subtitleCreatedVersion = ref("")
+const subtitleUpdatedVersion = ref("")
+const subtitleCreatedVersionRaw = ref("")
+const subtitleUpdatedVersionRaw = ref("")
 const pageSize = ref(200)
 const currentPage = ref(1)
 const totalCount = ref(0)
@@ -49,6 +88,10 @@ const reloadPage = () => {
     const questId = route.query.questId
     if ((readableId || fileName) && !isSubtitle) {
         isReadable.value = true
+        subtitleCreatedVersion.value = ""
+        subtitleUpdatedVersion.value = ""
+        subtitleCreatedVersionRaw.value = ""
+        subtitleUpdatedVersionRaw.value = ""
         showPlayer.value = false
         updateContentScrollClass()
         reloadReadable()
@@ -56,6 +99,14 @@ const reloadPage = () => {
     }
     if (questId) {
         isReadable.value = false
+        readableCreatedVersion.value = ""
+        readableUpdatedVersion.value = ""
+        readableCreatedVersionRaw.value = ""
+        readableUpdatedVersionRaw.value = ""
+        subtitleCreatedVersion.value = ""
+        subtitleUpdatedVersion.value = ""
+        subtitleCreatedVersionRaw.value = ""
+        subtitleUpdatedVersionRaw.value = ""
         showPlayer.value = false
         updateContentScrollClass()
         currentPage.value = 1
@@ -63,6 +114,14 @@ const reloadPage = () => {
         return
     }
     isReadable.value = false
+    readableCreatedVersion.value = ""
+    readableUpdatedVersion.value = ""
+    readableCreatedVersionRaw.value = ""
+    readableUpdatedVersionRaw.value = ""
+    subtitleCreatedVersion.value = ""
+    subtitleUpdatedVersion.value = ""
+    subtitleCreatedVersionRaw.value = ""
+    subtitleUpdatedVersionRaw.value = ""
     textHash.value = parseInt(route.query.textHash)
     updateContentScrollClass()
     reloadTalk()
@@ -77,11 +136,20 @@ const reloadTalk = () => {
             let talkContents = resJson.contents
             questName.value = talkContents.talkQuestName
             dialogues.value = talkContents.dialogues
+            subtitleCreatedVersion.value = talkContents.createdVersion || ""
+            subtitleUpdatedVersion.value = talkContents.updatedVersion || ""
+            subtitleCreatedVersionRaw.value = talkContents.createdVersionRaw || ""
+            subtitleUpdatedVersionRaw.value = talkContents.updatedVersionRaw || ""
         }).catch(err => {
             if(!err.network) err.defaultHandler()
         })
         return
     }
+
+    subtitleCreatedVersion.value = ""
+    subtitleUpdatedVersion.value = ""
+    subtitleCreatedVersionRaw.value = ""
+    subtitleUpdatedVersionRaw.value = ""
 
     api.getTalkFromHash(textHash.value, route.query.searchLang).then(res => {
         let resJson = res.json
@@ -100,9 +168,13 @@ const reloadReadable = () => {
         let resJson = res.json
         queryTime.value = resJson.time.toFixed(2)
         let readableContents = resJson.contents
-        readableTitle.value = readableContents.readableTitle || "阅读物"
+        readableTitle.value = readableContents.readableTitle || UI_TEXT.readableFallback
         readableFileName.value = readableContents.fileName || ""
         readableTranslates.value = readableContents.translates || {}
+        readableCreatedVersion.value = readableContents.createdVersion || ""
+        readableUpdatedVersion.value = readableContents.updatedVersion || ""
+        readableCreatedVersionRaw.value = readableContents.createdVersionRaw || ""
+        readableUpdatedVersionRaw.value = readableContents.updatedVersionRaw || ""
     }).catch(err => {
         if(!err.network) err.defaultHandler()
     })
@@ -148,13 +220,13 @@ const copyReadableContent = async (langCode) => {
     const rawText = readableTranslates.value?.[langCode] || ""
     const text = normalizeCopyText(rawText)
     if (!text) {
-        ElMessage.warning("没有可复制的文本")
+        ElMessage.warning(UI_TEXT.noTextToCopy)
         return
     }
     try {
         if (navigator.clipboard?.writeText) {
             await navigator.clipboard.writeText(text)
-            ElMessage.success("已复制")
+            ElMessage.success(UI_TEXT.copied)
             return
         }
 
@@ -167,23 +239,23 @@ const copyReadableContent = async (langCode) => {
         textarea.select()
         document.execCommand('copy')
         document.body.removeChild(textarea)
-        ElMessage.success("已复制")
+        ElMessage.success(UI_TEXT.copied)
     } catch (error) {
         console.error(error)
-        ElMessage.error("复制失败，请手动选择文本")
+        ElMessage.error(UI_TEXT.copyFailed)
     }
 }
 
 const copyDialogueText = async (text) => {
     const normalized = normalizeCopyText(text)
     if (!normalized) {
-        ElMessage.warning("没有可复制的文本")
+        ElMessage.warning(UI_TEXT.noTextToCopy)
         return
     }
     try {
         if (navigator.clipboard?.writeText) {
             await navigator.clipboard.writeText(normalized)
-            ElMessage.success("已复制")
+            ElMessage.success(UI_TEXT.copied)
             return
         }
 
@@ -196,16 +268,26 @@ const copyDialogueText = async (text) => {
         textarea.select()
         document.execCommand('copy')
         document.body.removeChild(textarea)
-        ElMessage.success("已复制")
+        ElMessage.success(UI_TEXT.copied)
     } catch (error) {
         console.error(error)
-        ElMessage.error("复制失败，请手动选择文本")
+        ElMessage.error(UI_TEXT.copyFailed)
     }
 }
 
 const isCopyableText = (text) => {
     const normalized = normalizeCopyText(text)
     return normalized.trim().length > 0
+}
+
+const formatVersionTag = (versionTag, rawVersion) => {
+    if (versionTag) return versionTag
+    if (rawVersion) return String(rawVersion)
+    return UI_TEXT.unknown
+}
+
+const shouldShowUpdatedVersionTag = (createdTag, createdRaw, updatedTag, updatedRaw) => {
+    return formatVersionTag(createdTag, createdRaw) !== formatVersionTag(updatedTag, updatedRaw)
 }
 
 const displayLanguages = computed(() => {
@@ -245,7 +327,7 @@ const dialogueGroups = computed(() => {
     return groups
 })
 
-// 播放器相关开始
+// Audio player behavior
 /**
  *
  * @type {Ref<AudioPlayer>}
@@ -253,6 +335,7 @@ const dialogueGroups = computed(() => {
 const voicePlayer = ref()
 const showPlayer = ref(false)
 const autoLoop = ref(true)
+const showDialogueVersions = ref(false)
 let firstShowPlayer = true
 const audio = ref([])
 const currentPlayingIndex = ref(-1)
@@ -293,7 +376,7 @@ const onVoicePlay = (voiceUrl, dialogueId) => {
 
     }else{
         audio.value = [voiceUrl]
-        // 要等一会才能播放
+        // Audio player behavior
         setTimeout(()=>{
             voicePlayer.value.play()
         }, 100)
@@ -337,7 +420,7 @@ const playAllLangVoice = async (langCode) => {
 
     audio.value = newAudios
     voicePlayer.value.currentPlayIndex = 0
-    // 要等一会才能播放
+    // Audio player behavior
     setTimeout(()=>{
         voicePlayer.value.play()
     }, 100)
@@ -392,11 +475,34 @@ onDeactivated(() => {
 
 <template>
     <div class="viewWrapper" :class="{dialogueView: !isReadable}">
-        <h1 class="pageTitle">{{ isReadable ? "阅读物查询" : "剧情对话查询" }}</h1>
+        <h1 class="pageTitle">{{ isReadable ? UI_TEXT.pageTitleReadable : UI_TEXT.pageTitleDialogue }}</h1>
         <div class="helpText">
-            <p v-if="!isReadable">来源：{{questName}}</p>
-            <p v-else>来源：{{ readableTitle }}<span v-if="readableFileName">（{{ readableFileName }}）</span></p>
-            <p>查询用时： {{queryTime}} ms</p>
+            <p v-if="!isReadable">{{ UI_TEXT.source }}: {{ questName }}</p>
+            <p v-else>{{ UI_TEXT.source }}: {{ readableTitle }}<span v-if="readableFileName"> ({{ readableFileName }})</span></p>
+            <p>{{ UI_TEXT.queryTime }}: {{queryTime}} ms</p>
+
+            <div v-if="isReadable" class="versionTags">
+                <el-tag size="small" effect="plain" :title="readableCreatedVersionRaw">{{ UI_TEXT.created }}: {{ formatVersionTag(readableCreatedVersion, readableCreatedVersionRaw) }}</el-tag>
+                <el-tag
+                    v-if="shouldShowUpdatedVersionTag(readableCreatedVersion, readableCreatedVersionRaw, readableUpdatedVersion, readableUpdatedVersionRaw)"
+                    size="small"
+                    effect="plain"
+                    :title="readableUpdatedVersionRaw"
+                >
+                    {{ UI_TEXT.updated }}: {{ formatVersionTag(readableUpdatedVersion, readableUpdatedVersionRaw) }}
+                </el-tag>
+            </div>
+            <div v-else-if="route.query.isSubtitle" class="versionTags">
+                <el-tag size="small" effect="plain" :title="subtitleCreatedVersionRaw">{{ UI_TEXT.created }}: {{ formatVersionTag(subtitleCreatedVersion, subtitleCreatedVersionRaw) }}</el-tag>
+                <el-tag
+                    v-if="shouldShowUpdatedVersionTag(subtitleCreatedVersion, subtitleCreatedVersionRaw, subtitleUpdatedVersion, subtitleUpdatedVersionRaw)"
+                    size="small"
+                    effect="plain"
+                    :title="subtitleUpdatedVersionRaw"
+                >
+                    {{ UI_TEXT.updated }}: {{ formatVersionTag(subtitleUpdatedVersion, subtitleUpdatedVersionRaw) }}
+                </el-tag>
+            </div>
         </div>
 
         <div v-if="isReadable" class="readableContent">
@@ -409,7 +515,7 @@ onDeactivated(() => {
                         :icon="CopyDocument"
                         @click="copyReadableContent(langCode)"
                     >
-                        复制
+                        {{ UI_TEXT.copy }}
                     </el-button>
                 </div>
                 <StylizedText :text="readableTranslates[langCode]" :keyword="keyword" />
@@ -417,73 +523,101 @@ onDeactivated(() => {
         </div>
 
         <div v-else class="dialogueScroll">
+            <div class="dialogueTopControls">
+                <el-form :inline="true">
+                    <el-form-item :label="UI_TEXT.showTextVersion">
+                        <el-switch v-model="showDialogueVersions" />
+                    </el-form-item>
+                </el-form>
+            </div>
             <div class="resultControls" v-if="totalCount > 0">
-                <span class="resultCount">共 {{ totalCount }} 条，当前 {{ currentPage }} / {{ totalPages }} 页</span>
-                <el-button size="small" :disabled="currentPage <= 1" @click="goToPage(1)">首页</el-button>
-                <el-button size="small" :disabled="currentPage <= 1" @click="goToPage(currentPage - 1)">上一页</el-button>
-                <el-button size="small" :disabled="currentPage >= totalPages" @click="goToPage(currentPage + 1)">下一页</el-button>
-                <el-button size="small" :disabled="currentPage >= totalPages" @click="goToPage(totalPages)">末页</el-button>
+                <span class="resultCount">{{ UI_TEXT.total }} {{ totalCount }} {{ UI_TEXT.currentPage }} {{ currentPage }} / {{ totalPages }} {{ UI_TEXT.page }}</span>
+                <el-button size="small" :disabled="currentPage <= 1" @click="goToPage(1)">{{ UI_TEXT.first }}</el-button>
+                <el-button size="small" :disabled="currentPage <= 1" @click="goToPage(currentPage - 1)">{{ UI_TEXT.prev }}</el-button>
+                <el-button size="small" :disabled="currentPage >= totalPages" @click="goToPage(currentPage + 1)">{{ UI_TEXT.next }}</el-button>
+                <el-button size="small" :disabled="currentPage >= totalPages" @click="goToPage(totalPages)">{{ UI_TEXT.last }}</el-button>
             </div>
             <div class="dialogueGroups">
-            <div v-for="group in dialogueGroups" :key="group.talkId || 'single'" class="dialogueGroup">
-                <h3 v-if="group.talkId" class="dialogueGroupTitle">Talk ID: {{ group.talkId }}</h3>
-                <el-table :data="group.rows" :row-class-name="tableRowClassName">
-                    <el-table-column prop="talker" label="角色" width="100" />
-                    <template v-for="langCode in displayLanguages">
-                        <el-table-column width="40">
-                            <template #header>
-                                <el-tooltip :content="'播放全部' + global.languages[langCode] + '语音'">
-                                    <el-icon @click="playAllLangVoice(langCode)"><VideoPlay /></el-icon>
-                                </el-tooltip>
-                            </template>
+                <div v-for="group in dialogueGroups" :key="group.talkId || 'single'" class="dialogueGroup">
+                    <h3 v-if="group.talkId" class="dialogueGroupTitle">Talk ID: {{ group.talkId }}</h3>
+                    <el-table :data="group.rows" :row-class-name="tableRowClassName">
+                        <el-table-column prop="talker" :label="UI_TEXT.speaker" width="110" />
+                        <el-table-column v-if="showDialogueVersions" :label="UI_TEXT.version" width="140">
                             <template #default="scope">
-                                <span v-if="global.voiceLanguages[langCode]">
-                                    <PlayVoiceButton v-for="voice in scope.row.voicePaths"
-                                                     :voice-path="voice" :lang-code="langCode"
-                                                     @on-voice-play="(url) =>{ onVoicePlay(url, scope.row.dialogueId)}"
-                                                     :ref = "(el) => {registerVoicePlayButton(el, langCode, scope.row.dialogueId)}"
-                                    />
-                                </span>
-                            </template>
-                        </el-table-column>
-                        <el-table-column :label="global.languages[langCode]" >
-                            <template #default="scope">
-                                <div class="dialogueCell">
-                                    <StylizedText :text="scope.row.translates[langCode]" :keyword="keyword"/>
-                                    <el-button
-                                        v-if="isCopyableText(scope.row.translates[langCode])"
-                                        class="copyDialogueButton"
-                                        :icon="CopyDocument"
-                                        circle
+                                <div class="rowVersionTags">
+                                    <el-tag
                                         size="small"
-                                        @click="copyDialogueText(scope.row.translates[langCode])"
-                                    />
+                                        effect="plain"
+                                        class="versionTag"
+                                        :title="scope.row.createdVersionRaw || ''"
+                                    >
+                                        {{ UI_TEXT.created }}: {{ formatVersionTag(scope.row.createdVersion, scope.row.createdVersionRaw) }}
+                                    </el-tag>
+                                    <el-tag
+                                        v-if="shouldShowUpdatedVersionTag(scope.row.createdVersion, scope.row.createdVersionRaw, scope.row.updatedVersion, scope.row.updatedVersionRaw)"
+                                        size="small"
+                                        effect="plain"
+                                        class="versionTag"
+                                        :title="scope.row.updatedVersionRaw || ''"
+                                    >
+                                        {{ UI_TEXT.updated }}: {{ formatVersionTag(scope.row.updatedVersion, scope.row.updatedVersionRaw) }}
+                                    </el-tag>
                                 </div>
                             </template>
                         </el-table-column>
-                    </template>
-                </el-table>
+                        <template v-for="langCode in displayLanguages">
+                            <el-table-column width="40">
+                                <template #header>
+                                    <el-tooltip :content="UI_TEXT.playAll + global.languages[langCode] + UI_TEXT.voice">
+                                        <el-icon @click="playAllLangVoice(langCode)"><VideoPlay /></el-icon>
+                                    </el-tooltip>
+                                </template>
+                                <template #default="scope">
+                                    <span v-if="global.voiceLanguages[langCode]">
+                                        <PlayVoiceButton v-for="voice in scope.row.voicePaths"
+                                                         :voice-path="voice" :lang-code="langCode"
+                                                         @on-voice-play="(url) =>{ onVoicePlay(url, scope.row.dialogueId)}"
+                                                         :ref = "(el) => {registerVoicePlayButton(el, langCode, scope.row.dialogueId)}"
+                                        />
+                                    </span>
+                                </template>
+                            </el-table-column>
+                            <el-table-column :label="global.languages[langCode]" >
+                                <template #default="scope">
+                                    <div class="dialogueCell">
+                                        <StylizedText :text="scope.row.translates[langCode]" :keyword="keyword"/>
+                                        <el-button
+                                            v-if="isCopyableText(scope.row.translates[langCode])"
+                                            class="copyDialogueButton"
+                                            :icon="CopyDocument"
+                                            circle
+                                            size="small"
+                                            @click="copyDialogueText(scope.row.translates[langCode])"
+                                        />
+                                    </div>
+                                </template>
+                            </el-table-column>
+                        </template>
+                    </el-table>
+                </div>
             </div>
-        </div>
             <div class="resultControls" v-if="totalCount > 0">
-                <span class="resultCount">共 {{ totalCount }} 条，当前 {{ currentPage }} / {{ totalPages }} 页</span>
-                <el-button size="small" :disabled="currentPage <= 1" @click="goToPage(1)">首页</el-button>
-                <el-button size="small" :disabled="currentPage <= 1" @click="goToPage(currentPage - 1)">上一页</el-button>
-                <el-button size="small" :disabled="currentPage >= totalPages" @click="goToPage(currentPage + 1)">下一页</el-button>
-                <el-button size="small" :disabled="currentPage >= totalPages" @click="goToPage(totalPages)">末页</el-button>
+                <span class="resultCount">{{ UI_TEXT.total }} {{ totalCount }} {{ UI_TEXT.currentPage }} {{ currentPage }} / {{ totalPages }} {{ UI_TEXT.page }}</span>
+                <el-button size="small" :disabled="currentPage <= 1" @click="goToPage(1)">{{ UI_TEXT.first }}</el-button>
+                <el-button size="small" :disabled="currentPage <= 1" @click="goToPage(currentPage - 1)">{{ UI_TEXT.prev }}</el-button>
+                <el-button size="small" :disabled="currentPage >= totalPages" @click="goToPage(currentPage + 1)">{{ UI_TEXT.next }}</el-button>
+                <el-button size="small" :disabled="currentPage >= totalPages" @click="goToPage(totalPages)">{{ UI_TEXT.last }}</el-button>
             </div>
         </div>
 
         <el-form v-if="!isReadable" style="margin-top: 10px;" :inline="true">
-            <el-form-item label="自动连续播放">
+            <el-form-item :label="UI_TEXT.autoLoop">
                 <el-switch v-model="autoLoop" />
             </el-form-item>
-            <el-form-item label="自动滚动">
+            <el-form-item :label="UI_TEXT.autoScroll">
                 <el-switch v-model="autoScroll" />
             </el-form-item>
         </el-form>
-
-
     </div>
 
     <div class="viewWrapper voicePlayerContainer" v-show="showPlayer" v-if="!isReadable">
@@ -510,14 +644,12 @@ onDeactivated(() => {
 
     <el-dialog
         v-model="voiceListLoadingInfo.showLoadingDialogue" :width="300"
-        :show-close="false" title="下载并转换语音" :close-on-press-escape="false">
+        :show-close="false" :title="UI_TEXT.loadingVoices" :close-on-press-escape="false">
         <el-progress :percentage="voiceListLoadingInfo.percentage">
             {{voiceListLoadingInfo.current}} / {{voiceListLoadingInfo.total}}
         </el-progress>
     </el-dialog>
-
 </template>
-
 <style scoped>
 .viewWrapper{
     position: relative;
@@ -571,9 +703,15 @@ onDeactivated(() => {
     gap: 16px;
 }
 
+
+
 .dialogueScroll {
     overflow-x: visible;
     width: 100%;
+}
+
+.dialogueTopControls {
+    margin-bottom: 8px;
 }
 
 .resultControls {
@@ -664,4 +802,15 @@ onDeactivated(() => {
     }
 }
 
+.versionTags {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    margin-top: 6px;
+}
+.rowVersionTags {
+    display: flex;
+    gap: 6px;
+    flex-wrap: wrap;
+}
 </style>
