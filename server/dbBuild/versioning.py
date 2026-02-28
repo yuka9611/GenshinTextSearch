@@ -574,21 +574,28 @@ def get_or_create_version_id(raw_version: str | None) -> int | None:
     _ensure_version_dim_table()
     cur = conn.cursor()
     try:
-        cur.execute(
-            f"""
-            INSERT OR IGNORE INTO {VERSION_DIM_TABLE}(raw_version, version_tag)
-            VALUES (?, ?)
-            """,
-            (text, _extract_version_tag(text)),
-        )
+        # 检查版本是否已存在
         row = cur.execute(
             f"SELECT id FROM {VERSION_DIM_TABLE} WHERE raw_version=? LIMIT 1",
             (text,),
         ).fetchone()
+        if row:
+            return int(row[0])
+        
+        # 获取当前最大ID
+        max_id_row = cur.execute(f"SELECT MAX(id) FROM {VERSION_DIM_TABLE}").fetchone()
+        new_id = max_id_row[0] + 1 if max_id_row[0] else 1
+        
+        # 插入新版本，使用指定的ID
+        cur.execute(
+            f"""
+            INSERT INTO {VERSION_DIM_TABLE}(id, raw_version, version_tag)
+            VALUES (?, ?, ?)
+            """,
+            (new_id, text, _extract_version_tag(text)),
+        )
         conn.commit()
-        if not row:
-            return None
-        return int(row[0])
+        return new_id
     finally:
         cur.close()
 
@@ -765,15 +772,20 @@ def rebuild_version_catalog(
                 has_id_cols
                 and _table_exists(VERSION_DIM_TABLE)
             ):
-                query_parts.extend(
-                    [
-                        f"SELECT vd.raw_version AS v FROM {table_name} t "
-                        f"JOIN {VERSION_DIM_TABLE} vd ON vd.id = t.created_version_id "
-                        f"WHERE t.created_version_id IS NOT NULL",
-                        f"SELECT vd.raw_version AS v FROM {table_name} t "
-                        f"JOIN {VERSION_DIM_TABLE} vd ON vd.id = t.updated_version_id "
-                        f"WHERE t.updated_version_id IS NOT NULL",
-                    ]
+                # 只记录创建版本
+                query_parts.append(
+                    f"SELECT vd.raw_version AS v FROM {table_name} t "
+                    f"JOIN {VERSION_DIM_TABLE} vd ON vd.id = t.created_version_id "
+                    f"WHERE t.created_version_id IS NOT NULL"
+                )
+                # 只记录与创建版本不同的更新版本
+                query_parts.append(
+                    f"SELECT vd_u.raw_version AS v FROM {table_name} t "
+                    f"JOIN {VERSION_DIM_TABLE} vd_c ON vd_c.id = t.created_version_id "
+                    f"JOIN {VERSION_DIM_TABLE} vd_u ON vd_u.id = t.updated_version_id "
+                    f"WHERE t.created_version_id IS NOT NULL "
+                    f"AND t.updated_version_id IS NOT NULL "
+                    f"AND vd_c.raw_version != vd_u.raw_version"
                 )
             if not query_parts:
                 stats[table_name] = 0

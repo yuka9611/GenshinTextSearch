@@ -131,7 +131,7 @@ def importSubtitlesByFiles(
                     SELECT subtitleKey, content, created_version_id, updated_version_id
                     FROM subtitle
                     WHERE fileName=? AND lang=?
-                    "",
+                    """,
                     (clean_file_name, lang_id),
                 ).fetchall()
                 with open(full_path, "r", encoding="utf-8", errors="ignore") as f:

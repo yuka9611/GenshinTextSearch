@@ -159,11 +159,27 @@ def _build_guarded_created_updated_sql(table_name: str, key_predicate_sql: str) 
     return (
         f"UPDATE {table_name} SET "
         "created_version_id=CASE "
-        "WHEN created_version_id IS NULL OR created_version_id > ? THEN ? "
+        "WHEN created_version_id IS NULL OR "
+        "(SELECT CASE WHEN version_tag IS NULL THEN 0 ELSE "
+        "CAST(SUBSTR(version_tag, 1, INSTR(version_tag, '.') - 1) AS INTEGER) * 1000 + "
+        "CAST(SUBSTR(version_tag, INSTR(version_tag, '.') + 1) AS INTEGER) "
+        "END FROM version_dim WHERE id = created_version_id) > "
+        "(SELECT CASE WHEN version_tag IS NULL THEN 0 ELSE "
+        "CAST(SUBSTR(version_tag, 1, INSTR(version_tag, '.') - 1) AS INTEGER) * 1000 + "
+        "CAST(SUBSTR(version_tag, INSTR(version_tag, '.') + 1) AS INTEGER) "
+        "END FROM version_dim WHERE id = ?) THEN ? "
         "ELSE created_version_id END, "
         "updated_version_id=? "
         f"WHERE {key_predicate_sql} "
-        "AND (updated_version_id IS NULL OR updated_version_id <= ?)"
+        "AND (updated_version_id IS NULL OR "
+        "(SELECT CASE WHEN version_tag IS NULL THEN 0 ELSE "
+        "CAST(SUBSTR(version_tag, 1, INSTR(version_tag, '.') - 1) AS INTEGER) * 1000 + "
+        "CAST(SUBSTR(version_tag, INSTR(version_tag, '.') + 1) AS INTEGER) "
+        "END FROM version_dim WHERE id = updated_version_id) <= "
+        "(SELECT CASE WHEN version_tag IS NULL THEN 0 ELSE "
+        "CAST(SUBSTR(version_tag, 1, INSTR(version_tag, '.') - 1) AS INTEGER) * 1000 + "
+        "CAST(SUBSTR(version_tag, INSTR(version_tag, '.') + 1) AS INTEGER) "
+        "END FROM version_dim WHERE id = ?))"
     )
 
 
@@ -847,9 +863,11 @@ def backfill_versions_from_history(
     # 简化进度显示，只显示主要进度
     print(f"Processing {total_commits} commits...")
     try:
+        last_commit_sha = None
         with LightweightProgress(total_commits, desc="Backfill commits", unit="commits") as pbar:
             for idx in range(start_idx, total_commits):
                 commit_sha, commit_title = commits[idx]
+                last_commit_sha = commit_sha
                 parent_sha = commits[idx - 1][0] if idx > 0 else first_parent_sha
                 version_label, version_id = _resolve_commit_version(repo_path, commit_sha, commit_title)
                 if version_id is None:
@@ -858,7 +876,36 @@ def backfill_versions_from_history(
 
                 pbar.set_postfix_str(f"Commit {commit_sha[:8]}")
 
+                # 获取commit的diff
                 entries = _initial_entries(repo_path, commit_sha) if parent_sha is None else _diff_entries(repo_path, parent_sha, commit_sha)
+
+                # 检查commit是否与导入文件相关
+                is_relevant = False
+                for entry in entries:
+                    action = entry["action"]
+                    old_path = entry.get("old_path")
+                    new_path = entry.get("new_path")
+                    rel_path = (new_path or old_path or "").replace("\\", "/")
+
+                    # 检查是否是相关路径
+                    if rel_path.startswith("TextMap/") and rel_path.endswith(".json") and action != "D":
+                        is_relevant = True
+                        break
+                    elif rel_path.startswith("Readable/") and action != "D":
+                        is_relevant = True
+                        break
+                    elif rel_path.startswith("Subtitle/") and rel_path.endswith(".srt") and action != "D":
+                        is_relevant = True
+                        break
+                    elif rel_path.startswith("BinOutput/Quest/") and rel_path.endswith(".json") and action != "D":
+                        is_relevant = True
+                        break
+
+                # 如果commit与导入文件无关，跳过处理
+                if not is_relevant:
+                    print(f"跳过与导入文件无关的commit: {commit_sha[:8]} - {commit_title}")
+                    pbar.update()
+                    continue
 
                 textmap_entries = []
                 other_entries = []
@@ -1021,7 +1068,8 @@ def backfill_versions_from_history(
                     unresolved_created_scope = _unresolved_created_quest_ids(cursor)
             conn.commit()
             set_meta(resume_target_key, resume_scope)
-            set_meta(resume_done_key, commit_sha)
+            if last_commit_sha:
+                set_meta(resume_done_key, last_commit_sha)
         if prune_missing:
             _prune_unseen_rows_by_version(cursor, "textMap")
             _prune_unseen_rows_by_version(cursor, "readable")
@@ -1119,9 +1167,11 @@ def backfill_textmap_versions_from_history(
     # 简化进度显示，只显示主要进度
     print(f"Processing {total_commits} TextMap commits...")
     try:
+        last_commit_sha = None
         with LightweightProgress(total_commits, desc="TextMap backfill", unit="commits") as pbar:
             for idx in range(start_idx, total_commits):
                 commit_sha, commit_title = commits[idx]
+                last_commit_sha = commit_sha
                 parent_sha = commits[idx - 1][0] if idx > 0 else first_parent_sha
                 version_label, version_id = _resolve_commit_version(repo_path, commit_sha, commit_title)
                 if version_id is None:
@@ -1180,7 +1230,8 @@ def backfill_textmap_versions_from_history(
                 pbar.update()
             conn.commit()
             set_meta(resume_target_key, resume_scope)
-            set_meta(resume_done_key, commit_sha)
+            if last_commit_sha:
+                set_meta(resume_done_key, last_commit_sha)
 
         if prune_missing:
             _prune_unseen_rows_by_version(cursor, "textMap")
@@ -1265,9 +1316,11 @@ def backfill_readable_versions_from_history(
     # 简化进度显示，只显示主要进度
     print(f"Processing {total_commits} Readable commits...")
     try:
+        last_commit_sha = None
         with LightweightProgress(total_commits, desc="Readable backfill", unit="commits") as pbar:
             for idx in range(start_idx, total_commits):
                 commit_sha, commit_title = commits[idx]
+                last_commit_sha = commit_sha
                 parent_sha = commits[idx - 1][0] if idx > 0 else first_parent_sha
                 version_label, version_id = _resolve_commit_version(repo_path, commit_sha, commit_title)
                 if version_id is None:
@@ -1298,7 +1351,15 @@ def backfill_readable_versions_from_history(
                         if len(parts) < 3:
                             continue
                         lang = parts[1]
-                        file_name = os.path.basename(parts[2])
+                        # 计算相对路径，保持与importReadable函数一致
+                        rel_under_lang = parts[2]
+                        # 构建完整路径以计算相对路径
+                        full_path = os.path.join(repo_path, rel_path)
+                        lang_path = os.path.join(repo_path, "Readable", lang)
+                        # 计算相对路径
+                        rel_path_file = os.path.relpath(full_path, lang_path)
+                        # 将路径分隔符替换为"/"
+                        clean_file_name = rel_path_file.replace(os.sep, "/")
 
                         new_text = _git_show_text(repo_path, commit_sha, rel_path)
                         if new_text is None:
@@ -1307,14 +1368,15 @@ def backfill_readable_versions_from_history(
                         old_text = _git_show_text(repo_path, parent_sha, old_path_for_compare) if parent_sha else None
                         if not _readable_text_changed(old_text, new_text):
                             continue
-                        cursor.execute(sql_readable, (version_id, version_id, version_id, file_name, lang, version_id))
+                        cursor.execute(sql_readable, (version_id, version_id, version_id, clean_file_name, lang, version_id))
                     except Exception as e:
                         print(f"Error processing readable entry: {e}")
 
                 pbar.update()
             conn.commit()
             set_meta(resume_target_key, resume_scope)
-            set_meta(resume_done_key, commit_sha)
+            if last_commit_sha:
+                set_meta(resume_done_key, last_commit_sha)
     except BaseException:
         conn.rollback()
         print(
@@ -1338,6 +1400,16 @@ def backfill_readable_versions_from_history(
     set_meta(resume_target_key, "")
     set_meta(resume_done_key, "")
     rebuild_version_catalog(["readable"])
+
+    # 执行版本异常检验
+    from textmap_name_utils import analyze_readable_version_exceptions, report_version_exceptions
+    check_cursor = conn.cursor()
+    try:
+        exception_data = analyze_readable_version_exceptions(check_cursor)
+        report_version_exceptions(exception_data, "Readable")
+    finally:
+        check_cursor.close()
+
     print(f"Readable history backfill finished at commit {resolved_target}")
 
 
@@ -1490,6 +1562,16 @@ def backfill_subtitle_versions_from_history(
     set_meta(resume_target_key, "")
     set_meta(resume_done_key, "")
     rebuild_version_catalog(["subtitle"])
+
+    # 执行版本异常检验
+    from textmap_name_utils import analyze_subtitle_version_exceptions, report_version_exceptions
+    check_cursor = conn.cursor()
+    try:
+        exception_data = analyze_subtitle_version_exceptions(check_cursor)
+        report_version_exceptions(exception_data, "Subtitle")
+    finally:
+        check_cursor.close()
+
     print(f"Subtitle history backfill finished at commit {resolved_target}")
 
 
@@ -1902,39 +1984,39 @@ def backfill_quest_versions_from_history(
 
                         pbar.set_postfix_str(f"Commit {commit_sha[:8]}")
 
-                quest_backfilled_by_commit = 0
-                quest_entries = (
-                    _initial_entries(repo_path, commit_sha, include_paths=["BinOutput/Quest"])
-                    if parent_sha is None
-                    else _diff_entries(repo_path, parent_sha, commit_sha, include_paths=["BinOutput/Quest"])
-                )
+                        quest_backfilled_by_commit = 0
+                        quest_entries = (
+                            _initial_entries(repo_path, commit_sha, include_paths=["BinOutput/Quest"])
+                            if parent_sha is None
+                            else _diff_entries(repo_path, parent_sha, commit_sha, include_paths=["BinOutput/Quest"])
+                        )
 
-                for entry in quest_entries:
-                    quest_backfilled_by_commit += _backfill_quest_version_by_commit_entry(
-                        cursor,
-                        repo_path=repo_path,
-                        commit_sha=commit_sha,
-                        parent_sha=parent_sha,
-                        entry=entry,
-                        version_id=version_id,
-                        target_quest_ids=target_quest_ids,
-                    )
+                        for entry in quest_entries:
+                            quest_backfilled_by_commit += _backfill_quest_version_by_commit_entry(
+                                cursor,
+                                repo_path=repo_path,
+                                commit_sha=commit_sha,
+                                parent_sha=parent_sha,
+                                entry=entry,
+                                version_id=version_id,
+                                target_quest_ids=target_quest_ids,
+                            )
 
-                phase2_commit_created_backfilled += quest_backfilled_by_commit
+                        phase2_commit_created_backfilled += quest_backfilled_by_commit
 
-                unresolved_row = cursor.execute(
-                    "SELECT COUNT(*) FROM quest WHERE created_version_id IS NULL"
-                ).fetchone()
-                current_unresolved_created = int(unresolved_row[0] or 0) if unresolved_row else 0
+                        unresolved_row = cursor.execute(
+                            "SELECT COUNT(*) FROM quest WHERE created_version_id IS NULL"
+                        ).fetchone()
+                        current_unresolved_created = int(unresolved_row[0] or 0) if unresolved_row else 0
 
-                # 每处理10个提交显示一次详细信息
-                if (idx + 1) % 10 == 0 or (idx + 1) == total_commits:
-                    print(f"  Commit {commit_sha[:8]}: backfilled {quest_backfilled_by_commit} quests, remaining null created versions: {current_unresolved_created}")
+                        # 每处理10个提交显示一次详细信息
+                        if (idx + 1) % 10 == 0 or (idx + 1) == total_commits:
+                            print(f"  Commit {commit_sha[:8]}: backfilled {quest_backfilled_by_commit} quests, remaining null created versions: {current_unresolved_created}")
 
-                pbar.update()
-                conn.commit()
-                set_meta(resume_target_key, resume_scope)
-                set_meta(resume_done_key, commit_sha)
+                        pbar.update()
+                        conn.commit()
+                        set_meta(resume_target_key, resume_scope)
+                        set_meta(resume_done_key, commit_sha)
             finally:
                 pass
 

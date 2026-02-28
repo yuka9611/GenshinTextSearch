@@ -111,8 +111,7 @@ def _upsert_quest_text_signature(cursor, quest_id, title_text_map_hash, dialogue
         "titleTextMapHash=excluded.titleTextMapHash, "
         "dialogue_signature=excluded.dialogue_signature "
         "WHERE "
-        "NOT (quest_text_signature.titleTextMapHash IS excluded.titleTextMapHash) "
-        "OR NOT (quest_text_signature.dialogue_signature IS excluded.dialogue_signature)",
+        "NOT (quest_text_signature.dialogue_signature IS excluded.dialogue_signature)",
         (quest_id, title_text_map_hash, dialogue_signature),
     )
 
@@ -195,13 +194,13 @@ def importQuest(
 
     new_signature = _build_quest_dialogue_signature(cursor, talk_ids)
     old_signature_row = cursor.execute(
-        "SELECT titleTextMapHash, dialogue_signature FROM quest_text_signature WHERE questId=?",
+        "SELECT dialogue_signature FROM quest_text_signature WHERE questId=?",
         (questId,),
     ).fetchone()
+    # 只根据dialogue_signature判断文本内容是否变更，不考虑titleTextMapHash
     text_changed = (
         old_signature_row is None
-        or old_signature_row[0] != titleTextMapHash
-        or old_signature_row[1] != new_signature
+        or old_signature_row[0] != new_signature
     )
 
     old_talk_rows = cursor.execute(
@@ -220,10 +219,30 @@ def importQuest(
     old_created_version = old_version_row[0] if old_version_row else None
     old_updated_version = old_version_row[1] if old_version_row else None
     created_version = old_created_version
+    
     if not write_versions:
         updated_version = old_updated_version
-    elif old_version_row is None or text_changed:
+    elif old_version_row is None:
+        # 新任务，使用当前版本
         updated_version = version_id
+    elif text_changed:
+        # 文本内容变更，获取所含文本的最近更新时间作为quest的更新版本
+        # 查找与该quest相关的所有dialogue的最新更新版本
+        latest_version_row = cursor.execute(
+            """
+            SELECT MAX(tm.updated_version_id)
+            FROM questTalk qt
+            JOIN dialogue d ON d.talkId = qt.talkId
+            JOIN textMap tm ON tm.hash = d.textHash
+            WHERE qt.questId = ? AND tm.updated_version_id IS NOT NULL
+            """,
+            (questId,)
+        ).fetchone()
+        if latest_version_row and latest_version_row[0]:
+            updated_version = latest_version_row[0]
+        else:
+            # 如果没有找到相关文本的更新版本，使用当前版本
+            updated_version = version_id
     else:
         updated_version = old_updated_version
 
@@ -252,62 +271,76 @@ def importAllQuests(
     cursor = conn.cursor()
     _ensure_quest_version_tables(cursor)
 
-    files = os.listdir(os.path.join(DATA_PATH, "BinOutput", "Quest"))
+    quest_folder = os.path.join(DATA_PATH, "BinOutput", "Quest")
+    files = os.listdir(quest_folder)
     imported_quest_ids = set()
     new_quest_ids = set()
     skipped_quest_files: list[str] = []
     missing_title_quests: list[str] = []
     no_talk_quests: list[str] = []
-    with LightweightProgress(len(files), desc="Quest files", unit="files") as pbar:
-        for i, fileName in enumerate(files):
-            quest_id, is_new_quest = importQuest(
-                fileName,
-                current_version=version,
-                cursor=cursor,
-                write_versions=write_versions,
-                skip_collector=skipped_quest_files,
-                log_skip=False,
-                missing_title_collector=missing_title_quests,
-                no_talk_collector=no_talk_quests,
-            )
-            if quest_id is not None:
-                imported_quest_ids.add(quest_id)
-            if is_new_quest and quest_id is not None:
-                new_quest_ids.add(quest_id)
-            pbar.update()
+    
+    try:
+        with LightweightProgress(len(files), desc="Quest files", unit="files") as pbar:
+            for i, fileName in enumerate(files):
+                quest_id, is_new_quest = importQuest(
+                    fileName,
+                    current_version=version,
+                    cursor=cursor,
+                    write_versions=write_versions,
+                    skip_collector=skipped_quest_files,
+                    log_skip=False,
+                    missing_title_collector=missing_title_quests,
+                    no_talk_collector=no_talk_quests,
+                )
+                if quest_id is not None:
+                    imported_quest_ids.add(quest_id)
+                if is_new_quest and quest_id is not None:
+                    new_quest_ids.add(quest_id)
+                pbar.update()
 
-    if sync_delete:
+        if sync_delete:
+            if imported_quest_ids:
+                # 批量删除，减少数据库操作
+                placeholders = ",".join(["?"] * len(imported_quest_ids))
+                params = tuple(imported_quest_ids)
+                
+                # 批量执行删除操作
+                cursor.execute(f"DELETE FROM quest WHERE questId NOT IN ({placeholders})", params)
+                cursor.execute(f"DELETE FROM questTalk WHERE questId NOT IN ({placeholders})", params)
+                cursor.execute(f"DELETE FROM quest_text_signature WHERE questId NOT IN ({placeholders})", params)
+                cursor.execute(f"DELETE FROM quest_hash_map WHERE questId NOT IN ({placeholders})", params)
+            else:
+                cursor.execute("DELETE FROM quest")
+                cursor.execute("DELETE FROM questTalk")
+                cursor.execute("DELETE FROM quest_text_signature")
+                cursor.execute("DELETE FROM quest_hash_map")
+
+        # 批量更新哈希映射
         if imported_quest_ids:
-            placeholders = ",".join(["?"] * len(imported_quest_ids))
-            sql_del_quest = f"DELETE FROM quest WHERE questId NOT IN ({placeholders})"
-            sql_del_talk = f"DELETE FROM questTalk WHERE questId NOT IN ({placeholders})"
-            sql_del_sig = f"DELETE FROM quest_text_signature WHERE questId NOT IN ({placeholders})"
-            params = tuple(imported_quest_ids)
-            cursor.execute(sql_del_quest, params)
-            cursor.execute(sql_del_talk, params)
-            cursor.execute(sql_del_sig, params)
-            sql_del_hash_map = f"DELETE FROM quest_hash_map WHERE questId NOT IN ({placeholders})"
-            cursor.execute(sql_del_hash_map, params)
+            refreshed_hash_map_quests = _refresh_quest_hash_map_for_quest_ids(
+                cursor,
+                imported_quest_ids,
+                batch_size=batch_size,
+            )
         else:
-            cursor.execute("DELETE FROM quest")
-            cursor.execute("DELETE FROM questTalk")
-            cursor.execute("DELETE FROM quest_text_signature")
-            cursor.execute("DELETE FROM quest_hash_map")
+            refreshed_hash_map_quests = 0
 
-    refreshed_hash_map_quests = _refresh_quest_hash_map_for_quest_ids(
-        cursor,
-        imported_quest_ids,
-        batch_size=batch_size,
-    )
-
-    if write_versions and imported_quest_ids:
-        _backfill_quest_created_version_from_textmap(
-            cursor,
-            quest_ids=imported_quest_ids,
-            overwrite_existing=False,
-        )
-    cursor.close()
-    conn.commit()
+        # 批量回填版本信息
+        if write_versions and imported_quest_ids:
+            _backfill_quest_created_version_from_textmap(
+                cursor,
+                quest_ids=imported_quest_ids,
+                overwrite_existing=False,
+            )
+        
+        conn.commit()
+    except Exception as e:
+        print(f"Error in importAllQuests: {e}")
+        conn.rollback()
+        raise
+    finally:
+        cursor.close()
+    
     _print_skip_summary("quest", skipped_quest_files)
     _print_issue_summary("quest missing titleTextMapHash", missing_title_quests)
     _print_issue_summary("quest without talk ids", no_talk_quests)
@@ -496,6 +529,8 @@ def importAllTalkItems(
     talk_files: list[str] = []
     skipped_files: list[str] = []
     touched_talk_ids: set[int] = set()
+    
+    # 预收集所有文件路径，减少I/O操作
     folders = sorted(os.listdir(talk_root))
     for folder in folders:
         folder_path = os.path.join(talk_root, folder)
@@ -508,27 +543,41 @@ def importAllTalkItems(
 
     print(f"importing talk files ({len(talk_files)})")
     cursor = conn.cursor()
-    with LightweightProgress(len(talk_files), desc="Talk files", unit="files") as pbar:
-        for file_name in talk_files:
-            imported_rows += importTalk(
-                file_name,
-                cursor=cursor,
-                commit=False,
+    
+    # 批量处理优化：减少事务提交次数
+    try:
+        with LightweightProgress(len(talk_files), desc="Talk files", unit="files") as pbar:
+            for file_name in talk_files:
+                imported_rows += importTalk(
+                    file_name,
+                    cursor=cursor,
+                    commit=False,
+                    batch_size=batch_size,
+                    skip_collector=skipped_files,
+                    log_skip=False,
+                    refresh_hash_map=False,
+                    touched_talk_collector=touched_talk_ids,
+                )
+                pbar.update()
+        
+        # 批量更新哈希映射，减少数据库操作
+        if touched_talk_ids:
+            _refresh_quest_hash_map_for_talk_ids(
+                cursor,
+                touched_talk_ids,
                 batch_size=batch_size,
-                skip_collector=skipped_files,
-                log_skip=False,
-                refresh_hash_map=False,
-                touched_talk_collector=touched_talk_ids,
             )
-            pbar.update()
-    _refresh_quest_hash_map_for_talk_ids(
-        cursor,
-        touched_talk_ids,
-        batch_size=batch_size,
-    )
-    cursor.close()
-    if commit:
-        conn.commit()
+        
+        if commit:
+            conn.commit()
+    except Exception as e:
+        print(f"Error in importAllTalkItems: {e}")
+        if commit:
+            conn.rollback()
+        raise
+    finally:
+        cursor.close()
+    
     _print_skip_summary("talk", skipped_files)
     return imported_rows
 

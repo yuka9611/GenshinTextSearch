@@ -295,3 +295,129 @@ def delete_empty_subtitle_entries(cursor, subtitle_path: str) -> int:
                 delete_count += 1
 
     return delete_count
+
+
+def analyze_readable_version_exceptions(cursor) -> dict:
+    """
+    分析Readable数据的版本异常情况
+
+    Args:
+        cursor: 数据库游标
+
+    Returns:
+        dict: 异常统计信息
+    """
+    # 检查版本异常情况
+    # 1. 没有创建版本的条目
+    cursor.execute("SELECT COUNT(*) FROM readable WHERE created_version_id IS NULL")
+    no_created_version = cursor.fetchone()[0]
+
+    # 2. 没有更新版本的条目
+    cursor.execute("SELECT COUNT(*) FROM readable WHERE updated_version_id IS NULL")
+    no_updated_version = cursor.fetchone()[0]
+
+    # 3. 创建版本晚于更新版本的条目
+    cursor.execute("SELECT COUNT(*) FROM readable WHERE created_version_id > updated_version_id")
+    created_after_updated = cursor.fetchone()[0]
+
+    # 4. 获取异常条目的示例
+    cursor.execute("SELECT fileName, lang FROM readable WHERE created_version_id IS NULL LIMIT 10")
+    no_created_version_samples = [f"{lang}/{fileName}" for fileName, lang in cursor.fetchall()]
+
+    cursor.execute("SELECT fileName, lang FROM readable WHERE updated_version_id IS NULL LIMIT 10")
+    no_updated_version_samples = [f"{lang}/{fileName}" for fileName, lang in cursor.fetchall()]
+
+    cursor.execute("SELECT fileName, lang, created_version_id, updated_version_id FROM readable WHERE created_version_id > updated_version_id LIMIT 10")
+    created_after_updated_samples = [f"{lang}/{fileName} (created: {created}, updated: {updated})" for fileName, lang, created, updated in cursor.fetchall()]
+
+    return {
+        "total": cursor.execute("SELECT COUNT(*) FROM readable").fetchone()[0],
+        "no_created_version": no_created_version,
+        "no_updated_version": no_updated_version,
+        "created_after_updated": created_after_updated,
+        "no_created_version_samples": no_created_version_samples,
+        "no_updated_version_samples": no_updated_version_samples,
+        "created_after_updated_samples": created_after_updated_samples
+    }
+
+
+def analyze_subtitle_version_exceptions(cursor) -> dict:
+    """
+    分析Subtitle数据的版本异常情况
+
+    Args:
+        cursor: 数据库游标
+
+    Returns:
+        dict: 异常统计信息
+    """
+    # 检查版本异常情况
+    # 1. 没有创建版本的条目
+    cursor.execute("SELECT COUNT(*) FROM subtitle WHERE created_version_id IS NULL")
+    no_created_version = cursor.fetchone()[0]
+
+    # 2. 没有更新版本的条目
+    cursor.execute("SELECT COUNT(*) FROM subtitle WHERE updated_version_id IS NULL")
+    no_updated_version = cursor.fetchone()[0]
+
+    # 3. 创建版本晚于更新版本的条目
+    cursor.execute("SELECT COUNT(*) FROM subtitle WHERE created_version_id > updated_version_id")
+    created_after_updated = cursor.fetchone()[0]
+
+    # 4. 获取异常条目的示例
+    cursor.execute("SELECT fileName, lang FROM subtitle WHERE created_version_id IS NULL LIMIT 10")
+    no_created_version_samples = [f"{lang}/{fileName}" for fileName, lang in cursor.fetchall()]
+
+    cursor.execute("SELECT fileName, lang FROM subtitle WHERE updated_version_id IS NULL LIMIT 10")
+    no_updated_version_samples = [f"{lang}/{fileName}" for fileName, lang in cursor.fetchall()]
+
+    cursor.execute("SELECT fileName, lang, created_version_id, updated_version_id FROM subtitle WHERE created_version_id > updated_version_id LIMIT 10")
+    created_after_updated_samples = [f"{lang}/{fileName} (created: {created}, updated: {updated})" for fileName, lang, created, updated in cursor.fetchall()]
+
+    return {
+        "total": cursor.execute("SELECT COUNT(*) FROM subtitle").fetchone()[0],
+        "no_created_version": no_created_version,
+        "no_updated_version": no_updated_version,
+        "created_after_updated": created_after_updated,
+        "no_created_version_samples": no_created_version_samples,
+        "no_updated_version_samples": no_updated_version_samples,
+        "created_after_updated_samples": created_after_updated_samples
+    }
+
+
+def report_version_exceptions(exception_data: dict, data_type: str) -> None:
+    """
+    报告版本异常情况
+
+    Args:
+        exception_data: 异常统计信息
+        data_type: 数据类型（Readable或Subtitle）
+    """
+    print(f"\n=== {data_type} 版本异常检验报告 ===")
+    print(f"总数据量: {exception_data['total']}")
+    print(f"无创建版本: {exception_data['no_created_version']} 条")
+    print(f"无更新版本: {exception_data['no_updated_version']} 条")
+    print(f"创建版本晚于更新版本: {exception_data['created_after_updated']} 条")
+
+    if exception_data['no_created_version_samples']:
+        print("\n无创建版本示例:")
+        for item in exception_data['no_created_version_samples']:
+            print(f"  - {item}")
+        if len(exception_data['no_created_version_samples']) > 10:
+            print(f"  ... 还有 {len(exception_data['no_created_version_samples']) - 10} 个")
+
+    if exception_data['no_updated_version_samples']:
+        print("\n无更新版本示例:")
+        for item in exception_data['no_updated_version_samples']:
+            print(f"  - {item}")
+        if len(exception_data['no_updated_version_samples']) > 10:
+            print(f"  ... 还有 {len(exception_data['no_updated_version_samples']) - 10} 个")
+
+    if exception_data['created_after_updated_samples']:
+        print("\n创建版本晚于更新版本示例:")
+        for item in exception_data['created_after_updated_samples']:
+            print(f"  - {item}")
+        if len(exception_data['created_after_updated_samples']) > 10:
+            print(f"  ... 还有 {len(exception_data['created_after_updated_samples']) - 10} 个")
+
+    print(f"=== 报告结束 ===\n")

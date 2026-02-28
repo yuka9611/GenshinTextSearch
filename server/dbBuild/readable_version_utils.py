@@ -9,7 +9,7 @@ def assign_readable_versions_by_text(
 ) -> tuple[int | None, int | None]:
     """
     Assign (created_version_id, updated_version_id) by text comparison.
-    If content is unchanged, keep existing versions; otherwise use fallback version.
+    If content is unchanged, keep existing versions; otherwise use fallback version for updated.
     """
     if existing_row is None:
         return fallback_version_id, fallback_version_id
@@ -18,4 +18,4 @@ def assign_readable_versions_by_text(
     if not readable_text_changed(old_content, new_content):
         return old_created, old_updated
 
-    return fallback_version_id, fallback_version_id
+    return old_created, fallback_version_id
