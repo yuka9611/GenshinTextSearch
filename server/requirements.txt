@@ -1,4 +1,4 @@
-flask
-flask_cors
-tqdm
-jieba
+Flask==2.0.1
+Flask-CORS==3.0.10
+tqdm==4.64.0
+jieba==0.42.1

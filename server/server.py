@@ -49,6 +49,10 @@ def create_app() -> Flask:
     # 延迟导入 CORS（减少顶层 import）
     from flask_cors import CORS
     CORS(app)
+    
+    # 导入并注册API蓝图
+    from controllers.api import api_bp
+    app.register_blueprint(api_bp)
 
     # ----------------------------
     # Startup / Settings APIs
