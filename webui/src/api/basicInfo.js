@@ -1,30 +1,25 @@
 import request from "@/utils/request";
+import { withCache } from "@/utils/requestCache";
 
 /**
  * 获得数据库中导入的TextMap语言列表
  */
-const getImportedTextLanguages = () => {
-    // return {
-    //     1: "Chinese",
-    //     4: "English(US)",
-    //     9: "Japaneses"
-    // }
-
+const getImportedTextLanguages = withCache(() => {
     return request.get("/api/getImportedTextLanguages");
-};
+});
 
 
 /**
  * 获得游戏安装的语音列表
  */
-const getImportedVoiceLanguages = () => {
+const getImportedVoiceLanguages = withCache(() => {
     return request.get("/api/getImportedVoiceLanguages");
-}
+});
 
-const getAvailableVersions = () => {
+const getAvailableVersions = withCache(() => {
     // Version aggregation can be heavy on large databases.
     return request.get("/api/getAvailableVersions", { timeout: 30000 });
-}
+});
 
 const saveConfig = (resultLanguages, defaultSearchLanguage, sourceLanguage, isMale) => {
     let tmp = []
@@ -42,9 +37,9 @@ const saveConfig = (resultLanguages, defaultSearchLanguage, sourceLanguage, isMa
     })
 }
 
-const getConfig = () => {
+const getConfig = withCache(() => {
     return request.get("/api/getSettings")
-}
+});
 
 export default {
     getImportedTextLanguages,

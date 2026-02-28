@@ -57,6 +57,10 @@ const filteredStories = computed(() => {
     const createdFilter = normalizeVersion(createdVersionFilter.value)
     const updatedFilter = normalizeVersion(updatedVersionFilter.value)
     return storyEntries.value.filter((entry) => {
+        // 确保有翻译内容
+        const translates = entry.translates || {}
+        if (Object.keys(translates).length === 0) return false
+        
         const createdVersion = getNormalizedEntryVersion(entry, "created")
         const updatedVersion = getNormalizedEntryVersion(entry, "updated")
         if (createdFilter && !createdVersion.includes(createdFilter)) return false
@@ -68,7 +72,6 @@ const filteredStories = computed(() => {
         if (!text) return true
         const title = normalizeText(entry.storyTitle || entry.origin || "")
         if (title.includes(text)) return true
-        const translates = entry.translates || {}
         for (const key of Object.keys(translates)) {
             const content = normalizeText(translates[key] || "")
             if (content.includes(text)) return true

@@ -160,7 +160,7 @@ const onSearchClicked = async () => {
         const contents = ans.contents
         avatarResults.value = contents.avatars || []
         const avatarCount = avatarResults.value.length
-        searchSummary.value = `查询用时: ${ans.time.toFixed(2)}ms，共 ${avatarCount} 个角色结果。`
+        searchSummary.value = `查询用时: ${ans.time.toFixed(2)}ms，找到 ${avatarCount} 个角色`
         voiceEntries.value = []
         voiceSummary.value = ""
         selectedAvatar.value = null
@@ -192,8 +192,8 @@ const onSearchClicked = async () => {
     avatarResults.value = Array.from(avatarMap.values()).sort((a, b) => a.name.localeCompare(b.name))
     const avatarCount = avatarResults.value.length
     const voiceCount = voiceEntries.value.length
-    searchSummary.value = `查询用时: ${ans.time.toFixed(2)}ms，按标题/版本检索，涉及 ${avatarCount} 个角色。`
-    voiceSummary.value = `查询用时: ${ans.time.toFixed(2)}ms，共 ${voiceCount} 条语音结果。`
+    searchSummary.value = `查询用时: ${ans.time.toFixed(2)}ms，按标题/版本检索，涉及 ${avatarCount} 个角色`
+    voiceSummary.value = `查询用时: ${ans.time.toFixed(2)}ms，找到 ${voiceCount} 条语音结果`
     loadingVoices.value = false
 }
 
@@ -208,7 +208,7 @@ const onAvatarClicked = async (avatar) => {
     const contents = ans.contents
     voiceEntries.value = contents.voices || []
     const voiceCount = voiceEntries.value.length
-    voiceSummary.value = `查询用时: ${ans.time.toFixed(2)}ms，共 ${voiceCount} 条语音结果。`
+    voiceSummary.value = `查询用时: ${ans.time.toFixed(2)}ms，找到 ${voiceCount} 条语音结果`
     loadingVoices.value = false
 }
 
