@@ -1,6 +1,6 @@
 import os
 import sys
-from tqdm import tqdm
+from lightweight_progress import LightweightProgress
 
 from DBConfig import conn, DATA_PATH
 from import_utils import (
@@ -15,6 +15,7 @@ from localization_utils import build_subtitle_filename_map, load_localization_en
 from subtitle_utils import iter_srt_entries, subtitle_key
 from subtitle_version_utils import assign_subtitle_versions_by_text
 from versioning import ensure_version_schema, get_current_version, get_or_create_version_id
+from textmap_name_utils import analyze_subtitle_exceptions, report_exceptions, delete_empty_subtitle_entries
 
 
 def _print_summary(title: str, items: list[str], sample_size: int = 10):
@@ -115,60 +116,56 @@ def importSubtitlesByFiles(
         f"changed={len(changed_tasks)}, deleted={len(deleted_list)}, remap={'yes' if refresh_mapping else 'no'}"
     )
 
-    for lang_name, lang_id, clean_file_name, full_path in tqdm(
-        changed_tasks,
-        total=len(changed_tasks),
-        desc="subtitle diff files",
-        leave=False,
-        position=0,
-        dynamic_ncols=True,
-        file=sys.stdout,
-    ):
-        if not os.path.isfile(full_path):
-            skipped_paths.append(f"{lang_name}/{clean_file_name}.srt (missing)")
-            continue
-        base_stem = os.path.splitext(os.path.basename(full_path))[0]
-        info = filename_to_info.get(base_stem)
-        subtitle_id = info["subtitleId"] if info else None
-        try:
-            existing_rows = cursor.execute(
-                """
-                SELECT subtitleKey, content, created_version_id, updated_version_id
-                FROM subtitle
-                WHERE fileName=? AND lang=?
-                """,
-                (clean_file_name, lang_id),
-            ).fetchall()
-            with open(full_path, "r", encoding="utf-8", errors="ignore") as f:
-                content = f.read()
-            parsed_rows: list[tuple[str, float, float, str]] = []
-            for start_time, end_time, text_content in iter_srt_entries(content):
-                key = subtitle_key(clean_file_name, lang_id, start_time, end_time)
-                parsed_rows.append((key, start_time, end_time, text_content))
+    with LightweightProgress(len(changed_tasks), desc="Subtitle diff files", unit="files") as pbar:
+        for lang_name, lang_id, clean_file_name, full_path in changed_tasks:
+            if not os.path.isfile(full_path):
+                skipped_paths.append(f"{lang_name}/{clean_file_name}.srt (missing)")
+                pbar.update()
+                continue
+            base_stem = os.path.splitext(os.path.basename(full_path))[0]
+            info = filename_to_info.get(base_stem)
+            subtitle_id = info["subtitleId"] if info else None
+            try:
+                existing_rows = cursor.execute(
+                    """
+                    SELECT subtitleKey, content, created_version_id, updated_version_id
+                    FROM subtitle
+                    WHERE fileName=? AND lang=?
+                    "",
+                    (clean_file_name, lang_id),
+                ).fetchall()
+                with open(full_path, "r", encoding="utf-8", errors="ignore") as f:
+                    content = f.read()
+                parsed_rows: list[tuple[str, float, float, str]] = []
+                for start_time, end_time, text_content in iter_srt_entries(content):
+                    key = subtitle_key(clean_file_name, lang_id, start_time, end_time)
+                    parsed_rows.append((key, start_time, end_time, text_content))
 
-            assigned_rows = assign_subtitle_versions_by_text(
-                existing_rows,
-                parsed_rows,
-                version_id,
-            )
-
-            cursor.execute("DELETE FROM subtitle WHERE fileName=? AND lang=?", (clean_file_name, lang_id))
-            for key, start_time, end_time, text_content, created_id, updated_id in assigned_rows:
-                writer.add(
-                    (
-                        clean_file_name,
-                        lang_id,
-                        start_time,
-                        end_time,
-                        text_content,
-                        subtitle_id,
-                        key,
-                        created_id,
-                        updated_id,
-                    )
+                assigned_rows = assign_subtitle_versions_by_text(
+                    existing_rows,
+                    parsed_rows,
+                    version_id,
                 )
-        except Exception as e:
-            process_errors.append(f"{lang_name}/{os.path.basename(full_path)} ({e})")
+
+                cursor.execute("DELETE FROM subtitle WHERE fileName=? AND lang=?", (clean_file_name, lang_id))
+                for key, start_time, end_time, text_content, created_id, updated_id in assigned_rows:
+                    writer.add(
+                        (
+                            clean_file_name,
+                            lang_id,
+                            start_time,
+                            end_time,
+                            text_content,
+                            subtitle_id,
+                            key,
+                            created_id,
+                            updated_id,
+                        )
+                    )
+            except Exception as e:
+                process_errors.append(f"{lang_name}/{os.path.basename(full_path)} ({e})")
+            finally:
+                pbar.update()
     writer.flush()
 
     delete_rows: list[tuple[str, int]] = []
@@ -267,49 +264,57 @@ def importSubtitles(
 
     print(f"Processing subtitle files ({len(subtitle_tasks)})...")
     process_errors: list[str] = []
-    for lang_name, lang_id, lang_path, full_path in tqdm(
-        subtitle_tasks,
-        total=len(subtitle_tasks),
-        desc="subtitle files",
-        leave=False,
-        position=0,
-        dynamic_ncols=True,
-        file=sys.stdout,
-    ):
-        file_name = os.path.basename(full_path)
-        name_without_ext = os.path.splitext(file_name)[0]
+    subtitle_data: list[tuple[str, int, str, float, float, str]] = []
+    with LightweightProgress(len(subtitle_tasks), desc="Subtitle files", unit="files") as pbar:
+        for lang_name, lang_id, lang_path, full_path in subtitle_tasks:
+            file_name = os.path.basename(full_path)
+            name_without_ext = os.path.splitext(file_name)[0]
 
-        rel_path = os.path.relpath(full_path, lang_path)
-        cleanFileName = os.path.splitext(rel_path)[0].replace(os.sep, "/")
+            rel_path = os.path.relpath(full_path, lang_path)
+            cleanFileName = os.path.splitext(rel_path)[0].replace(os.sep, "/")
 
-        info = filename_to_info.get(name_without_ext)
-        subtitle_id = info["subtitleId"] if info else None
+            info = filename_to_info.get(name_without_ext)
+            subtitle_id = info["subtitleId"] if info else None
 
-        try:
-            with open(full_path, "r", encoding="utf-8", errors="ignore") as f:
-                content = f.read()
+            try:
+                with open(full_path, "r", encoding="utf-8", errors="ignore") as f:
+                    content = f.read()
 
-            for start_time, end_time, text_content in iter_srt_entries(content):
-                key = subtitle_key(cleanFileName, lang_id, start_time, end_time)
-                writer.add(
-                    (
-                        cleanFileName,
-                        lang_id,
-                        start_time,
-                        end_time,
-                        text_content,
-                        subtitle_id,
-                        key,
-                        None,
-                        None,
-                    ),
-                    (key,),
-                )
+                for start_time, end_time, text_content in iter_srt_entries(content):
+                    key = subtitle_key(cleanFileName, lang_id, start_time, end_time)
+                    writer.add(
+                        (
+                            cleanFileName,
+                            lang_id,
+                            start_time,
+                            end_time,
+                            text_content,
+                            subtitle_id,
+                            key,
+                            None,
+                            None,
+                        ),
+                        (key,),
+                    )
+                subtitle_data.append((cleanFileName, lang_id, key, start_time, end_time, text_content))
 
-        except Exception as e:
-            process_errors.append(f"{lang_name}/{file_name} ({e})")
+            except Exception as e:
+                process_errors.append(f"{lang_name}/{file_name} ({e})")
+            finally:
+                pbar.update()
 
     writer.flush()
+    
+    # 分析并报告异常情况
+    if subtitle_data:
+        exception_data = analyze_subtitle_exceptions(subtitle_data)
+        report_exceptions(exception_data, "Subtitle")
+        
+        # 删除源文件和数据库中内容均为空白的条目
+        print("删除空白Subtitle条目...")
+        subtitle_root = os.path.join(DATA_PATH, "Subtitle")
+        delete_count = delete_empty_subtitle_entries(cursor, subtitle_root)
+        print(f"已删除 {delete_count} 个空白Subtitle条目")
     if prune_missing:
         cursor.execute(
             """

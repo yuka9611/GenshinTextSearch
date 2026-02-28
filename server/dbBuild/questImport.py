@@ -4,7 +4,7 @@ import hashlib
 import re
 import sys
 
-from tqdm import tqdm
+from lightweight_progress import LightweightProgress
 
 from DBConfig import conn, DATA_PATH
 from import_utils import DEFAULT_BATCH_SIZE, executemany_batched
@@ -258,28 +258,23 @@ def importAllQuests(
     skipped_quest_files: list[str] = []
     missing_title_quests: list[str] = []
     no_talk_quests: list[str] = []
-    for _val, fileName in tqdm(
-        enumerate(files),
-        total=len(files),
-        leave=False,
-        position=0,
-        dynamic_ncols=True,
-        file=sys.stdout,
-    ):
-        quest_id, is_new_quest = importQuest(
-            fileName,
-            current_version=version,
-            cursor=cursor,
-            write_versions=write_versions,
-            skip_collector=skipped_quest_files,
-            log_skip=False,
-            missing_title_collector=missing_title_quests,
-            no_talk_collector=no_talk_quests,
-        )
-        if quest_id is not None:
-            imported_quest_ids.add(quest_id)
-        if is_new_quest and quest_id is not None:
-            new_quest_ids.add(quest_id)
+    with LightweightProgress(len(files), desc="Quest files", unit="files") as pbar:
+        for i, fileName in enumerate(files):
+            quest_id, is_new_quest = importQuest(
+                fileName,
+                current_version=version,
+                cursor=cursor,
+                write_versions=write_versions,
+                skip_collector=skipped_quest_files,
+                log_skip=False,
+                missing_title_collector=missing_title_quests,
+                no_talk_collector=no_talk_quests,
+            )
+            if quest_id is not None:
+                imported_quest_ids.add(quest_id)
+            if is_new_quest and quest_id is not None:
+                new_quest_ids.add(quest_id)
+            pbar.update()
 
     if sync_delete:
         if imported_quest_ids:
@@ -513,25 +508,19 @@ def importAllTalkItems(
 
     print(f"importing talk files ({len(talk_files)})")
     cursor = conn.cursor()
-    for file_name in tqdm(
-        talk_files,
-        total=len(talk_files),
-        desc="talk files",
-        leave=False,
-        position=0,
-        dynamic_ncols=True,
-        file=sys.stdout,
-    ):
-        imported_rows += importTalk(
-            file_name,
-            cursor=cursor,
-            commit=False,
-            batch_size=batch_size,
-            skip_collector=skipped_files,
-            log_skip=False,
-            refresh_hash_map=False,
-            touched_talk_collector=touched_talk_ids,
-        )
+    with LightweightProgress(len(talk_files), desc="Talk files", unit="files") as pbar:
+        for file_name in talk_files:
+            imported_rows += importTalk(
+                file_name,
+                cursor=cursor,
+                commit=False,
+                batch_size=batch_size,
+                skip_collector=skipped_files,
+                log_skip=False,
+                refresh_hash_map=False,
+                touched_talk_collector=touched_talk_ids,
+            )
+            pbar.update()
     _refresh_quest_hash_map_for_talk_ids(
         cursor,
         touched_talk_ids,
@@ -557,86 +546,84 @@ def importQuestBriefs(*, commit: bool = True, batch_size: int = DEFAULT_BATCH_SI
     touched_quest_ids: set[int] = set()
 
     def _iter_rows():
-        for _val, fileName in tqdm(
-            enumerate(files),
-            total=len(files),
-            leave=False,
-            position=0,
-            dynamic_ncols=True,
-            file=sys.stdout,
-        ):
-            if not fileName.endswith(".json"):
-                continue
-            try:
-                obj = _load_json_file(os.path.join(folder, fileName))
-            except Exception:
-                continue
-
-            questId = extract_quest_id(obj)
-
-            subquests = None
-            if "subQuests" in obj:
-                subquests = obj["subQuests"]
-            elif "GFLHMKOOHHA" in obj:
-                subquests = obj["GFLHMKOOHHA"]
-            elif "NLCNGJKMAEN" in obj:
-                subquests = obj["NLCNGJKMAEN"]
-
-            if not isinstance(subquests, list):
-                continue
-
-            for subquest in subquests:
-                mainQuestId = questId
-                if mainQuestId is None:
-                    if "mainQuestId" in subquest:
-                        mainQuestId = subquest["mainQuestId"]
-                    elif "GNGFBMPFBOK" in subquest:
-                        mainQuestId = subquest["GNGFBMPFBOK"]
-                    elif "JKHGFFKOFFN" in subquest:
-                        mainQuestId = subquest["JKHGFFKOFFN"]
-
-                contents = None
-                if "finishCond" in subquest:
-                    contents = subquest["finishCond"]
-                elif "KBFJAAFDHKJ" in subquest:
-                    contents = subquest["KBFJAAFDHKJ"]
-                elif "AACKELGGJGC" in subquest:
-                    contents = subquest["AACKELGGJGC"]
-
-                if not isinstance(contents, list):
+        with LightweightProgress(len(files), desc="QuestBrief files", unit="files") as pbar:
+            for i, fileName in enumerate(files):
+                if not fileName.endswith(".json"):
+                    pbar.update()
+                    continue
+                try:
+                    obj = _load_json_file(os.path.join(folder, fileName))
+                except Exception:
+                    pbar.update()
                     continue
 
-                for cond in contents:
-                    cond_type = None
-                    if "type" in cond:
-                        cond_type = cond["type"]
-                    elif "PAINLIBBLDK" in cond:
-                        cond_type = cond["PAINLIBBLDK"]
-                    elif "DLPKMDPABFM" in cond:
-                        cond_type = cond["DLPKMDPABFM"]
+                questId = extract_quest_id(obj)
 
-                    if cond_type != "QUEST_CONTENT_COMPLETE_TALK":
+                subquests = None
+                if "subQuests" in obj:
+                    subquests = obj["subQuests"]
+                elif "GFLHMKOOHHA" in obj:
+                    subquests = obj["GFLHMKOOHHA"]
+                elif "NLCNGJKMAEN" in obj:
+                    subquests = obj["NLCNGJKMAEN"]
+
+                if not isinstance(subquests, list):
+                    pbar.update()
+                    continue
+
+                for subquest in subquests:
+                    mainQuestId = questId
+                    if mainQuestId is None:
+                        if "mainQuestId" in subquest:
+                            mainQuestId = subquest["mainQuestId"]
+                        elif "GNGFBMPFBOK" in subquest:
+                            mainQuestId = subquest["GNGFBMPFBOK"]
+                        elif "JKHGFFKOFFN" in subquest:
+                            mainQuestId = subquest["JKHGFFKOFFN"]
+
+                    contents = None
+                    if "finishCond" in subquest:
+                        contents = subquest["finishCond"]
+                    elif "KBFJAAFDHKJ" in subquest:
+                        contents = subquest["KBFJAAFDHKJ"]
+                    elif "AACKELGGJGC" in subquest:
+                        contents = subquest["AACKELGGJGC"]
+
+                    if not isinstance(contents, list):
                         continue
 
-                    params = None
-                    if "param" in cond:
-                        params = cond["param"]
-                    elif "paramList" in cond:
-                        params = cond["paramList"]
-                    elif "LNHLPKELCAL" in cond:
-                        params = cond["LNHLPKELCAL"]
-                    elif "IEKGEJMAOCN" in cond:
-                        params = cond["IEKGEJMAOCN"]
+                    for cond in contents:
+                        cond_type = None
+                        if "type" in cond:
+                            cond_type = cond["type"]
+                        elif "PAINLIBBLDK" in cond:
+                            cond_type = cond["PAINLIBBLDK"]
+                        elif "DLPKMDPABFM" in cond:
+                            cond_type = cond["DLPKMDPABFM"]
 
-                    if not isinstance(params, list) or len(params) == 0:
-                        continue
-                    talkId = params[0]
-                    if isinstance(talkId, int) and talkId > 0 and mainQuestId:
-                        try:
-                            touched_quest_ids.add(int(mainQuestId))
-                        except Exception:
-                            pass
-                        yield (mainQuestId, talkId)
+                        if cond_type != "QUEST_CONTENT_COMPLETE_TALK":
+                            continue
+
+                        params = None
+                        if "param" in cond:
+                            params = cond["param"]
+                        elif "paramList" in cond:
+                            params = cond["paramList"]
+                        elif "LNHLPKELCAL" in cond:
+                            params = cond["LNHLPKELCAL"]
+                        elif "IEKGEJMAOCN" in cond:
+                            params = cond["IEKGEJMAOCN"]
+
+                        if not isinstance(params, list) or len(params) == 0:
+                            continue
+                        talkId = params[0]
+                        if isinstance(talkId, int) and talkId > 0 and mainQuestId:
+                            try:
+                                touched_quest_ids.add(int(mainQuestId))
+                            except Exception:
+                                pass
+                            yield (mainQuestId, talkId)
+                pbar.update()
 
     executemany_batched(cursor, sql, _iter_rows(), batch_size=batch_size)
     _refresh_quest_hash_map_for_quest_ids(

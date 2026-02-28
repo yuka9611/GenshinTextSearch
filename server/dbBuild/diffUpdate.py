@@ -1,11 +1,11 @@
-﻿import os
+import os
 import re
 import json
 import sys
 import subprocess
 from datetime import datetime, timezone
 
-from tqdm import tqdm
+from lightweight_progress import LightweightProgress
 
 from DBConfig import conn, DATA_PATH, LANG_PATH
 import DBBuild
@@ -189,14 +189,7 @@ def _pull_remote(repo_path: str, remote_name: str, remote_branch: str | None = N
             percent = max(0, min(100, int(percent_match.group(1))))
             _apply_generic_progress(percent)
 
-    with tqdm(
-        total=100,
-        desc=f"git pull {remote_name}",
-        unit="%",
-        leave=False,
-        dynamic_ncols=True,
-        file=sys.stdout,
-    ) as pbar:
+    with LightweightProgress(100, desc=f"git pull {remote_name}", unit="%") as pbar:
         buffer = ""
         while True:
             chunk = proc.stdout.read(1) if proc.stdout else ""
