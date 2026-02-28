@@ -50,12 +50,49 @@ class StageTimer:
         print(f"[PROFILE] total={total:.3f}s")
 
 
-def _run_stage(stage_timer: StageTimer | None, stage_name: str, fn, *args, **kwargs):
+def _run_stage(stage_timer: StageTimer | None, stage_name: str, fn, *args, skip_asking=False, **kwargs):
+    # 检查断点记录
+    status = get_breakpoint_status(stage_name)
+
+    # 如果已经选择不跳过某个阶段，则不询问
+    if not skip_asking:
+        if status == 'completed':
+            # 如果阶段已完成，询问是否重新执行
+            ans = input(f"{stage_name} already completed. Re-execute? (y/n): ")
+            if ans != 'y':
+                print(f"Skipping {stage_name} (already completed)...")
+                return True  # 返回 True 表示跳过了该阶段
+        elif status == 'in_progress':
+            # 如果阶段正在进行中，询问是否继续执行
+            ans = input(f"{stage_name} is in progress. Continue? (y/n): ")
+            if ans != 'y':
+                print(f"Skipping {stage_name} (in progress)...")
+                return True  # 返回 True 表示跳过了该阶段
+        else:
+            # 如果没有断点记录，询问是否跳过
+            ans = input(f"Skip {stage_name}? (y/n): ")
+            if ans == 'y':
+                print(f"Skipping {stage_name}...")
+                return True  # 返回 True 表示跳过了该阶段
+
     print(f"Importing {stage_name}...")
-    if stage_timer is None:
-        return fn(*args, **kwargs)
-    with stage_timer.track(stage_name):
-        return fn(*args, **kwargs)
+    # 记录开始时间和状态
+    start_time = time.strftime('%Y-%m-%d %H:%M:%S')
+    update_breakpoint_status(stage_name, 'in_progress', start_time)
+
+    try:
+        if stage_timer is None:
+            result = fn(*args, **kwargs)
+        else:
+            with stage_timer.track(stage_name):
+                result = fn(*args, **kwargs)
+        # 记录完成时间和状态
+        end_time = time.strftime('%Y-%m-%d %H:%M:%S')
+        update_breakpoint_status(stage_name, 'completed', start_time, end_time)
+        return False  # 返回 False 表示没有跳过该阶段
+    except Exception as e:
+        print(f"Error in {stage_name}: {e}")
+        raise
 
 
 def _dump_profile_stats(
@@ -368,53 +405,113 @@ def main(
     prune_missing: bool = True,
     enable_stage_profile: bool = False,
     use_fast_pragmas: bool = True,
+    clean_breakpoint: bool = False,
 ):
     stage_timer = StageTimer(enabled=enable_stage_profile)
     ensure_version_schema()
+    # 确保断点表结构存在
+    ensure_breakpoint_schema()
+
+    # 如果需要清理断点，则清理
+    if clean_breakpoint:
+        print("Clearing breakpoints...")
+        clear_breakpoints()
+
     version = current_version or get_current_version()
     with fast_import_pragmas(conn, enabled=use_fast_pragmas):
-        _run_stage(stage_timer, "talks", importAllTalkItems)
-        _run_stage(stage_timer, "avatars", importAvatars)
-        _run_stage(stage_timer, "npcs", importNPCs)
-        _run_stage(stage_timer, "manual_textmap", importManualTextMap)
-        _run_stage(stage_timer, "fetters", importFetters)
-        _run_stage(stage_timer, "fetter_stories", importFetterStories)
-        _run_stage(
+        # 跟踪是否已经选择不跳过某个阶段
+        # 如果有任何一个阶段选择了不跳过，则后续阶段不需要询问
+        no_skip_any = False
+
+        # 执行各个阶段
+        skipped = _run_stage(stage_timer, "talks", importAllTalkItems, skip_asking=no_skip_any)
+        if not skipped:
+            no_skip_any = True
+
+        skipped = _run_stage(stage_timer, "avatars", importAvatars, skip_asking=no_skip_any)
+        if not skipped:
+            no_skip_any = True
+
+        skipped = _run_stage(stage_timer, "npcs", importNPCs, skip_asking=no_skip_any)
+        if not skipped:
+            no_skip_any = True
+
+        skipped = _run_stage(stage_timer, "manual_textmap", importManualTextMap, skip_asking=no_skip_any)
+        if not skipped:
+            no_skip_any = True
+
+        skipped = _run_stage(stage_timer, "fetters", importFetters, skip_asking=no_skip_any)
+        if not skipped:
+            no_skip_any = True
+
+        skipped = _run_stage(stage_timer, "fetter_stories", importFetterStories, skip_asking=no_skip_any)
+        if not skipped:
+            no_skip_any = True
+
+        skipped = _run_stage(
             stage_timer,
             "quests",
             importAllQuests,
             current_version=version,
             write_versions=False,
             sync_delete=prune_missing,
+            skip_asking=no_skip_any,
         )
-        _run_stage(stage_timer, "quest_briefs", importQuestBriefs)
-        _run_stage(stage_timer, "chapters", importChapters)
-        _run_stage(stage_timer, "load_voice_avatars", voiceItemImport.loadAvatars)
-        _run_stage(stage_timer, "voices", voiceItemImport.importAllVoiceItems, reset=prune_missing)
-        _run_stage(
+        if not skipped:
+            no_skip_any = True
+
+        skipped = _run_stage(stage_timer, "quest_briefs", importQuestBriefs, skip_asking=no_skip_any)
+        if not skipped:
+            no_skip_any = True
+
+        skipped = _run_stage(stage_timer, "chapters", importChapters, skip_asking=no_skip_any)
+        if not skipped:
+            no_skip_any = True
+
+        skipped = _run_stage(stage_timer, "load_voice_avatars", voiceItemImport.loadAvatars, skip_asking=no_skip_any)
+        if not skipped:
+            no_skip_any = True
+
+        skipped = _run_stage(stage_timer, "voices", voiceItemImport.importAllVoiceItems, reset=prune_missing, skip_asking=no_skip_any)
+        if not skipped:
+            no_skip_any = True
+
+        skipped = _run_stage(
             stage_timer,
             "readable",
             readableImport.importReadable,
             current_version=version,
             write_versions=False,
             prune_missing=prune_missing,
+            skip_asking=no_skip_any,
         )
-        _run_stage(
+        if not skipped:
+            no_skip_any = True
+
+        skipped = _run_stage(
             stage_timer,
             "subtitles",
             subtitleImport.importSubtitles,
             current_version=version,
             prune_missing=prune_missing,
+            skip_asking=no_skip_any,
         )
-        _run_stage(
+        if not skipped:
+            no_skip_any = True
+
+        skipped = _run_stage(
             stage_timer,
             "textmap",
             textMapImport.importAllTextMap,
             current_version=version,
             write_versions=False,
             prune_missing=prune_missing,
+            skip_asking=no_skip_any,
         )
-        _run_stage(stage_timer, "version_catalog", rebuild_version_catalog)
+        if not skipped:
+            no_skip_any = True
+
+        _run_stage(stage_timer, "version_catalog", rebuild_version_catalog, skip_asking=no_skip_any)
     stage_timer.print_summary()
     print("Done!")
 
@@ -424,6 +521,63 @@ def set_db_version(conn, version: str):
     cur.execute("CREATE TABLE IF NOT EXISTS app_meta (k TEXT PRIMARY KEY, v TEXT)")
     cur.execute("INSERT OR REPLACE INTO app_meta(k, v) VALUES (?, ?)", ("db_version", version))
     conn.commit()
+
+
+def ensure_breakpoint_schema():
+    """创建断点表结构"""
+    cur = conn.cursor()
+    cur.execute('''
+    CREATE TABLE IF NOT EXISTS breakpoint (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        stage_name TEXT UNIQUE,
+        status TEXT DEFAULT 'pending',
+        start_time TEXT,
+        end_time TEXT,
+        created_at TEXT DEFAULT CURRENT_TIMESTAMP
+    )
+    ''')
+    conn.commit()
+
+
+def clear_breakpoints():
+    """清理所有断点信息"""
+    cur = conn.cursor()
+    cur.execute("DELETE FROM breakpoint")
+    conn.commit()
+
+
+def get_breakpoint_status(stage_name):
+    """获取指定阶段的断点状态"""
+    cur = conn.cursor()
+    cur.execute("SELECT status FROM breakpoint WHERE stage_name = ?", (stage_name,))
+    result = cur.fetchone()
+    return result[0] if result else 'pending'
+
+
+def update_breakpoint_status(stage_name, status, start_time=None, end_time=None):
+    """更新断点状态"""
+    cur = conn.cursor()
+    if status == 'in_progress':
+        cur.execute('''
+        INSERT OR REPLACE INTO breakpoint (stage_name, status, start_time, end_time)
+        VALUES (?, ?, ?, ?)
+        ''', (stage_name, status, start_time, end_time))
+    elif status == 'completed':
+        cur.execute('''
+        UPDATE breakpoint
+        SET status = ?, end_time = ?
+        WHERE stage_name = ?
+        ''', (status, end_time, stage_name))
+    conn.commit()
+
+
+def get_next_pending_stage(stages):
+    """获取下一个待执行的阶段"""
+    for stage in stages:
+        status = get_breakpoint_status(stage)
+        if status != 'completed':
+            return stage
+    return None
 
 
 def _get_head_commit(repo_path: str):
@@ -543,6 +697,8 @@ if __name__ == "__main__":
             "separate from --force"
         ),
     )
+    parser.add_argument("--clean-breakpoint", action="store_true", help="clean breakpoint information and start from beginning")
+    parser.add_argument("--verbose", "-v", action="store_true", help="enable verbose logging")
     args = parser.parse_args()
     prune_missing = not args.no_prune_missing
     print(f"[INFO] DB path: {DB_PATH}")
@@ -747,6 +903,7 @@ if __name__ == "__main__":
                 prune_missing=prune_missing,
                 enable_stage_profile=args.profile,
                 use_fast_pragmas=not args.no_fast_import_pragmas,
+                clean_breakpoint=args.clean_breakpoint,
             )
             if head_commit and not args.skip_history_backfill:
                 try:
@@ -756,6 +913,7 @@ if __name__ == "__main__":
                         target_commit=head_commit,
                         force=args.force,
                         prune_missing=prune_missing,
+                        verbose=args.verbose,
                     )
                 except Exception as e:
                     print(f"[ERROR] history backfill failed: {e}", file=sys.stderr)

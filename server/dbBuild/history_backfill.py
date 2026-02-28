@@ -26,7 +26,7 @@ from versioning import (
     rebuild_version_catalog,
     set_meta,
 )
-from tqdm import tqdm
+from lightweight_progress import LightweightProgress
 
 
 RELEVANT_PATHS = [
@@ -464,38 +464,20 @@ def apply_quest_version_delta_from_textmap(
         stats["looked_up_hashes"] = len(normalized_hashes)
         if not normalized_hashes:
             return stats
-        if show_progress:
-            with tqdm(
-                total=len(normalized_hashes),
-                desc="textMap hash sync",
-                unit="hash",
-                leave=False,
-                position=progress_position,
-                dynamic_ncols=True,
-                file=sys.stdout,
-            ) as hash_pbar:
+        # 简化处理，移除进度条
+        pending = []
+        for row in normalized_hashes:
+            pending.append(row)
+            if len(pending) >= batch_size:
+                cursor.executemany(
+                    "INSERT OR IGNORE INTO _changed_textmap_hash(hash) VALUES (?)",
+                    pending,
+                )
                 pending = []
-                for row in normalized_hashes:
-                    pending.append(row)
-                    if len(pending) >= batch_size:
-                        cursor.executemany(
-                            "INSERT OR IGNORE INTO _changed_textmap_hash(hash) VALUES (?)",
-                            pending,
-                        )
-                        hash_pbar.update(len(pending))
-                        pending = []
-                if pending:
-                    cursor.executemany(
-                        "INSERT OR IGNORE INTO _changed_textmap_hash(hash) VALUES (?)",
-                        pending,
-                    )
-                    hash_pbar.update(len(pending))
-        else:
-            executemany_batched(
-                cursor,
+        if pending:
+            cursor.executemany(
                 "INSERT OR IGNORE INTO _changed_textmap_hash(hash) VALUES (?)",
-                (row for row in normalized_hashes),
-                batch_size=batch_size,
+                pending,
             )
     else:
         total_hashes_row = cursor.execute(
@@ -510,34 +492,15 @@ def apply_quest_version_delta_from_textmap(
             "SELECT DISTINCT hash FROM textMap WHERE updated_version_id=?",
             (version_id,),
         )
-        if show_progress:
-            with tqdm(
-                total=total_hashes,
-                desc="textMap DB lookup",
-                unit="hash",
-                leave=False,
-                position=progress_position,
-                dynamic_ncols=True,
-                file=sys.stdout,
-            ) as hash_pbar:
-                while True:
-                    rows = select_cur.fetchmany(fetch_size)
-                    if not rows:
-                        break
-                    cursor.executemany(
-                        "INSERT OR IGNORE INTO _changed_textmap_hash(hash) VALUES (?)",
-                        rows,
-                    )
-                    hash_pbar.update(len(rows))
-        else:
-            while True:
-                rows = select_cur.fetchmany(fetch_size)
-                if not rows:
-                    break
-                cursor.executemany(
-                    "INSERT OR IGNORE INTO _changed_textmap_hash(hash) VALUES (?)",
-                    rows,
-                )
+        # 简化处理，移除进度条
+        while True:
+            rows = select_cur.fetchmany(fetch_size)
+            if not rows:
+                break
+            cursor.executemany(
+                "INSERT OR IGNORE INTO _changed_textmap_hash(hash) VALUES (?)",
+                rows,
+            )
 
     has_quest_hash_map_rows = False
     if _table_exists("quest_hash_map"):
@@ -660,15 +623,11 @@ def _backfill_quest_phase1_with_progress(
     created_total = 0
     updated_total = 0
     quest_cursor = cursor.execute("SELECT questId FROM quest ORDER BY questId")
-    with tqdm(
-        total=total_quests,
-        desc="Quest history phase-1 (local textMap DB)",
-        unit="quest",
-        leave=False,
-        position=0,
-        dynamic_ncols=True,
-        file=sys.stdout,
-    ) as phase1_pbar:
+    processed_quests = 0
+
+    with LightweightProgress(total_quests, desc="Phase-1 backfill", unit="quests") as pbar:
+        print(f"Processing {total_quests} quests for phase-1 backfill...")
+
         while True:
             rows = quest_cursor.fetchmany(max(1, int(chunk_size)))
             if not rows:
@@ -684,10 +643,10 @@ def _backfill_quest_phase1_with_progress(
             created_rows, updated_rows = _extract_quest_backfill_stats(backfill_result)
             created_total += created_rows
             updated_total += updated_rows
-            phase1_pbar.update(len(quest_ids))
-            phase1_pbar.set_postfix_str(
-                f"q_tm_create={created_total} q_tm_upfill={updated_total}"
-            )
+            processed_quests += len(quest_ids)
+            pbar.update(len(quest_ids))
+
+    print(f"Phase-1 backfill completed: {created_total} created, {updated_total} updated")
     return created_total, updated_total
 
 
@@ -828,6 +787,7 @@ def backfill_versions_from_history(
     force: bool = False,
     prune_missing: bool = True,
     batch_size: int = DEFAULT_BATCH_SIZE,
+    verbose: bool = False,
 ):
     ensure_version_schema()
     repo_path = DATA_PATH
@@ -884,50 +844,34 @@ def backfill_versions_from_history(
     refreshed_qhm = _refresh_all_quest_hash_map(cursor, batch_size=batch_size)
     unresolved_created_scope = _unresolved_created_quest_ids(cursor)
     print(f"Quest hash map refresh before history replay: quests={refreshed_qhm}")
-    commit_pbar = tqdm(
-        total=total_commits,
-        initial=start_idx,
-        desc="History backfill (textMap-first)",
-        unit="commit",
-        leave=False,
-        position=0,
-        dynamic_ncols=True,
-        file=sys.stdout,
-    )
+    # 简化进度显示，只显示主要进度
+    print(f"Processing {total_commits} commits...")
     try:
-        for idx in range(start_idx, total_commits):
-            commit_sha, commit_title = commits[idx]
-            parent_sha = commits[idx - 1][0] if idx > 0 else first_parent_sha
-            version_label, version_id = _resolve_commit_version(repo_path, commit_sha, commit_title)
-            if version_id is None:
-                continue
-            entries = _initial_entries(repo_path, commit_sha) if parent_sha is None else _diff_entries(repo_path, parent_sha, commit_sha)
+        with LightweightProgress(total_commits, desc="Backfill commits", unit="commits") as pbar:
+            for idx in range(start_idx, total_commits):
+                commit_sha, commit_title = commits[idx]
+                parent_sha = commits[idx - 1][0] if idx > 0 else first_parent_sha
+                version_label, version_id = _resolve_commit_version(repo_path, commit_sha, commit_title)
+                if version_id is None:
+                    pbar.update()
+                    continue
 
-            textmap_entries = []
-            other_entries = []
-            for entry in entries:
-                action = entry["action"]
-                old_path = entry.get("old_path")
-                new_path = entry.get("new_path")
-                rel_path = (new_path or old_path or "").replace("\\", "/")
-                if rel_path.startswith("TextMap/") and rel_path.endswith(".json") and action != "D":
-                    textmap_entries.append(entry)
-                else:
-                    other_entries.append(entry)
-            commit_pbar.set_postfix_str(
-                f"{idx + 1}/{total_commits} {commit_sha[:8]} "
-                f"tm_files={len(textmap_entries)} other={len(other_entries)}"
-            )
+                pbar.set_postfix_str(f"Commit {commit_sha[:8]}")
 
-            with tqdm(
-                total=len(entries),
-                desc=f"{commit_sha[:8]} files (pass1 tm, pass2 other)",
-                unit="file",
-                leave=False,
-                position=1,
-                dynamic_ncols=True,
-                file=sys.stdout,
-            ) as entry_pbar:
+                entries = _initial_entries(repo_path, commit_sha) if parent_sha is None else _diff_entries(repo_path, parent_sha, commit_sha)
+
+                textmap_entries = []
+                other_entries = []
+                for entry in entries:
+                    action = entry["action"]
+                    old_path = entry.get("old_path")
+                    new_path = entry.get("new_path")
+                    rel_path = (new_path or old_path or "").replace("\\", "/")
+                    if rel_path.startswith("TextMap/") and rel_path.endswith(".json") and action != "D":
+                        textmap_entries.append(entry)
+                    else:
+                        other_entries.append(entry)
+
                 changed_text_hashes = set()
                 quest_updated_by_textmap = 0
                 quest_created_by_textmap = 0
@@ -936,7 +880,6 @@ def backfill_versions_from_history(
                 unresolved_count = 0
 
                 # Pass 1: textMap first.
-                entry_pbar.set_postfix_str("phase=1/2 textMap")
                 for entry in textmap_entries:
                     try:
                         action = entry["action"]
@@ -965,20 +908,16 @@ def backfill_versions_from_history(
                             old_obj = {}
 
                         changed_rows = []
-                        total_items = len(new_obj)
-                        for i, (raw_hash, content) in enumerate(new_obj.items(), start=1):
+                        for raw_hash, content in new_obj.items():
                             if old_obj.get(raw_hash, None) == content:
                                 continue
                             parsed_hash = _to_hash_value(raw_hash)
                             changed_rows.append((version_id, version_id, version_id, lang_id, parsed_hash, version_id))
                             changed_text_hashes.add(parsed_hash)
-                            if i % 50000 == 0:
-                                entry_pbar.set_postfix_str(f"textmap {base_name} {i}/{total_items}")
-                                entry_pbar.refresh()
                         if changed_rows:
                             executemany_batched(cursor, sql_textmap, changed_rows, batch_size=batch_size)
-                    finally:
-                        entry_pbar.update(1)
+                    except Exception as e:
+                        print(f"Error processing textmap entry: {e}")
 
                 if changed_text_hashes:
                     q_delta_stats = apply_quest_version_delta_from_textmap(
@@ -987,15 +926,13 @@ def backfill_versions_from_history(
                         changed_hashes=changed_text_hashes,
                         version_label=version_label,
                         batch_size=batch_size,
-                        show_progress=True,
-                        progress_position=2,
+                        show_progress=False,  # 禁用子进度条
                     )
                     quest_updated_by_textmap = int(q_delta_stats.get("quest_updated_by_textmap", 0))
                     quest_created_by_textmap = int(q_delta_stats.get("quest_created_backfilled", 0))
                     quest_updated_backfilled_by_textmap = int(q_delta_stats.get("quest_updated_backfilled", 0))
 
                 # Pass 2: other datasets and quest hash remaps.
-                entry_pbar.set_postfix_str("phase=2/2 other")
                 for entry in other_entries:
                     try:
                         action = entry["action"]
@@ -1075,29 +1012,16 @@ def backfill_versions_from_history(
                                 version_id=version_id,
                                 target_quest_ids=unresolved_created_scope,
                             )
-                    finally:
-                        entry_pbar.update(1)
-            if unresolved_created_scope and (
-                quest_created_by_commit > 0 or quest_created_by_textmap > 0
-            ):
-                unresolved_created_scope = _unresolved_created_quest_ids(cursor)
-            unresolved_row = cursor.execute(
-                "SELECT COUNT(*) FROM quest WHERE created_version_id IS NULL OR updated_version_id IS NULL"
-            ).fetchone()
-            unresolved_count = int(unresolved_row[0] or 0) if unresolved_row else 0
-            commit_pbar.set_postfix_str(
-                f"{commit_sha[:8]} "
-                f"tm_hash={len(changed_text_hashes)} "
-                f"q_tm_upd={quest_updated_by_textmap} "
-                f"q_tm_create={quest_created_by_textmap} "
-                f"q_tm_upfill={quest_updated_backfilled_by_textmap} "
-                f"q_commit_create={quest_created_by_commit} "
-                f"unresolved={unresolved_count}"
-            )
+                    except Exception as e:
+                        print(f"Error processing other entry: {e}")
+                pbar.update()
+                if unresolved_created_scope and (
+                    quest_created_by_commit > 0 or quest_created_by_textmap > 0
+                ):
+                    unresolved_created_scope = _unresolved_created_quest_ids(cursor)
             conn.commit()
             set_meta(resume_target_key, resume_scope)
             set_meta(resume_done_key, commit_sha)
-            commit_pbar.update(1)
         if prune_missing:
             _prune_unseen_rows_by_version(cursor, "textMap")
             _prune_unseen_rows_by_version(cursor, "readable")
@@ -1118,7 +1042,6 @@ def backfill_versions_from_history(
         raise
     finally:
         cursor.close()
-        commit_pbar.close()
 
     if resolved_from is None:
         set_meta("db_history_versions_commit", resolved_target)
@@ -1140,6 +1063,7 @@ def backfill_textmap_versions_from_history(
     force: bool = False,
     prune_missing: bool = True,
     batch_size: int = DEFAULT_BATCH_SIZE,
+    verbose: bool = False,
 ):
     ensure_version_schema()
     repo_path = DATA_PATH
@@ -1192,39 +1116,26 @@ def backfill_textmap_versions_from_history(
         )
 
     cursor = conn.cursor()
-    commit_pbar = tqdm(
-        total=total_commits,
-        initial=start_idx,
-        desc="TextMap history backfill",
-        unit="commit",
-        leave=False,
-        position=0,
-        dynamic_ncols=True,
-        file=sys.stdout,
-    )
+    # 简化进度显示，只显示主要进度
+    print(f"Processing {total_commits} TextMap commits...")
     try:
-        for idx in range(start_idx, total_commits):
-            commit_sha, commit_title = commits[idx]
-            parent_sha = commits[idx - 1][0] if idx > 0 else first_parent_sha
-            version_label, version_id = _resolve_commit_version(repo_path, commit_sha, commit_title)
-            if version_id is None:
-                continue
-            entries = (
-                _initial_entries(repo_path, commit_sha, include_paths=TEXTMAP_ONLY_PATHS)
-                if parent_sha is None
-                else _diff_entries(repo_path, parent_sha, commit_sha, include_paths=TEXTMAP_ONLY_PATHS)
-            )
-            commit_pbar.set_postfix_str(f"{idx + 1}/{total_commits} {commit_sha[:8]} entries={len(entries)}")
+        with LightweightProgress(total_commits, desc="TextMap backfill", unit="commits") as pbar:
+            for idx in range(start_idx, total_commits):
+                commit_sha, commit_title = commits[idx]
+                parent_sha = commits[idx - 1][0] if idx > 0 else first_parent_sha
+                version_label, version_id = _resolve_commit_version(repo_path, commit_sha, commit_title)
+                if version_id is None:
+                    pbar.update()
+                    continue
 
-            with tqdm(
-                total=len(entries),
-                desc=f"{commit_sha[:8]} textmap files",
-                unit="file",
-                leave=False,
-                position=1,
-                dynamic_ncols=True,
-                file=sys.stdout,
-            ) as entry_pbar:
+                pbar.set_postfix_str(f"Commit {commit_sha[:8]}")
+
+                entries = (
+                    _initial_entries(repo_path, commit_sha, include_paths=TEXTMAP_ONLY_PATHS)
+                    if parent_sha is None
+                    else _diff_entries(repo_path, parent_sha, commit_sha, include_paths=TEXTMAP_ONLY_PATHS)
+                )
+
                 for entry in entries:
                     try:
                         action = entry["action"]
@@ -1257,24 +1168,19 @@ def backfill_textmap_versions_from_history(
                             old_obj = {}
 
                         changed_rows = []
-                        total_items = len(new_obj)
-                        for i, (raw_hash, content) in enumerate(new_obj.items(), start=1):
+                        for raw_hash, content in new_obj.items():
                             old_content = old_obj.get(raw_hash, None)
                             if old_content == content:
                                 continue
                             changed_rows.append((version_id, version_id, version_id, lang_id, _to_hash_value(raw_hash), version_id))
-                            if i % 50000 == 0:
-                                entry_pbar.set_postfix_str(f"textmap {base_name} {i}/{total_items}")
-                                entry_pbar.refresh()
                         if changed_rows:
                             executemany_batched(cursor, sql_textmap, changed_rows, batch_size=batch_size)
-                    finally:
-                        entry_pbar.update(1)
-
+                    except Exception as e:
+                        print(f"Error processing textmap entry: {e}")
+                pbar.update()
             conn.commit()
             set_meta(resume_target_key, resume_scope)
             set_meta(resume_done_key, commit_sha)
-            commit_pbar.update(1)
 
         if prune_missing:
             _prune_unseen_rows_by_version(cursor, "textMap")
@@ -1288,7 +1194,6 @@ def backfill_textmap_versions_from_history(
         raise
     finally:
         cursor.close()
-        commit_pbar.close()
 
     if resolved_from is None:
         set_meta(meta_commit_key, resolved_target)
@@ -1306,6 +1211,7 @@ def backfill_readable_versions_from_history(
     from_commit: str | None = None,
     force: bool = False,
     prune_missing: bool = True,
+    verbose: bool = False,
 ):
     ensure_version_schema()
     repo_path = DATA_PATH
@@ -1356,39 +1262,26 @@ def backfill_readable_versions_from_history(
         )
 
     cursor = conn.cursor()
-    commit_pbar = tqdm(
-        total=total_commits,
-        initial=start_idx,
-        desc="Readable history backfill",
-        unit="commit",
-        leave=False,
-        position=0,
-        dynamic_ncols=True,
-        file=sys.stdout,
-    )
+    # 简化进度显示，只显示主要进度
+    print(f"Processing {total_commits} Readable commits...")
     try:
-        for idx in range(start_idx, total_commits):
-            commit_sha, commit_title = commits[idx]
-            parent_sha = commits[idx - 1][0] if idx > 0 else first_parent_sha
-            version_label, version_id = _resolve_commit_version(repo_path, commit_sha, commit_title)
-            if version_id is None:
-                continue
-            entries = (
-                _initial_entries(repo_path, commit_sha, include_paths=READABLE_ONLY_PATHS)
-                if parent_sha is None
-                else _diff_entries(repo_path, parent_sha, commit_sha, include_paths=READABLE_ONLY_PATHS)
-            )
-            commit_pbar.set_postfix_str(f"{idx + 1}/{total_commits} {commit_sha[:8]} entries={len(entries)}")
+        with LightweightProgress(total_commits, desc="Readable backfill", unit="commits") as pbar:
+            for idx in range(start_idx, total_commits):
+                commit_sha, commit_title = commits[idx]
+                parent_sha = commits[idx - 1][0] if idx > 0 else first_parent_sha
+                version_label, version_id = _resolve_commit_version(repo_path, commit_sha, commit_title)
+                if version_id is None:
+                    pbar.update()
+                    continue
 
-            with tqdm(
-                total=len(entries),
-                desc=f"{commit_sha[:8]} readable files",
-                unit="file",
-                leave=False,
-                position=1,
-                dynamic_ncols=True,
-                file=sys.stdout,
-            ) as entry_pbar:
+                pbar.set_postfix_str(f"Commit {commit_sha[:8]}")
+
+                entries = (
+                    _initial_entries(repo_path, commit_sha, include_paths=READABLE_ONLY_PATHS)
+                    if parent_sha is None
+                    else _diff_entries(repo_path, parent_sha, commit_sha, include_paths=READABLE_ONLY_PATHS)
+                )
+
                 for entry in entries:
                     try:
                         action = entry["action"]
@@ -1415,13 +1308,13 @@ def backfill_readable_versions_from_history(
                         if not _readable_text_changed(old_text, new_text):
                             continue
                         cursor.execute(sql_readable, (version_id, version_id, version_id, file_name, lang, version_id))
-                    finally:
-                        entry_pbar.update(1)
+                    except Exception as e:
+                        print(f"Error processing readable entry: {e}")
 
+                pbar.update()
             conn.commit()
             set_meta(resume_target_key, resume_scope)
             set_meta(resume_done_key, commit_sha)
-            commit_pbar.update(1)
     except BaseException:
         conn.rollback()
         print(
@@ -1431,7 +1324,6 @@ def backfill_readable_versions_from_history(
         raise
     finally:
         cursor.close()
-        commit_pbar.close()
 
     if prune_missing:
         prune_cursor = conn.cursor()
@@ -1456,6 +1348,7 @@ def backfill_subtitle_versions_from_history(
     force: bool = False,
     prune_missing: bool = True,
     batch_size: int = DEFAULT_BATCH_SIZE,
+    verbose: bool = False,
 ):
     ensure_version_schema()
     repo_path = DATA_PATH
@@ -1506,39 +1399,26 @@ def backfill_subtitle_versions_from_history(
         )
 
     cursor = conn.cursor()
-    commit_pbar = tqdm(
-        total=total_commits,
-        initial=start_idx,
-        desc="Subtitle history backfill",
-        unit="commit",
-        leave=False,
-        position=0,
-        dynamic_ncols=True,
-        file=sys.stdout,
-    )
+    # 简化进度显示，只显示主要进度
+    print(f"Processing {total_commits} Subtitle commits...")
     try:
-        for idx in range(start_idx, total_commits):
-            commit_sha, commit_title = commits[idx]
-            parent_sha = commits[idx - 1][0] if idx > 0 else first_parent_sha
-            version_label, version_id = _resolve_commit_version(repo_path, commit_sha, commit_title)
-            if version_id is None:
-                continue
-            entries = (
-                _initial_entries(repo_path, commit_sha, include_paths=SUBTITLE_ONLY_PATHS)
-                if parent_sha is None
-                else _diff_entries(repo_path, parent_sha, commit_sha, include_paths=SUBTITLE_ONLY_PATHS)
-            )
-            commit_pbar.set_postfix_str(f"{idx + 1}/{total_commits} {commit_sha[:8]} entries={len(entries)}")
+        with LightweightProgress(total_commits, desc="Subtitle backfill", unit="commits") as pbar:
+            for idx in range(start_idx, total_commits):
+                commit_sha, commit_title = commits[idx]
+                parent_sha = commits[idx - 1][0] if idx > 0 else first_parent_sha
+                version_label, version_id = _resolve_commit_version(repo_path, commit_sha, commit_title)
+                if version_id is None:
+                    pbar.update()
+                    continue
 
-            with tqdm(
-                total=len(entries),
-                desc=f"{commit_sha[:8]} subtitle files",
-                unit="file",
-                leave=False,
-                position=1,
-                dynamic_ncols=True,
-                file=sys.stdout,
-            ) as entry_pbar:
+                pbar.set_postfix_str(f"Commit {commit_sha[:8]}")
+
+                entries = (
+                    _initial_entries(repo_path, commit_sha, include_paths=SUBTITLE_ONLY_PATHS)
+                    if parent_sha is None
+                    else _diff_entries(repo_path, parent_sha, commit_sha, include_paths=SUBTITLE_ONLY_PATHS)
+                )
+
                 for entry in entries:
                     try:
                         action = entry["action"]
@@ -1580,13 +1460,13 @@ def backfill_subtitle_versions_from_history(
                                 ),
                                 batch_size=batch_size,
                             )
-                    finally:
-                        entry_pbar.update(1)
+                    except Exception as e:
+                        print(f"Error processing subtitle entry: {e}")
 
-            conn.commit()
-            set_meta(resume_target_key, resume_scope)
-            set_meta(resume_done_key, commit_sha)
-            commit_pbar.update(1)
+                pbar.update()
+                conn.commit()
+                set_meta(resume_target_key, resume_scope)
+                set_meta(resume_done_key, commit_sha)
     except BaseException:
         conn.rollback()
         print(
@@ -1596,7 +1476,6 @@ def backfill_subtitle_versions_from_history(
         raise
     finally:
         cursor.close()
-        commit_pbar.close()
 
     if prune_missing:
         prune_cursor = conn.cursor()
@@ -1684,9 +1563,8 @@ def validate_quest_versions(
             total_tasks = len(all_tasks)
             print(f"总任务数: {total_tasks}")
 
-            # 使用tqdm添加进度条
-            from tqdm import tqdm
-            with tqdm(total=min(total_tasks, max_fixes), desc="修复异常版本", unit="task") as pbar:
+            # 使用LightweightProgress添加进度条
+            with LightweightProgress(min(total_tasks, max_fixes), desc="修复异常版本", unit="task") as pbar:
                 for task_type, quest in all_tasks:
                     if processed >= max_fixes:
                         break
@@ -1788,7 +1666,7 @@ def validate_quest_versions(
             total_compared = len(quests)
 
             if total_compared > 0:
-                with tqdm(total=total_compared, desc="比较版本", unit="quest") as pbar:
+                with LightweightProgress(total_compared, desc="比较版本", unit="quest") as pbar:
                     for quest in quests:
                         quest_id, textmap_version, git_version = quest
                         if textmap_version and git_version:
@@ -1841,6 +1719,7 @@ def backfill_quest_versions_from_history(
     force: bool = False,
     prune_missing: bool = True,
     unresolved_ratio_threshold: float = 0.05,
+    verbose: bool = False,
 ) -> dict[str, int | str]:
     ensure_version_schema()
     repo_path = DATA_PATH
@@ -1943,23 +1822,28 @@ def backfill_quest_versions_from_history(
 
         if quest_ids_to_backfill:
             print(f"需要Git回溯的任务数量: {len(quest_ids_to_backfill)}")
-            for quest_id in tqdm(quest_ids_to_backfill, desc="Git history backfill", unit="quest"):
-                try:
-                    _, version_id = find_quest_first_commit(
-                        cursor,
-                        repo_path=repo_path,
-                        quest_id=quest_id
-                    )
-                    if version_id:
-                        # 更新Git版本到数据库
-                        cursor.execute(
-                            "UPDATE quest SET git_created_version_id = ? WHERE questId = ?",
-                            (version_id, quest_id)
+            total_quests = len(quest_ids_to_backfill)
+            with LightweightProgress(total_quests, desc="Git backfill", unit="quests") as pbar:
+                for i, quest_id in enumerate(quest_ids_to_backfill):
+                    pbar.set_postfix_str(f"Quest {quest_id}")
+                    try:
+                        _, version_id = find_quest_first_commit(
+                            cursor,
+                            repo_path=repo_path,
+                            quest_id=quest_id
                         )
-                        git_backfilled_count += 1
-                except Exception as e:
-                    print(f"[ERROR] Git回溯失败 for quest {quest_id}: {e}")
-                    continue
+                        if version_id:
+                            # 更新Git版本到数据库
+                            cursor.execute(
+                                "UPDATE quest SET git_created_version_id = ? WHERE questId = ?",
+                                (version_id, quest_id)
+                            )
+                            git_backfilled_count += 1
+                    except Exception as e:
+                        print(f"[ERROR] Git回溯失败 for quest {quest_id}: {e}")
+                        pass
+                    finally:
+                        pbar.update()
 
             conn.commit()
             print(f"Quest history phase-1.5 done: Git backfilled {git_backfilled_count} quests")
@@ -2003,70 +1887,56 @@ def backfill_quest_versions_from_history(
             )
 
         if replay_mode in ("targeted", "full"):
-            commit_pbar = tqdm(
-                total=total_commits,
-                initial=start_idx,
-                desc=f"Quest history backfill (phase2 {replay_mode})",
-                unit="commit",
-                leave=False,
-                position=0,
-                dynamic_ncols=True,
-                file=sys.stdout,
-            )
+            # 简化进度显示，只显示主要进度
+            print(f"Processing {total_commits} Quest commits in {replay_mode} mode...")
             try:
                 target_quest_ids = unresolved_created_ids if replay_mode == "targeted" else None
-                for idx in range(start_idx, total_commits):
-                    commit_sha, commit_title = commits[idx]
-                    parent_sha = commits[idx - 1][0] if idx > 0 else first_parent_sha
-                    _version_label, version_id = _resolve_commit_version(repo_path, commit_sha, commit_title)
-                    if version_id is None:
-                        continue
+                with LightweightProgress(total_commits, desc="Quest backfill", unit="commits") as pbar:
+                    for idx in range(start_idx, total_commits):
+                        commit_sha, commit_title = commits[idx]
+                        parent_sha = commits[idx - 1][0] if idx > 0 else first_parent_sha
+                        _version_label, version_id = _resolve_commit_version(repo_path, commit_sha, commit_title)
+                        if version_id is None:
+                            pbar.update()
+                            continue
 
-                    quest_backfilled_by_commit = 0
-                    quest_entries = (
-                        _initial_entries(repo_path, commit_sha, include_paths=["BinOutput/Quest"])
-                        if parent_sha is None
-                        else _diff_entries(repo_path, parent_sha, commit_sha, include_paths=["BinOutput/Quest"])
-                    )
-                    with tqdm(
-                        total=len(quest_entries),
-                        desc=f"{commit_sha[:8]} quest files",
-                        unit="file",
-                        leave=False,
-                        position=1,
-                        dynamic_ncols=True,
-                        file=sys.stdout,
-                    ) as file_pbar:
-                        for entry in quest_entries:
-                            quest_backfilled_by_commit += _backfill_quest_version_by_commit_entry(
-                                cursor,
-                                repo_path=repo_path,
-                                commit_sha=commit_sha,
-                                parent_sha=parent_sha,
-                                entry=entry,
-                                version_id=version_id,
-                                target_quest_ids=target_quest_ids,
-                            )
-                            file_pbar.update(1)
-                            file_pbar.set_postfix_str(
-                                f"q_commit_create={quest_backfilled_by_commit}"
-                            )
-                    phase2_commit_created_backfilled += quest_backfilled_by_commit
+                        pbar.set_postfix_str(f"Commit {commit_sha[:8]}")
 
-                    unresolved_row = cursor.execute(
-                        "SELECT COUNT(*) FROM quest WHERE created_version_id IS NULL"
-                    ).fetchone()
-                    current_unresolved_created = int(unresolved_row[0] or 0) if unresolved_row else 0
-                    commit_pbar.set_postfix_str(
-                        f"{commit_sha[:8]} q_commit_create={quest_backfilled_by_commit} created_null={current_unresolved_created}"
+                quest_backfilled_by_commit = 0
+                quest_entries = (
+                    _initial_entries(repo_path, commit_sha, include_paths=["BinOutput/Quest"])
+                    if parent_sha is None
+                    else _diff_entries(repo_path, parent_sha, commit_sha, include_paths=["BinOutput/Quest"])
+                )
+
+                for entry in quest_entries:
+                    quest_backfilled_by_commit += _backfill_quest_version_by_commit_entry(
+                        cursor,
+                        repo_path=repo_path,
+                        commit_sha=commit_sha,
+                        parent_sha=parent_sha,
+                        entry=entry,
+                        version_id=version_id,
+                        target_quest_ids=target_quest_ids,
                     )
 
-                    conn.commit()
-                    set_meta(resume_target_key, resume_scope)
-                    set_meta(resume_done_key, commit_sha)
-                    commit_pbar.update(1)
+                phase2_commit_created_backfilled += quest_backfilled_by_commit
+
+                unresolved_row = cursor.execute(
+                    "SELECT COUNT(*) FROM quest WHERE created_version_id IS NULL"
+                ).fetchone()
+                current_unresolved_created = int(unresolved_row[0] or 0) if unresolved_row else 0
+
+                # 每处理10个提交显示一次详细信息
+                if (idx + 1) % 10 == 0 or (idx + 1) == total_commits:
+                    print(f"  Commit {commit_sha[:8]}: backfilled {quest_backfilled_by_commit} quests, remaining null created versions: {current_unresolved_created}")
+
+                pbar.update()
+                conn.commit()
+                set_meta(resume_target_key, resume_scope)
+                set_meta(resume_done_key, commit_sha)
             finally:
-                commit_pbar.close()
+                pass
 
         final_total, final_unresolved_count = _count_unresolved_quest_versions(cursor)
         print(

@@ -1,7 +1,7 @@
 import os
 import json
 import sys
-from tqdm import tqdm
+from lightweight_progress import LightweightProgress
 
 from DBConfig import conn, DATA_PATH
 from import_utils import DEFAULT_BATCH_SIZE, executemany_batched
@@ -198,19 +198,15 @@ def importAllVoiceItems(
     if reset:
         cursor.execute("DELETE FROM voice")
 
-    for fileName in tqdm(
-        files,
-        total=len(files),
-        leave=False,
-        position=0,
-        dynamic_ncols=True,
-        file=sys.stdout,
-    ):
-        try:
-            importVoiceItem(fileName, cursor, batch_size=batch_size)
-        except Exception as e:
-            failed_files.append(f"{fileName} ({e})")
-            continue
+    with LightweightProgress(len(files), desc="Voice files", unit="files") as pbar:
+        for fileName in files:
+            try:
+                importVoiceItem(fileName, cursor, batch_size=batch_size)
+            except Exception as e:
+                failed_files.append(f"{fileName} ({e})")
+                continue
+            finally:
+                pbar.update()
 
     cursor.close()
     if commit:

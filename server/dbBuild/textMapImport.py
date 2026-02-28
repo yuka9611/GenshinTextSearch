@@ -1,7 +1,7 @@
 import os
 import json
 import sys
-from tqdm import tqdm
+from lightweight_progress import LightweightProgress
 
 from DBConfig import conn, LANG_PATH
 from import_utils import (
@@ -121,55 +121,51 @@ def importTextMap(
     compared_hash_count = 0
     changed_hash_count = 0
 
-    for fileName in tqdm(
-        fileList,
-        total=len(fileList),
-        desc=f"{baseMapName} files",
-        leave=False,
-        position=0,
-        dynamic_ncols=True,
-        file=sys.stdout,
-    ):
-        filePath = os.path.join(LANG_PATH, fileName)
-        if not os.path.exists(filePath):
-            missing_files.append(fileName)
-            continue
+    with LightweightProgress(len(fileList), desc=f"{baseMapName} files", unit="files") as pbar:
+        for i, fileName in enumerate(fileList):
+            filePath = os.path.join(LANG_PATH, fileName)
+            if not os.path.exists(filePath):
+                missing_files.append(fileName)
+                pbar.update()
+                continue
 
-        try:
-            with open(filePath, encoding="utf-8") as f:
-                textMap = json.load(f)
+            try:
+                with open(filePath, encoding="utf-8") as f:
+                    textMap = json.load(f)
 
-            parsed_rows: list[tuple] = []
-            parsed_hashes: list = []
-            for hashVal, content in textMap.items():
-                parsed_hash = to_hash_value(hashVal)
-                parsed_rows.append((parsed_hash, content))
-                parsed_hashes.append(parsed_hash)
+                parsed_rows: list[tuple] = []
+                parsed_hashes: list = []
+                for hashVal, content in textMap.items():
+                    parsed_hash = to_hash_value(hashVal)
+                    parsed_rows.append((parsed_hash, content))
+                    parsed_hashes.append(parsed_hash)
 
-            existing_map = _load_existing_textmap_content_by_hash(
-                cursor,
-                langId,
-                parsed_hashes,
-            )
-            compared_hash_count += len(parsed_rows)
+                existing_map = _load_existing_textmap_content_by_hash(
+                    cursor,
+                    langId,
+                    parsed_hashes,
+                )
+                compared_hash_count += len(parsed_rows)
 
-            changed_rows = (
-                (row_hash, content, langId, version_id, version_id)
-                for row_hash, content in parsed_rows
-                if existing_map.get(row_hash) != content
-            )
-            changed_hash_count += executemany_batched(
-                cursor,
-                sql_upsert,
-                changed_rows,
-                batch_size=batch_size,
-            )
+                changed_rows = (
+                    (row_hash, content, langId, version_id, version_id)
+                    for row_hash, content in parsed_rows
+                    if existing_map.get(row_hash) != content
+                )
+                changed_hash_count += executemany_batched(
+                    cursor,
+                    sql_upsert,
+                    changed_rows,
+                    batch_size=batch_size,
+                )
 
-            seen_iter = ((row_hash,) for row_hash in parsed_hashes)
-            executemany_batched(cursor, sql_seen, seen_iter, batch_size=batch_size)
+                seen_iter = ((row_hash,) for row_hash in parsed_hashes)
+                executemany_batched(cursor, sql_seen, seen_iter, batch_size=batch_size)
 
-        except Exception as e:
-            import_errors.append(f"{fileName} ({e})")
+            except Exception as e:
+                import_errors.append(f"{fileName} ({e})")
+            finally:
+                pbar.update()
 
     if prune_missing:
         cursor.execute(

@@ -1,6 +1,6 @@
 import os
 import sys
-from tqdm import tqdm
+from lightweight_progress import LightweightProgress
 
 from DBConfig import conn, READABLE_PATH, DATA_PATH
 from import_utils import (
@@ -17,6 +17,7 @@ from localization_utils import (
 )
 from readable_version_utils import assign_readable_versions_by_text
 from versioning import ensure_version_schema, get_current_version, get_or_create_version_id
+from textmap_name_utils import analyze_readable_exceptions, report_exceptions, delete_empty_readable_entries
 
 
 def _print_summary(title: str, items: list[str], sample_size: int = 10):
@@ -113,42 +114,38 @@ def importReadableByFiles(
         f"changed={len(changed_tasks)}, deleted={len(deleted_list)}, remap={'yes' if refresh_mapping else 'no'}"
     )
 
-    for lang, file_name, full_path in tqdm(
-        changed_tasks,
-        total=len(changed_tasks),
-        desc="readable diff files",
-        leave=False,
-        position=0,
-        dynamic_ncols=True,
-        file=sys.stdout,
-    ):
-        if not os.path.isfile(full_path):
-            skipped_paths.append(f"{lang}/{file_name} (missing)")
-            continue
-        name_without_ext = os.path.splitext(file_name)[0]
-        info = filename_to_info.get(name_without_ext) or filename_to_info.get(file_name)
-        title_hash = info["titleHash"] if info else None
-        readable_id = info["readableId"] if info else None
-        try:
-            with open(full_path, "r", encoding="utf-8") as f:
-                content = f.read().replace("\n", "\\n")
-            existing_row = cursor.execute(
-                """
-                SELECT content, created_version_id, updated_version_id
-                FROM readable
-                WHERE fileName=? AND lang=?
-                LIMIT 1
-                """,
-                (file_name, lang),
-            ).fetchone()
-            created_id, updated_id = assign_readable_versions_by_text(
-                existing_row,
-                content,
-                version_id,
-            )
-            writer.add((file_name, lang, content, title_hash, readable_id, created_id, updated_id))
-        except Exception as e:
-            read_errors.append(f"{lang}/{file_name} ({e})")
+    with LightweightProgress(len(changed_tasks), desc="Readable diff files", unit="files") as pbar:
+        for lang, file_name, full_path in changed_tasks:
+            if not os.path.isfile(full_path):
+                skipped_paths.append(f"{lang}/{file_name} (missing)")
+                pbar.update()
+                continue
+            name_without_ext = os.path.splitext(file_name)[0]
+            info = filename_to_info.get(name_without_ext) or filename_to_info.get(file_name)
+            title_hash = info["titleHash"] if info else None
+            readable_id = info["readableId"] if info else None
+            try:
+                with open(full_path, "r", encoding="utf-8") as f:
+                    content = f.read().replace("\n", "\\n")
+                existing_row = cursor.execute(
+                    """
+                    SELECT content, created_version_id, updated_version_id
+                    FROM readable
+                    WHERE fileName=? AND lang=?
+                    LIMIT 1
+                    "",
+                    (file_name, lang),
+                ).fetchone()
+                created_id, updated_id = assign_readable_versions_by_text(
+                    existing_row,
+                    content,
+                    version_id,
+                )
+                writer.add((file_name, lang, content, title_hash, readable_id, created_id, updated_id))
+            except Exception as e:
+                read_errors.append(f"{lang}/{file_name} ({e})")
+            finally:
+                pbar.update()
     writer.flush()
 
     delete_rows: list[tuple[str, str]] = []
@@ -241,45 +238,58 @@ def importReadable(
         secondary_sql=seen_sql,
     )
 
-    file_tasks: list[tuple[str, str]] = []
+    file_tasks: list[tuple[str, str, str]] = []
     for lang in sorted(os.listdir(READABLE_PATH)):
         langPath = os.path.join(READABLE_PATH, lang)
         if not os.path.isdir(langPath):
             continue
-        for fileName in sorted(os.listdir(langPath)):
-            filePath = os.path.join(langPath, fileName)
-            if os.path.isfile(filePath):
-                file_tasks.append((lang, fileName))
+        for root, _, files in os.walk(langPath):
+            for fileName in sorted(files):
+                filePath = os.path.join(root, fileName)
+                if os.path.isfile(filePath):
+                    # 计算相对路径，保持与Subtitle导入逻辑一致
+                    rel_path = os.path.relpath(filePath, langPath)
+                    clean_file_name = rel_path.replace(os.sep, "/")
+                    file_tasks.append((lang, clean_file_name, filePath))
 
     print(f"Importing readable files ({len(file_tasks)})...")
     read_errors: list[str] = []
-    for lang, fileName in tqdm(
-        file_tasks,
-        total=len(file_tasks),
-        desc="readable files",
-        leave=False,
-        position=0,
-        dynamic_ncols=True,
-        file=sys.stdout,
-    ):
-        filePath = os.path.join(READABLE_PATH, lang, fileName)
-        name_without_ext = os.path.splitext(fileName)[0]
-        info = filename_to_info.get(name_without_ext) or filename_to_info.get(fileName)
+    readable_data: list[tuple[str, str, str]] = []
+    with LightweightProgress(len(file_tasks), desc="Readable files", unit="files") as pbar:
+        for lang, clean_file_name, filePath in file_tasks:
+            name_without_ext = os.path.splitext(clean_file_name)[0]
+            # 尝试使用不同的键来查找信息
+            base_name = os.path.basename(clean_file_name)
+            base_name_without_ext = os.path.splitext(base_name)[0]
+            info = filename_to_info.get(name_without_ext) or filename_to_info.get(base_name) or filename_to_info.get(base_name_without_ext)
 
-        title_hash = info["titleHash"] if info else None
-        readable_id = info["readableId"] if info else None
+            title_hash = info["titleHash"] if info else None
+            readable_id = info["readableId"] if info else None
 
-        try:
-            with open(filePath, "r", encoding="utf-8") as f:
-                content = f.read().replace("\n", "\\n")
-            writer.add(
-                (fileName, lang, content, title_hash, readable_id, version_id, version_id),
-                (fileName, lang),
-            )
-        except Exception as e:
-            read_errors.append(f"{lang}/{fileName} ({e})")
+            try:
+                with open(filePath, "r", encoding="utf-8") as f:
+                    content = f.read().replace("\n", "\\n")
+                writer.add(
+                    (clean_file_name, lang, content, title_hash, readable_id, version_id, version_id),
+                    (clean_file_name, lang),
+                )
+                readable_data.append((clean_file_name, lang, content))
+            except Exception as e:
+                read_errors.append(f"{lang}/{clean_file_name} ({e})")
+            finally:
+                pbar.update()
 
     writer.flush()
+    
+    # 分析并报告异常情况
+    if readable_data:
+        exception_data = analyze_readable_exceptions(readable_data)
+        report_exceptions(exception_data, "Readable")
+        
+        # 删除源文件和数据库中内容均为空白的条目
+        print("删除空白Readable条目...")
+        delete_count = delete_empty_readable_entries(cursor, READABLE_PATH)
+        print(f"已删除 {delete_count} 个空白Readable条目")
     if prune_missing:
         cursor.execute(
             """
