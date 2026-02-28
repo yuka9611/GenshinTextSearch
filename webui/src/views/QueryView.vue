@@ -1,4 +1,4 @@
-﻿<template>
+<template>
     <div class="viewWrapper">
         <h1 class="pageTitle">关键词搜索</h1>
         <div class="helpText">
@@ -16,7 +16,7 @@
                 clearable
             >
                 <template #prepend>
-                    <el-select v-model="selectedInputLanguage" placeholder="Select" class="languageSelector">
+                    <el-select v-model="global.config.defaultSearchLanguage" placeholder="Select" class="languageSelector">
                         <el-option v-for="(v, k) in supportedInputLanguage" :label="v" :value="k" :key="k" />
                     </el-select>
                 </template>
@@ -77,7 +77,15 @@
             <el-button size="small" :disabled="currentPage >= totalPages" @click="goToPage(totalPages)">末页</el-button>
         </div>
 
-        <div>
+        <div v-if="isLoading" class="loading-container">
+            <el-skeleton :rows="5" animated />
+        </div>
+
+        <div v-else-if="queryResult.length === 0 && totalCount === 0" class="no-results">
+            <el-empty description="未找到结果" />
+        </div>
+
+        <div v-else>
             <TranslateDisplay
                 v-for="translate in queryResult"
                 :key="`${translate.hash}-${translate.origin || ''}`"
@@ -122,178 +130,48 @@
 </template>
 
 <script setup>
-import { onBeforeMount, ref, computed } from 'vue'
+import { onBeforeMount } from 'vue'
 import { Close, Search } from '@element-plus/icons-vue'
 import global from '@/global/global'
-import api from '@/api/keywordQuery'
-import basicInfoApi from '@/api/basicInfo'
 import TranslateDisplay from '@/components/ResultEntry.vue'
 import AudioPlayer from '@liripeng/vue-audio-player'
+import useSearch from '@/composables/useSearch'
+import useAudioPlayer from '@/composables/useAudioPlayer'
 
-const queryResult = ref([])
+// 使用搜索组合式API
+const {
+  queryResult,
+  keyword,
+  speakerKeyword,
+  voiceFilter,
+  createdVersionFilter,
+  updatedVersionFilter,
+  versionOptions,
+  supportedInputLanguage,
+  searchSummary,
+  currentPage,
+  totalCount,
+  totalPages,
+  isLoading,
+  fetchAvailableVersions,
+  onQueryButtonClicked,
+  goToPage
+} = useSearch()
 
-const selectedInputLanguage = ref(global.config.defaultSearchLanguage + '')
-const keyword = ref('')
-const keywordLast = ref('')
-const speakerLast = ref('')
-const speakerKeyword = ref('')
-const searchLangLast = ref(0)
-const voiceFilter = ref('all')
-const voiceFilterLast = ref('all')
-const createdVersionFilter = ref('')
-const updatedVersionFilter = ref('')
-const createdVersionLast = ref('')
-const updatedVersionLast = ref('')
-const versionOptions = ref([])
-const supportedInputLanguage = ref({})
-const searchSummary = ref('')
-const pageSize = ref(50)
-const currentPage = ref(1)
-const totalCount = ref(0)
-const totalPages = computed(() => Math.max(1, Math.ceil(totalCount.value / pageSize.value)))
+// 使用音频播放组合式API
+const {
+  voicePlayer,
+  showPlayer,
+  audio,
+  onHidePlayerButtonClicked,
+  onShowPlayerButtonClicked,
+  onVoicePlay,
+  pauseAudio
+} = useAudioPlayer()
 
 onBeforeMount(async () => {
-    supportedInputLanguage.value = global.languages
-    try {
-        const ans = await basicInfoApi.getAvailableVersions()
-        versionOptions.value = ans.json || []
-    } catch (_) {
-        versionOptions.value = []
-    }
+    await fetchAvailableVersions()
 })
-
-const normalizeText = (value) => {
-    if (!value) return ''
-    return String(value).trim().toLowerCase()
-}
-
-const normalizeVersion = (value) => normalizeText(value)
-
-const getNormalizedEntryVersion = (entry, kind) => {
-    if (kind === 'created') return normalizeVersion(entry.createdVersion || entry.createdVersionRaw || '')
-    return normalizeVersion(entry.updatedVersion || entry.updatedVersionRaw || '')
-}
-
-const shouldKeepByVersionFilter = (entry, updatedFilterRaw) => {
-    const updatedFilter = normalizeVersion(updatedFilterRaw)
-    if (!updatedFilter) return true
-
-    const updatedValue = getNormalizedEntryVersion(entry, 'updated')
-    if (!updatedValue.includes(updatedFilter)) return false
-
-    const createdValue = getNormalizedEntryVersion(entry, 'created')
-    if (!createdValue || !updatedValue) return true
-    return createdValue !== updatedValue
-}
-
-const voicePlayer = ref()
-const showPlayer = ref(false)
-let firstShowPlayer = true
-
-const fetchPage = async (page, useLast = false) => {
-    const params = useLast
-        ? {
-            keyword: keywordLast.value,
-            speaker: speakerLast.value,
-            langCode: searchLangLast.value,
-            voiceFilter: voiceFilterLast.value,
-            createdVersion: createdVersionLast.value,
-            updatedVersion: updatedVersionLast.value,
-        }
-        : {
-            keyword: keyword.value,
-            speaker: speakerKeyword.value,
-            langCode: parseInt(selectedInputLanguage.value),
-            voiceFilter: voiceFilter.value,
-            createdVersion: createdVersionFilter.value,
-            updatedVersion: updatedVersionFilter.value,
-        }
-
-    const ans = (
-        await api.queryByKeyword(
-            params.keyword,
-            params.langCode,
-            params.speaker,
-            page,
-            pageSize.value,
-            params.voiceFilter,
-            params.createdVersion,
-            params.updatedVersion
-        )
-    ).json
-
-    if (voicePlayer.value) {
-        voicePlayer.value.pause()
-    }
-
-    const timeMs = typeof ans.time === 'number' ? ans.time.toFixed(2) : '0.00'
-    const total = ans.total || 0
-
-    queryResult.value = (ans.contents || []).filter((entry) => {
-        return shouldKeepByVersionFilter(entry, params.updatedVersion)
-    })
-    totalCount.value = total
-    currentPage.value = ans.page || page
-
-    keywordLast.value = params.keyword || ''
-    speakerLast.value = params.speaker || ''
-    searchLangLast.value = params.langCode
-    voiceFilterLast.value = params.voiceFilter || 'all'
-    createdVersionLast.value = params.createdVersion || ''
-    updatedVersionLast.value = params.updatedVersion || ''
-
-    if (total > 0) {
-        const filterText = [createdVersionLast.value, updatedVersionLast.value].filter(Boolean).join(' / ')
-        searchSummary.value = filterText
-            ? `查询耗时: ${timeMs}ms，总计 ${total} 条，版本筛选: ${filterText}`
-            : `查询耗时: ${timeMs}ms，总计 ${total} 条`
-    } else {
-        searchSummary.value = `查询耗时: ${timeMs}ms，未找到结果`
-    }
-}
-
-const onQueryButtonClicked = async () => {
-    currentPage.value = 1
-    await fetchPage(1, false)
-}
-
-const audio = ref([])
-
-const onHidePlayerButtonClicked = () => {
-    showPlayer.value = false
-}
-
-const onShowPlayerButtonClicked = () => {
-    showPlayer.value = true
-}
-
-const goToPage = async (page) => {
-    if (!keywordLast.value && !speakerLast.value && !createdVersionLast.value && !updatedVersionLast.value) {
-        return
-    }
-    const safePage = Math.min(Math.max(1, page), totalPages.value)
-    await fetchPage(safePage, true)
-}
-
-const onVoicePlay = (voiceUrl) => {
-    if (firstShowPlayer) {
-        showPlayer.value = true
-        firstShowPlayer = false
-    }
-
-    if (audio.value.length > 0 && voiceUrl === audio.value[0]) {
-        if (voicePlayer.value.isPlaying) {
-            voicePlayer.value.pause()
-        } else {
-            voicePlayer.value.play()
-        }
-    } else {
-        audio.value = [voiceUrl]
-        setTimeout(() => {
-            voicePlayer.value.play()
-        }, 0)
-    }
-}
 </script>
 
 <style scoped>
@@ -421,6 +299,15 @@ const onVoicePlay = (voiceUrl) => {
     margin-right: 4px;
 }
 
+.loading-container {
+    padding: 20px 0;
+}
+
+.no-results {
+    padding: 40px 0;
+    text-align: center;
+}
+
 @media (max-width: 720px) {
     .searchSummary {
         display: block;
@@ -461,6 +348,14 @@ const onVoicePlay = (voiceUrl) => {
         line-height: 60px;
         z-index: 3;
         box-shadow: none;
+    }
+
+    .loading-container {
+        padding: 15px 0;
+    }
+
+    .no-results {
+        padding: 30px 0;
     }
 }
 </style>

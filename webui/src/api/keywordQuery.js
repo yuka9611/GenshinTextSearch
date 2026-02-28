@@ -1,5 +1,6 @@
 import request from "@/utils/request";
 import axios from "axios";
+import { withCache } from "@/utils/requestCache";
 
 const queryBaidu = (keyword) => {
     return {
@@ -21,29 +22,6 @@ const queryByKeyword = (
     createdVersion = "",
     updatedVersion = "",
 ) => {
-    // return {contents: [
-    //         {
-    //             "type": "Dialogue",
-    //             "origin": "TASK NAME etc.",
-    //             "voicePaths": [],
-    //             "translates":{
-    //                 1: "TRANSLATE_CHINESE",
-    //                 4: "TRANSLATE_ENGLISH"
-    //             }
-    //         },
-    //         {
-    //             "type": "Fetter",
-    //             "origin": "AVATAR NAME etc.",
-    //             "voicePaths": ["VOICE_PATH2"],
-    //             "translates":{
-    //                 1: "TRANSLATE_CHINESE2",
-    //                 4: "TRANSLATE_ENGLISH2"
-    //             }
-    //         }
-    //     ],
-    //     time: 0.01
-    // }
-
     return request.post("/api/keywordQuery", {
         keyword: keyword,
         langCode: langCode,
@@ -79,23 +57,20 @@ const getVoiceOver = async (voicePath, langCode) => {
     return ans.data
 };
 
-
-
-
-const getTalkFromHash = (textHash, searchLang) => {
+const getTalkFromHash = withCache((textHash, searchLang) => {
     return request.post("/api/getTalkFromHash", {
         "textHash": textHash,
         "searchLang": searchLang
     });
-};
+});
 
-const getSubtitleContext = (fileName, subtitleId, searchLang) => {
+const getSubtitleContext = withCache((fileName, subtitleId, searchLang) => {
     return request.post("/api/getSubtitleContext", {
         "fileName": fileName,
         "subtitleId": subtitleId,
         "searchLang": searchLang
     });
-};
+});
 
 const searchByName = (keyword, langCode, createdVersion = "", updatedVersion = "") => {
     return request.post("/api/nameSearch", {
@@ -113,12 +88,12 @@ const searchAvatar = (keyword, langCode) => {
     });
 };
 
-const getAvatarVoices = (avatarId, searchLang) => {
+const getAvatarVoices = withCache((avatarId, searchLang) => {
     return request.post("/api/avatarVoice", {
         avatarId: avatarId,
         searchLang: searchLang
     });
-};
+});
 
 const searchAvatarVoices = (titleKeyword, createdVersion, updatedVersion, searchLang) => {
     return request.post("/api/avatarVoiceSearch", {
@@ -129,12 +104,12 @@ const searchAvatarVoices = (titleKeyword, createdVersion, updatedVersion, search
     });
 };
 
-const getAvatarStories = (avatarId, searchLang) => {
+const getAvatarStories = withCache((avatarId, searchLang) => {
     return request.post("/api/avatarStory", {
         avatarId: avatarId,
         searchLang: searchLang
     });
-};
+});
 
 const searchAvatarStories = (titleKeyword, createdVersion, updatedVersion, searchLang) => {
     return request.post("/api/avatarStorySearch", {
@@ -145,23 +120,22 @@ const searchAvatarStories = (titleKeyword, createdVersion, updatedVersion, searc
     });
 };
 
-const getReadableContent = (readableId, fileName, searchLang) => {
+const getReadableContent = withCache((readableId, fileName, searchLang) => {
     return request.post("/api/getReadableContent", {
         readableId: readableId,
         fileName: fileName,
         searchLang: searchLang
     });
-};
+});
 
-const getQuestDialogues = (questId, searchLang, page = 1, pageSize = 200) => {
+const getQuestDialogues = withCache((questId, searchLang, page = 1, pageSize = 200) => {
     return request.post("/api/getQuestDialogues", {
         questId: questId,
         searchLang: searchLang,
         page: page,
         pageSize: pageSize
     });
-};
-
+});
 
 export default {
     queryBaidu,
