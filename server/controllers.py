@@ -2,11 +2,13 @@ import io
 import re
 import zlib
 from functools import lru_cache
+from datetime import datetime, timedelta
 
 import databaseHelper
 import languagePackReader
 import config
 import placeholderHandler
+from utils.cache import search_cache
 
 
 @lru_cache(maxsize=1024)
@@ -180,15 +182,7 @@ def pickAssetDirViaDialog() -> str | None:
 
 
 def selectVoicePathFromTextHash(textHash: int):
-    voicePath: str | None = databaseHelper.selectVoicePathFromTextHashInDialogue(textHash)
-    if voicePath is not None:
-        return voicePath
-
-    voicePath = databaseHelper.selectVoicePathFromTextHashInFetter(textHash)
-    if voicePath is not None:
-        return voicePath
-
-    return None
+    return databaseHelper.selectVoicePathFromTextHash(textHash)
 
 
 def selectVoiceOriginFromTextHash(textHash: int, langCode: int) -> tuple[str, bool]:
@@ -419,6 +413,23 @@ def getTranslateObj(
     keyword_trim = keyword.strip()
     created_version_filter = _normalize_version_filter(created_version)
     updated_version_filter = _normalize_version_filter(updated_version)
+    
+    # 生成缓存键
+    cache_key = (
+        keyword_trim,
+        langCode,
+        speaker_keyword,
+        page,
+        page_size,
+        voice_filter,
+        created_version_filter,
+        updated_version_filter
+    )
+    
+    # 尝试从缓存中获取结果
+    cached_result = search_cache.get(cache_key)
+    if cached_result:
+        return cached_result
 
     def normalize_speaker(value: str) -> str:
         normalized = value.strip().lower()
@@ -505,7 +516,10 @@ def getTranslateObj(
             )
 
         ans = apply_voice_filter(ans)
-        return paginate(ans, total)
+        result = paginate(ans, total)
+    # 将结果缓存
+    search_cache.set(cache_key, result)
+    return result
     if keyword_trim != "" and speaker_keyword:
         ans = []
         langs = config.getResultLanguages().copy()
@@ -594,7 +608,10 @@ def getTranslateObj(
         )
 
         ans = apply_voice_filter(ans)
-        return paginate(ans, total)
+        result = paginate(ans, total)
+    # 将结果缓存
+    search_cache.set(cache_key, result)
+    return result
     # 找出目标语言的textMap包含keyword的文本
     ans = []
 
@@ -771,7 +788,10 @@ def getTranslateObj(
                     obj['translates'][transLangCode] = transContent
                 ans.append(obj)
 
-        return ans, total
+        result = (ans, total)
+        # 将结果缓存
+        search_cache.set(cache_key, result)
+        return result
 
     if voice_filter != "all":
         hash_extra_filtered = False
@@ -921,7 +941,10 @@ def getTranslateObj(
                         obj['translates'][transLangCode] = transContent
                     ans.append(obj)
 
-        return ans, total
+        result = (ans, total)
+        # 将结果缓存
+        search_cache.set(cache_key, result)
+        return result
 
     if hash_obj and hash_obj.get('translates'):
         ans.append(hash_obj)
@@ -1068,7 +1091,10 @@ def getTranslateObj(
     if hash_extra:
         total += 1
 
-    return paginate(ans, total)
+    result = paginate(ans, total)
+    # 将结果缓存
+    search_cache.set(cache_key, result)
+    return result
 
 
 def searchNameEntries(
@@ -1394,7 +1420,11 @@ def getAvatarStories(avatarId: int, searchLang: int | None = None):
             if context_hash in version_cache:
                 created_raw, updated_raw = version_cache[context_hash]
             else:
-                created_raw, updated_raw = databaseHelper.getTextMapVersionInfo(context_hash, sourceLangCode)
+                version_info = databaseHelper.getTextMapVersionInfo(context_hash, sourceLangCode)
+                if version_info:
+                    created_raw, updated_raw = version_info
+                else:
+                    created_raw, updated_raw = None, None
                 version_cache[context_hash] = (created_raw, updated_raw)
 
             stories.append({
@@ -1566,7 +1596,11 @@ def searchAvatarStoriesByFilters(
         if contextHash in version_cache:
             created_raw, updated_raw = version_cache[contextHash]
         else:
-            created_raw, updated_raw = databaseHelper.getTextMapVersionInfo(contextHash, sourceLangCode)
+            version_info = databaseHelper.getTextMapVersionInfo(contextHash, sourceLangCode)
+            if version_info:
+                created_raw, updated_raw = version_info
+            else:
+                created_raw, updated_raw = None, None
             version_cache[contextHash] = (created_raw, updated_raw)
 
         stories.append({
@@ -1669,6 +1703,14 @@ def getTalkFromHash(textHash: int, searchLang: int | None = None):
         obj['dialogueId'] = dialogueId
         dialogues.append(obj)
 
+    # 获取版本信息
+    created_raw, updated_raw = None, None
+    if dialogues:
+        # 使用第一个对话的版本信息
+        first_dialogue = dialogues[0]
+        created_raw = first_dialogue.get("createdVersionRaw")
+        updated_raw = first_dialogue.get("updatedVersionRaw")
+    
     ans = {
         "talkQuestName": questCompleteName,
         "talkId": talkId,
