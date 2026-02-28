@@ -157,11 +157,8 @@ create table textMap
         unique (lang, hash)
 );
 
-create index textMap_hash_index
-    on textMap (hash);
-
-create index textMap_lang_index
-    on textMap (lang);
+-- 由于textMap表已有(lang, hash)的唯一约束，单独的hash和lang索引是冗余的
+-- 唯一约束会自动创建索引，因此删除这些冗余索引
 
 
 create table voice

@@ -3,7 +3,7 @@ from contextlib import contextmanager
 from itertools import islice
 
 
-DEFAULT_BATCH_SIZE = max(100, int(os.environ.get("GTS_DB_BATCH_SIZE", "2000")))
+DEFAULT_BATCH_SIZE = max(100, int(os.environ.get("GTS_DB_BATCH_SIZE", "5000")))
 
 
 def iter_batches(iterable, batch_size: int):
@@ -141,7 +141,7 @@ def fast_import_pragmas(conn, enabled: bool = True):
 
     cursor = conn.cursor()
     old_settings = {}
-    pragma_names = ("synchronous", "temp_store", "cache_size")
+    pragma_names = ("synchronous", "temp_store", "cache_size", "journal_mode", "foreign_keys")
 
     try:
         for name in pragma_names:
@@ -150,7 +150,9 @@ def fast_import_pragmas(conn, enabled: bool = True):
 
         cursor.execute("PRAGMA synchronous = OFF")
         cursor.execute("PRAGMA temp_store = MEMORY")
-        cursor.execute("PRAGMA cache_size = -200000")
+        cursor.execute("PRAGMA cache_size = -500000")  # 增加缓存大小
+        cursor.execute("PRAGMA journal_mode = OFF")  # 禁用日志以提高速度
+        cursor.execute("PRAGMA foreign_keys = OFF")  # 禁用外键检查以提高速度
         yield
     finally:
         for name in pragma_names:

@@ -133,7 +133,7 @@ def importReadableByFiles(
                     FROM readable
                     WHERE fileName=? AND lang=?
                     LIMIT 1
-                    "",
+                    """,
                     (file_name, lang),
                 ).fetchone()
                 created_id, updated_id = assign_readable_versions_by_text(
