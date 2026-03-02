@@ -3,7 +3,7 @@ from contextlib import contextmanager
 from itertools import islice
 
 
-DEFAULT_BATCH_SIZE = max(100, int(os.environ.get("GTS_DB_BATCH_SIZE", "5000")))
+DEFAULT_BATCH_SIZE = max(100, int(os.environ.get("GTS_DB_BATCH_SIZE", "10000")))
 
 
 def iter_batches(iterable, batch_size: int):
@@ -43,56 +43,8 @@ def to_hash_value(raw_hash):
         return raw_hash
 
 
-def build_versioned_upsert_sql(
-    *,
-    table: str,
-    insert_columns: list[str],
-    conflict_columns: list[str],
-    update_columns: list[str],
-    compare_columns: list[str] | None = None,
-    content_column: str = "content",
-) -> str:
-    """
-    Build a common UPSERT SQL with created_version_id/updated_version_id guard semantics.
-    `updated_version_id` is bumped only when content changes; otherwise existing value is kept.
-    """
-    compare_cols = compare_columns or update_columns
-    placeholders = ",".join(["?"] * len(insert_columns))
-    set_parts = [f"{col}=excluded.{col}" for col in update_columns]
-    set_parts.append(
-        "created_version_id=CASE "
-        f"WHEN excluded.created_version_id IS NULL THEN {table}.created_version_id "
-        f"WHEN {table}.created_version_id IS NULL THEN excluded.created_version_id "
-        f"WHEN excluded.created_version_id > {table}.created_version_id THEN {table}.created_version_id "
-        "ELSE excluded.created_version_id "
-        "END"
-    )
-    set_parts.append(
-        "updated_version_id=CASE "
-        f"WHEN COALESCE({table}.{content_column}, '') <> COALESCE(excluded.{content_column}, '') "
-        "THEN CASE "
-        f"WHEN excluded.updated_version_id IS NULL THEN COALESCE({table}.updated_version_id, excluded.updated_version_id) "
-        f"WHEN {table}.updated_version_id IS NULL THEN excluded.updated_version_id "
-        f"WHEN {table}.updated_version_id > excluded.updated_version_id THEN {table}.updated_version_id "
-        "ELSE excluded.updated_version_id "
-        "END "
-        f"ELSE COALESCE({table}.updated_version_id, excluded.updated_version_id) "
-        "END"
-    )
-
-    where_parts = [f"NOT ({table}.{col} IS excluded.{col})" for col in compare_cols]
-    where_parts.append(f"{table}.created_version_id IS NULL")
-    where_parts.append(f"{table}.updated_version_id IS NULL")
-
-    set_sql = ", ".join(set_parts)
-    where_sql = " OR ".join(where_parts)
-    return (
-        f"INSERT INTO {table}({','.join(insert_columns)}) "
-        f"VALUES ({placeholders}) "
-        f"ON CONFLICT({','.join(conflict_columns)}) DO UPDATE SET "
-        f"{set_sql} "
-        f"WHERE {where_sql}"
-    )
+# 版本控制相关功能已移至 version_control.py
+from version_control import build_versioned_upsert_sql
 
 
 class BufferedExecutemany:

@@ -107,9 +107,20 @@ create table quest
     titleTextMapHash integer,
     chapterId        integer,
     created_version_id INTEGER,
-    updated_version_id INTEGER,
     git_created_version_id INTEGER
 );
+
+create table quest_version
+(
+    questId          integer,
+    lang             integer,
+    updated_version_id INTEGER,
+    constraint quest_version_pk
+        primary key (questId, lang)
+);
+
+create index quest_version_updated_version_id_index
+    on quest_version (updated_version_id);
 
 create index quest_questId_index
     on quest (questId);
@@ -322,8 +333,6 @@ create index textMap_updated_version_id_index
     on textMap (updated_version_id);
 create index quest_created_version_id_index
     on quest (created_version_id);
-create index quest_updated_version_id_index
-    on quest (updated_version_id);
 create index quest_git_created_version_id_index
     on quest (git_created_version_id);
 create index readable_created_version_id_index

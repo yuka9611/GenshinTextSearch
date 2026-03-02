@@ -13,7 +13,7 @@ import subtitleImport
 import textMapImport
 import questImport
 from import_utils import DEFAULT_BATCH_SIZE, executemany_batched, fast_import_pragmas
-from versioning import (
+from version_control import (
     ensure_version_schema,
     get_current_version,
     rebuild_version_catalog,
@@ -417,101 +417,98 @@ def main(
         print("Clearing breakpoints...")
         clear_breakpoints()
 
+    # 定义所有导入阶段
+    import_stages = [
+        "talks",
+        "avatars",
+        "npcs",
+        "manual_textmap",
+        "fetters",
+        "fetter_stories",
+        "quests",
+        "quest_briefs",
+        "chapters",
+        "load_voice_avatars",
+        "voices",
+        "readable",
+        "subtitles",
+        "textmap",
+        "version_catalog"
+    ]
+
+    # 一次性询问所有阶段是否跳过
+    skip_decisions = ask_all_stages_skip(import_stages)
+
     version = current_version or get_current_version()
     with fast_import_pragmas(conn, enabled=use_fast_pragmas):
-        # 跟踪是否已经选择不跳过某个阶段
-        # 如果有任何一个阶段选择了不跳过，则后续阶段不需要询问
-        no_skip_any = False
-
         # 执行各个阶段
-        skipped = _run_stage(stage_timer, "talks", importAllTalkItems, skip_asking=no_skip_any)
-        if not skipped:
-            no_skip_any = True
+        for stage in import_stages:
+            if skip_decisions[stage]:
+                print(f"Skipping {stage}...")
+                continue
 
-        skipped = _run_stage(stage_timer, "avatars", importAvatars, skip_asking=no_skip_any)
-        if not skipped:
-            no_skip_any = True
-
-        skipped = _run_stage(stage_timer, "npcs", importNPCs, skip_asking=no_skip_any)
-        if not skipped:
-            no_skip_any = True
-
-        skipped = _run_stage(stage_timer, "manual_textmap", importManualTextMap, skip_asking=no_skip_any)
-        if not skipped:
-            no_skip_any = True
-
-        skipped = _run_stage(stage_timer, "fetters", importFetters, skip_asking=no_skip_any)
-        if not skipped:
-            no_skip_any = True
-
-        skipped = _run_stage(stage_timer, "fetter_stories", importFetterStories, skip_asking=no_skip_any)
-        if not skipped:
-            no_skip_any = True
-
-        skipped = _run_stage(
-            stage_timer,
-            "quests",
-            importAllQuests,
-            current_version=version,
-            write_versions=False,
-            sync_delete=prune_missing,
-            skip_asking=no_skip_any,
-        )
-        if not skipped:
-            no_skip_any = True
-
-        skipped = _run_stage(stage_timer, "quest_briefs", importQuestBriefs, skip_asking=no_skip_any)
-        if not skipped:
-            no_skip_any = True
-
-        skipped = _run_stage(stage_timer, "chapters", importChapters, skip_asking=no_skip_any)
-        if not skipped:
-            no_skip_any = True
-
-        skipped = _run_stage(stage_timer, "load_voice_avatars", voiceItemImport.loadAvatars, skip_asking=no_skip_any)
-        if not skipped:
-            no_skip_any = True
-
-        skipped = _run_stage(stage_timer, "voices", voiceItemImport.importAllVoiceItems, reset=prune_missing, skip_asking=no_skip_any)
-        if not skipped:
-            no_skip_any = True
-
-        skipped = _run_stage(
-            stage_timer,
-            "readable",
-            readableImport.importReadable,
-            current_version=version,
-            write_versions=False,
-            prune_missing=prune_missing,
-            skip_asking=no_skip_any,
-        )
-        if not skipped:
-            no_skip_any = True
-
-        skipped = _run_stage(
-            stage_timer,
-            "subtitles",
-            subtitleImport.importSubtitles,
-            current_version=version,
-            prune_missing=prune_missing,
-            skip_asking=no_skip_any,
-        )
-        if not skipped:
-            no_skip_any = True
-
-        skipped = _run_stage(
-            stage_timer,
-            "textmap",
-            textMapImport.importAllTextMap,
-            current_version=version,
-            write_versions=False,
-            prune_missing=prune_missing,
-            skip_asking=no_skip_any,
-        )
-        if not skipped:
-            no_skip_any = True
-
-        _run_stage(stage_timer, "version_catalog", rebuild_version_catalog, skip_asking=no_skip_any)
+            if stage == "talks":
+                _run_stage(stage_timer, stage, importAllTalkItems, skip_asking=True)
+            elif stage == "avatars":
+                _run_stage(stage_timer, stage, importAvatars, skip_asking=True)
+            elif stage == "npcs":
+                _run_stage(stage_timer, stage, importNPCs, skip_asking=True)
+            elif stage == "manual_textmap":
+                _run_stage(stage_timer, stage, importManualTextMap, skip_asking=True)
+            elif stage == "fetters":
+                _run_stage(stage_timer, stage, importFetters, skip_asking=True)
+            elif stage == "fetter_stories":
+                _run_stage(stage_timer, stage, importFetterStories, skip_asking=True)
+            elif stage == "quests":
+                _run_stage(
+                    stage_timer,
+                    stage,
+                    importAllQuests,
+                    current_version=version,
+                    write_versions=False,
+                    sync_delete=prune_missing,
+                    skip_asking=True,
+                )
+            elif stage == "quest_briefs":
+                _run_stage(stage_timer, stage, importQuestBriefs, skip_asking=True)
+            elif stage == "chapters":
+                _run_stage(stage_timer, stage, importChapters, skip_asking=True)
+            elif stage == "load_voice_avatars":
+                _run_stage(stage_timer, stage, voiceItemImport.loadAvatars, skip_asking=True)
+            elif stage == "voices":
+                _run_stage(stage_timer, stage, voiceItemImport.importAllVoiceItems, reset=prune_missing, skip_asking=True)
+            elif stage == "readable":
+                _run_stage(
+                    stage_timer,
+                    stage,
+                    readableImport.importReadable,
+                    current_version=version,
+                    write_versions=False,
+                    prune_missing=prune_missing,
+                    skip_asking=True,
+                )
+            elif stage == "subtitles":
+                _run_stage(
+                    stage_timer,
+                    stage,
+                    subtitleImport.importSubtitles,
+                    current_version=version,
+                    prune_missing=prune_missing,
+                    write_versions=False,
+                    skip_asking=True,
+                )
+            elif stage == "textmap":
+                _run_stage(
+                    stage_timer,
+                    stage,
+                    textMapImport.importAllTextMap,
+                    current_version=version,
+                    write_versions=False,
+                    prune_missing=prune_missing,
+                    skip_asking=True,
+                )
+            elif stage == "version_catalog":
+                _run_stage(stage_timer, stage, rebuild_version_catalog, skip_asking=True)
     stage_timer.print_summary()
     print("Done!")
 
@@ -580,6 +577,45 @@ def get_next_pending_stage(stages):
     return None
 
 
+def ask_all_stages_skip(stages):
+    """一次性询问所有阶段是否跳过"""
+    skip_decisions = {}
+    print("\n=== 导入和历史回填阶段配置 ===")
+    print("请选择是否跳过以下阶段：")
+    print("(输入 y 跳过，n 执行，默认 n)")
+    print()
+
+    for stage in stages:
+        status = get_breakpoint_status(stage)
+        if status == 'completed':
+            prompt = f"{stage} (已完成，是否重新执行？) [n]: "
+        elif status == 'in_progress':
+            prompt = f"{stage} (执行中，是否继续？) [n]: "
+        else:
+            prompt = f"{stage} (未执行，是否跳过？) [n]: "
+
+        ans = input(prompt).strip().lower()
+        if status == 'completed':
+            # 已完成的阶段，输入y表示跳过（不重新执行）
+            skip_decisions[stage] = (ans == 'y')
+        else:
+            # 其他状态，输入y表示跳过
+            skip_decisions[stage] = (ans == 'y')
+
+    print()
+    print("=== 执行计划 ===")
+    for stage, skip in skip_decisions.items():
+        status = get_breakpoint_status(stage)
+        if status == 'completed':
+            action = "跳过（不重新执行）" if skip else "重新执行"
+        else:
+            action = "跳过" if skip else "执行"
+        print(f"{stage}: {action}")
+    print()
+
+    return skip_decisions
+
+
 def _get_head_commit(repo_path: str):
     try:
         proc = subprocess.run(
@@ -627,31 +663,7 @@ if __name__ == "__main__":
         action="store_true",
         help="when used with --quest-only, skip importing Talk",
     )
-    parser.add_argument("--history-backfill-only", "--history", action="store_true", help="only run history version backfill")
-    parser.add_argument(
-        "--history-backfill-textmap-only",
-        "--history-textmap",
-        action="store_true",
-        help="only run textMap history version backfill",
-    )
-    parser.add_argument(
-        "--history-backfill-quest-only",
-        "--history-quest",
-        action="store_true",
-        help="only run quest history version backfill",
-    )
-    parser.add_argument(
-        "--history-backfill-readable-only",
-        "--history-readable",
-        action="store_true",
-        help="only run readable history version backfill",
-    )
-    parser.add_argument(
-        "--history-backfill-subtitle-only",
-        "--history-subtitle",
-        action="store_true",
-        help="only run subtitle history version backfill",
-    )
+
     parser.add_argument("--remote-ref", "--remote", type=str, default="origin/master", help="target remote ref for diff")
     parser.add_argument(
         "--from-commit",
@@ -684,7 +696,7 @@ if __name__ == "__main__":
         action="store_true",
         help="disable temporary sqlite PRAGMA speedups during full import",
     )
-    parser.add_argument("--skip-history-backfill", "--skip-history", action="store_true", help="skip first-build history version backfill")
+    parser.add_argument("--skip-history-backfill", "--skip-history", action="store_true", help="skip history version backfill")
     parser.add_argument("--force", action="store_true", help="force replay all commits for version backfill")
     parser.add_argument(
         "--history-reset-only",
@@ -711,14 +723,7 @@ if __name__ == "__main__":
             print(f"[ERROR] failed to set db_version: {e}", file=sys.stderr)
             sys.exit(3)
 
-    history_mode_count = (
-        int(bool(args.history_backfill_only))
-        + int(bool(args.history_backfill_textmap_only))
-        + int(bool(args.history_backfill_quest_only))
-        + int(bool(args.history_backfill_readable_only))
-        + int(bool(args.history_backfill_subtitle_only))
-        + int(bool(args.history_reset_only))
-    )
+    history_mode_count = int(bool(args.history_reset_only))
     if history_mode_count > 1:
         print(
             "[ERROR] only one history-backfill mode can be selected at a time.",
@@ -765,85 +770,17 @@ if __name__ == "__main__":
     if profiler is not None:
         profiler.enable()
 
-    # 1) Run selected mode: history-only, diff update, or full import.
+    # 1) Run selected mode: diff update, or full import.
     try:
-        if args.history_backfill_quest_only:
+        if args.history_reset_only:
             try:
                 import history_backfill
 
-                target = args.to_commit or "HEAD"
-                history_backfill.backfill_quest_versions_from_history(
-                    target_commit=target,
-                    from_commit=args.from_commit or None,
-                    force=args.force,
-                    prune_missing=prune_missing,
-                )
-            except Exception as e:
-                print(f"[ERROR] quest history backfill failed: {e}", file=sys.stderr)
-                sys.exit(4)
-        elif args.history_backfill_readable_only:
-            try:
-                import history_backfill
-
-                target = args.to_commit or "HEAD"
-                history_backfill.backfill_readable_versions_from_history(
-                    target_commit=target,
-                    from_commit=args.from_commit or None,
-                    force=args.force,
-                    prune_missing=prune_missing,
-                )
-            except Exception as e:
-                print(f"[ERROR] readable history backfill failed: {e}", file=sys.stderr)
-                sys.exit(4)
-        elif args.history_backfill_subtitle_only:
-            try:
-                import history_backfill
-
-                target = args.to_commit or "HEAD"
-                history_backfill.backfill_subtitle_versions_from_history(
-                    target_commit=target,
-                    from_commit=args.from_commit or None,
-                    force=args.force,
-                    prune_missing=prune_missing,
-                )
-            except Exception as e:
-                print(f"[ERROR] subtitle history backfill failed: {e}", file=sys.stderr)
-                sys.exit(4)
-        elif args.history_reset_only:
-            try:
-                import history_backfill
-
+                # 直接执行历史重置，不需要询问
+                print(f"执行历史版本重置，范围: {args.history_reset_only}")
                 history_backfill.reset_history_version_marks(scope=args.history_reset_only)
             except Exception as e:
                 print(f"[ERROR] history version reset failed: {e}", file=sys.stderr)
-                sys.exit(4)
-        elif args.history_backfill_textmap_only:
-            try:
-                import history_backfill
-
-                target = args.to_commit or "HEAD"
-                history_backfill.backfill_textmap_versions_from_history(
-                    target_commit=target,
-                    from_commit=args.from_commit or None,
-                    force=args.force,
-                    prune_missing=prune_missing,
-                )
-            except Exception as e:
-                print(f"[ERROR] textMap history backfill failed: {e}", file=sys.stderr)
-                sys.exit(4)
-        elif args.history_backfill_only:
-            try:
-                import history_backfill
-
-                target = args.to_commit or "HEAD"
-                history_backfill.backfill_versions_from_history(
-                    target_commit=target,
-                    from_commit=args.from_commit or None,
-                    force=args.force,
-                    prune_missing=prune_missing,
-                )
-            except Exception as e:
-                print(f"[ERROR] history backfill failed: {e}", file=sys.stderr)
                 sys.exit(4)
         elif args.diff_update:
             try:
@@ -895,26 +832,112 @@ if __name__ == "__main__":
                 print(f"[ERROR] quest-only import failed: {e}", file=sys.stderr)
                 sys.exit(2)
         else:
-            head_commit = _get_head_commit(DATA_PATH)
-            if head_commit:
-                set_current_version(head_commit)
-            main(
-                current_version=get_current_version(),
-                prune_missing=prune_missing,
-                enable_stage_profile=args.profile,
-                use_fast_pragmas=not args.no_fast_import_pragmas,
-                clean_breakpoint=args.clean_breakpoint,
-            )
-            if head_commit and not args.skip_history_backfill:
+            # 询问是否跳过导入
+            skip_import = False
+            ans = input("是否跳过导入，直接开始历史回填？(y/n): ").strip().lower()
+            if ans == 'y':
+                skip_import = True
+                print("跳过导入，直接开始历史回填...")
+            else:
+                # 询问是否使用diffupdate
+                use_diffupdate = False
+                ans = input("是否使用diffupdate更新至最新commit？(y/n): ").strip().lower()
+                if ans == 'y':
+                    use_diffupdate = True
+                    print("使用diffupdate更新至最新commit...")
+                    try:
+                        import diffUpdate
+                        diffUpdate.run_diff_update(
+                            remote_ref=args.remote_ref,
+                            from_commit=args.from_commit or None,
+                            to_commit=args.to_commit or None,
+                            fetch_remote=not args.no_fetch,
+                            prune_missing=prune_missing,
+                        )
+                    except Exception as e:
+                        print(f"[ERROR] diff update failed: {e}", file=sys.stderr)
+                        sys.exit(2)
+                else:
+                    # 执行完整导入
+                    head_commit = _get_head_commit(DATA_PATH)
+                    if head_commit:
+                        set_current_version(head_commit)
+                    main(
+                        current_version=get_current_version(),
+                        prune_missing=prune_missing,
+                        enable_stage_profile=args.profile,
+                        use_fast_pragmas=not args.no_fast_import_pragmas,
+                        clean_breakpoint=args.clean_breakpoint,
+                    )
+
+            # 无论是否跳过导入，都询问是否执行历史回填
+            if not args.skip_history_backfill:
                 try:
                     import history_backfill
 
-                    history_backfill.backfill_versions_from_history(
-                        target_commit=head_commit,
-                        force=args.force,
-                        prune_missing=prune_missing,
-                        verbose=args.verbose,
-                    )
+                    # 询问是否执行历史回填各阶段
+                    history_stages = [
+                        "history_backfill_textmap",
+                        "history_backfill_readable",
+                        "history_backfill_subtitle",
+                        "history_backfill_quest"
+                    ]
+                    history_skip_decisions = ask_all_stages_skip(history_stages)
+
+                    # 执行选中的历史回填阶段
+                    head_commit = _get_head_commit(DATA_PATH)
+                    if not head_commit:
+                        print("[ERROR] 无法获取HEAD提交，无法执行历史回填。", file=sys.stderr)
+                    else:
+                        # 创建一个临时的StageTimer对象，用于历史回填阶段
+                        history_stage_timer = StageTimer(enabled=args.profile)
+
+                        if not history_skip_decisions["history_backfill_textmap"]:
+                            _run_stage(
+                                history_stage_timer,
+                                "history_backfill_textmap",
+                                history_backfill.backfill_textmap_versions_from_history,
+                                target_commit=head_commit,
+                                force=args.force,
+                                verbose=args.verbose,
+                                skip_asking=True
+                            )
+
+                        if not history_skip_decisions["history_backfill_readable"]:
+                            _run_stage(
+                                history_stage_timer,
+                                "history_backfill_readable",
+                                history_backfill.backfill_readable_versions_from_history,
+                                target_commit=head_commit,
+                                force=args.force,
+                                verbose=args.verbose,
+                                skip_asking=True
+                            )
+
+                        if not history_skip_decisions["history_backfill_subtitle"]:
+                            _run_stage(
+                                history_stage_timer,
+                                "history_backfill_subtitle",
+                                history_backfill.backfill_subtitle_versions_from_history,
+                                target_commit=head_commit,
+                                force=args.force,
+                                verbose=args.verbose,
+                                skip_asking=True
+                            )
+
+                        if not history_skip_decisions["history_backfill_quest"]:
+                            _run_stage(
+                                history_stage_timer,
+                                "history_backfill_quest",
+                                history_backfill.backfill_quest_versions_from_history,
+                                target_commit=head_commit,
+                                force=args.force,
+                                verbose=args.verbose,
+                                skip_asking=True
+                            )
+
+                        # 打印历史回填阶段的性能统计
+                        history_stage_timer.print_summary()
                 except Exception as e:
                     print(f"[ERROR] history backfill failed: {e}", file=sys.stderr)
                     sys.exit(4)

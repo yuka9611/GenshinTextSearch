@@ -5,7 +5,7 @@ from lightweight_progress import LightweightProgress
 
 from DBConfig import conn, DATA_PATH
 from import_utils import DEFAULT_BATCH_SIZE, executemany_batched
-from versioning import ensure_version_schema
+from version_control import ensure_version_schema
 
 
 avatarMappings = {}

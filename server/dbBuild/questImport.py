@@ -14,8 +14,8 @@ from quest_hash_map_utils import (
     refresh_quest_hash_map_for_talk_ids as _refresh_quest_hash_map_for_talk_ids,
 )
 from quest_utils import extract_quest_id, extract_quest_row, extract_quest_talk_ids
-from quest_version_utils import backfill_quest_created_version_from_textmap as _backfill_quest_created_version_from_textmap
-from versioning import get_current_version, get_or_create_version_id
+from version_control import backfill_quest_created_version_from_textmap as _backfill_quest_created_version_from_textmap
+from version_control import get_current_version, get_or_create_version_id, should_update_version
 
 
 def _print_skip_summary(title: str, skipped_files: list[str], sample_size: int = 10):
@@ -138,27 +138,20 @@ def importQuest(
         version = current_version or get_current_version()
         version_id = get_or_create_version_id(version)
     sql1 = (
-        "INSERT INTO quest(questId, titleTextMapHash, chapterId, created_version_id, updated_version_id) "
-        "VALUES (?,?,?,?,?) "
+        "INSERT INTO quest(questId, titleTextMapHash, chapterId, created_version_id) "
+        "VALUES (?,?,?,?) "
         "ON CONFLICT(questId) DO UPDATE SET "
         "titleTextMapHash=excluded.titleTextMapHash, "
         "chapterId=excluded.chapterId, "
         "created_version_id=CASE "
         "WHEN excluded.created_version_id IS NULL THEN quest.created_version_id "
         "WHEN quest.created_version_id IS NULL THEN excluded.created_version_id "
-        "WHEN excluded.created_version_id > quest.created_version_id THEN quest.created_version_id "
-        "ELSE excluded.created_version_id "
-        "END, "
-        "updated_version_id=CASE "
-        "WHEN excluded.updated_version_id IS NULL THEN COALESCE(quest.updated_version_id, excluded.updated_version_id) "
-        "WHEN quest.updated_version_id IS NULL THEN excluded.updated_version_id "
-        "WHEN quest.updated_version_id > excluded.updated_version_id THEN quest.updated_version_id "
-        "ELSE excluded.updated_version_id "
+        "WHEN excluded.created_version_id < quest.created_version_id THEN excluded.created_version_id "
+        "ELSE quest.created_version_id "
         "END "
         "WHERE "
         "NOT (quest.titleTextMapHash IS excluded.titleTextMapHash) "
         "OR NOT (quest.chapterId IS excluded.chapterId) "
-        "OR NOT (quest.updated_version_id IS excluded.updated_version_id) "
         "OR quest.created_version_id IS NULL"
     )
     sql2 = "INSERT OR IGNORE INTO questTalk(questId, talkId) VALUES (?,?)"
@@ -197,11 +190,45 @@ def importQuest(
         "SELECT dialogue_signature FROM quest_text_signature WHERE questId=?",
         (questId,),
     ).fetchone()
-    # 只根据dialogue_signature判断文本内容是否变更，不考虑titleTextMapHash
-    text_changed = (
+
+    # 检查dialogue_signature是否变更
+    dialogue_changed = (
         old_signature_row is None
         or old_signature_row[0] != new_signature
     )
+
+    # 检查titleTextMapHash对应内容是否变更
+    title_changed = False
+    if titleTextMapHash:
+        # 获取当前titleTextMapHash对应的内容
+        current_title_content = cursor.execute(
+            "SELECT content FROM textMap WHERE hash=? LIMIT 1",
+            (titleTextMapHash,)
+        ).fetchone()
+
+        # 获取旧的titleTextMapHash
+        old_title_hash_row = cursor.execute(
+            "SELECT titleTextMapHash FROM quest WHERE questId=?",
+            (questId,)
+        ).fetchone()
+
+        if old_title_hash_row and old_title_hash_row[0]:
+            # 获取旧的titleTextMapHash对应的内容
+            old_title_content = cursor.execute(
+                "SELECT content FROM textMap WHERE hash=? LIMIT 1",
+                (old_title_hash_row[0],)
+            ).fetchone()
+
+            # 比较内容是否变更
+            current_content = current_title_content[0] if current_title_content else None
+            old_content = old_title_content[0] if old_title_content else None
+            title_changed = current_content != old_content
+        else:
+            # 旧的titleTextMapHash不存在，视为变更
+            title_changed = True
+
+    # 文本内容变更包括dialogue变更或title变更
+    text_changed = dialogue_changed or title_changed
 
     old_talk_rows = cursor.execute(
         "SELECT talkId FROM questTalk WHERE questId=? ORDER BY talkId",
@@ -211,47 +238,26 @@ def importQuest(
     talk_links_changed = old_talk_ids != normalized_talk_ids
 
     old_version_row = cursor.execute(
-        "SELECT created_version_id, updated_version_id FROM quest WHERE questId=?",
+        "SELECT created_version_id FROM quest WHERE questId=?",
         (questId,),
     ).fetchone()
     is_new_quest = old_version_row is None
 
     old_created_version = old_version_row[0] if old_version_row else None
-    old_updated_version = old_version_row[1] if old_version_row else None
     created_version = old_created_version
-    
-    if not write_versions:
-        updated_version = old_updated_version
-    elif old_version_row is None:
-        # 新任务，使用当前版本
-        updated_version = version_id
-    elif text_changed:
-        # 文本内容变更，获取所含文本的最近更新时间作为quest的更新版本
-        # 查找与该quest相关的所有dialogue的最新更新版本
-        latest_version_row = cursor.execute(
-            """
-            SELECT MAX(tm.updated_version_id)
-            FROM questTalk qt
-            JOIN dialogue d ON d.talkId = qt.talkId
-            JOIN textMap tm ON tm.hash = d.textHash
-            WHERE qt.questId = ? AND tm.updated_version_id IS NOT NULL
-            """,
-            (questId,)
-        ).fetchone()
-        if latest_version_row and latest_version_row[0]:
-            updated_version = latest_version_row[0]
-        else:
-            # 如果没有找到相关文本的更新版本，使用当前版本
-            updated_version = version_id
-    else:
-        updated_version = old_updated_version
 
-    cursor.execute(sql1, (questId, titleTextMapHash, chapterId, created_version, updated_version))
+    # 版本预审查：只有当版本或内容发生变化时才执行SQL
+    created_version_changed = should_update_version(old_created_version, created_version, is_created=True)
+
+    if is_new_quest or text_changed or talk_links_changed or created_version_changed:
+        cursor.execute(sql1, (questId, titleTextMapHash, chapterId, created_version))
     if talk_links_changed:
         cursor.execute("DELETE FROM questTalk WHERE questId=?", (questId,))
         cursor.executemany(sql2, ((questId, talkId) for talkId in normalized_talk_ids))
 
     _upsert_quest_text_signature(cursor, questId, titleTextMapHash, new_signature)
+
+
 
     if own_cursor:
         cursor.close()
@@ -278,7 +284,7 @@ def importAllQuests(
     skipped_quest_files: list[str] = []
     missing_title_quests: list[str] = []
     no_talk_quests: list[str] = []
-    
+
     try:
         with LightweightProgress(len(files), desc="Quest files", unit="files") as pbar:
             for i, fileName in enumerate(files):
@@ -303,7 +309,7 @@ def importAllQuests(
                 # 批量删除，减少数据库操作
                 placeholders = ",".join(["?"] * len(imported_quest_ids))
                 params = tuple(imported_quest_ids)
-                
+
                 # 批量执行删除操作
                 cursor.execute(f"DELETE FROM quest WHERE questId NOT IN ({placeholders})", params)
                 cursor.execute(f"DELETE FROM questTalk WHERE questId NOT IN ({placeholders})", params)
@@ -332,7 +338,7 @@ def importAllQuests(
                 quest_ids=imported_quest_ids,
                 overwrite_existing=False,
             )
-        
+
         conn.commit()
     except Exception as e:
         print(f"Error in importAllQuests: {e}")
@@ -340,7 +346,7 @@ def importAllQuests(
         raise
     finally:
         cursor.close()
-    
+
     _print_skip_summary("quest", skipped_quest_files)
     _print_issue_summary("quest missing titleTextMapHash", missing_title_quests)
     _print_issue_summary("quest without talk ids", no_talk_quests)
@@ -529,7 +535,7 @@ def importAllTalkItems(
     talk_files: list[str] = []
     skipped_files: list[str] = []
     touched_talk_ids: set[int] = set()
-    
+
     # 预收集所有文件路径，减少I/O操作
     folders = sorted(os.listdir(talk_root))
     for folder in folders:
@@ -543,7 +549,7 @@ def importAllTalkItems(
 
     print(f"importing talk files ({len(talk_files)})")
     cursor = conn.cursor()
-    
+
     # 批量处理优化：减少事务提交次数
     try:
         with LightweightProgress(len(talk_files), desc="Talk files", unit="files") as pbar:
@@ -559,7 +565,7 @@ def importAllTalkItems(
                     touched_talk_collector=touched_talk_ids,
                 )
                 pbar.update()
-        
+
         # 批量更新哈希映射，减少数据库操作
         if touched_talk_ids:
             _refresh_quest_hash_map_for_talk_ids(
@@ -567,7 +573,7 @@ def importAllTalkItems(
                 touched_talk_ids,
                 batch_size=batch_size,
             )
-        
+
         if commit:
             conn.commit()
     except Exception as e:
@@ -577,7 +583,7 @@ def importAllTalkItems(
         raise
     finally:
         cursor.close()
-    
+
     _print_skip_summary("talk", skipped_files)
     return imported_rows
 
