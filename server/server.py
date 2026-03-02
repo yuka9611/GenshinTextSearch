@@ -1,43 +1,11 @@
 import os
-import sys
 import time
 import threading
 import webbrowser
 
 from flask import Flask, jsonify, request, send_file, make_response, send_from_directory
 
-
-def resource_path(rel_path: str) -> str:
-    """
-    兼容 PyInstaller 和源码运行的资源路径
-    - 打包后资源在 sys._MEIPASS
-    - 源码运行时以项目根目录为基准（server/..）
-    """
-    if hasattr(sys, "_MEIPASS"):
-        base_path = sys._MEIPASS  # type: ignore
-    else:
-        base_path = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
-    return os.path.join(base_path, rel_path)
-
-
-def buildResponse(data=None, code=200, msg="ok"):
-    return jsonify({"data": data, "code": code, "msg": msg})
-
-
-def _has_non_empty(value) -> bool:
-    return not (value is None or str(value).strip() == "")
-
-
-def _to_int_or_default(value, default: int) -> int:
-    try:
-        return int(value)
-    except Exception:
-        return default
-
-
-def _to_positive_int_or_default(value, default: int) -> int:
-    result = _to_int_or_default(value, default)
-    return result if result > 0 else default
+from utils.helpers import resource_path, buildResponse, _has_non_empty, _to_int_or_default, _to_positive_int_or_default
 
 
 def create_app() -> Flask:
@@ -49,467 +17,10 @@ def create_app() -> Flask:
     # 延迟导入 CORS（减少顶层 import）
     from flask_cors import CORS
     CORS(app)
-    
+
     # 导入并注册API蓝图
     from controllers.api import api_bp
     app.register_blueprint(api_bp)
-
-    # ----------------------------
-    # Startup / Settings APIs
-    # ----------------------------
-    @app.route("/api/startupStatus")
-    def startupStatus():
-        import config
-        return buildResponse({
-            "assetDirValid": config.isAssetDirValid(),
-            "assetDir": config.getAssetDir()
-        })
-
-    @app.route("/api/setAssetDir", methods=["POST"])
-    def setAssetDir():
-        import config
-        import languagePackReader
-
-        assetDir = request.json.get("assetDir")
-        if not assetDir or not os.path.isdir(assetDir):
-            return buildResponse(code=400, msg="Invalid directory")
-
-        config.setAssetDir(assetDir)
-        config.saveConfig()
-
-        # 重新加载语音包
-        languagePackReader.reloadLangPackages()
-
-        return buildResponse({
-            "assetDir": assetDir,
-            "assetDirValid": config.isAssetDirValid()
-        })
-
-    @app.route("/api/pickAssetDir", methods=["POST"])
-    def pickAssetDir():
-        import controllers
-        import config
-        import languagePackReader
-
-        picked = controllers.pickAssetDirViaDialog()
-        if not picked:
-            return buildResponse({
-                "cancel": True,
-                "assetDir": config.getAssetDir(),
-                "assetDirValid": config.isAssetDirValid()
-            })
-
-        if not os.path.isdir(picked):
-            return buildResponse(code=400, msg="Invalid directory")
-
-        config.setAssetDir(picked)
-        config.saveConfig()
-        languagePackReader.reloadLangPackages()
-
-        return buildResponse({
-            "cancel": False,
-            "assetDir": picked,
-            "assetDirValid": config.isAssetDirValid()
-        })
-
-    # ----------------------------
-    # Existing APIs
-    # ----------------------------
-    @app.route("/api/getImportedTextLanguages")
-    def getImportedTextLanguages():
-        import controllers
-        return buildResponse(controllers.getImportedTextMapLangs())
-
-    @app.route("/api/getImportedVoiceLanguages")
-    def getImportedVoiceLanguages():
-        import controllers
-        return buildResponse(controllers.getLoadedVoicePacks())
-
-    @app.route("/api/getAvailableVersions")
-    def getAvailableVersions():
-        import controllers
-        return buildResponse(controllers.getAvailableVersions())
-
-    @app.route("/api/keywordQuery", methods=["POST"])
-    def keywordQuery():
-        import controllers
-
-        langCode = int(request.json["langCode"])
-        keyword: str = request.json["keyword"]
-        speaker = request.json.get("speaker")
-        createdVersion = request.json.get("createdVersion")
-        updatedVersion = request.json.get("updatedVersion")
-        page = request.json.get("page", 1)
-        pageSize = request.json.get("pageSize", 50)
-        voiceFilter = request.json.get("voiceFilter", "all")
-
-        page = _to_positive_int_or_default(page, 1)
-        pageSize = _to_positive_int_or_default(pageSize, 50)
-
-        if voiceFilter not in ("all", "with", "without"):
-            voiceFilter = "all"
-
-        has_keyword = keyword.strip() != ""
-        has_speaker = _has_non_empty(speaker)
-        has_created = _has_non_empty(createdVersion)
-        has_updated = _has_non_empty(updatedVersion)
-        if not has_keyword and not has_speaker and not has_created and not has_updated:
-            return buildResponse({
-                "contents": [],
-                "total": 0,
-                "page": page,
-                "pageSize": pageSize,
-                "time": 0
-            })
-
-        start = time.time()
-        contents, total = controllers.getTranslateObj(
-            keyword,
-            langCode,
-            speaker,
-            page=page,
-            page_size=pageSize,
-            voice_filter=voiceFilter,
-            created_version=createdVersion,
-            updated_version=updatedVersion,
-        )
-        end = time.time()
-
-        return buildResponse({
-            "contents": contents,
-            "total": total,
-            "page": page,
-            "pageSize": pageSize,
-            "time": (end - start) * 1000
-        })
-
-    @app.route("/api/getVoiceOver", methods=["POST"])
-    def getVoiceOver():
-        import controllers
-
-        try:
-            langCode = int(request.json["langCode"])
-        except Exception:
-            return buildResponse(code=400, msg="Invalid langCode")
-
-        voicePath = request.json["voicePath"]
-        wemStream = controllers.getVoiceBinStream(voicePath, langCode)
-
-        if wemStream is None:
-            resp = make_response("Audio File Not Found")
-            resp.headers["Access-Control-Expose-Headers"] = "Error"
-            resp.headers["Error"] = "True"
-            return resp
-
-        return send_file(
-            wemStream,
-            download_name=os.path.basename(voicePath),
-            mimetype="application/octet-stream"
-        )
-
-    @app.route("/api/getTalkFromHash", methods=["POST"])
-    def getTalkFromHash():
-        import controllers
-
-        textHash: int = request.json["textHash"]
-        searchLang = request.json.get("searchLang")
-        if searchLang:
-            searchLang = int(searchLang)
-
-        try:
-            start = time.time()
-            contents = controllers.getTalkFromHash(textHash, searchLang)
-            end = time.time()
-        except Exception as e:
-            return buildResponse(code=114, msg=str(e))
-
-        return buildResponse({
-            "contents": contents,
-            "time": (end - start) * 1000
-        })
-
-    @app.route("/api/getSubtitleContext", methods=["POST"])
-    def getSubtitleContext():
-        import controllers
-
-        fileName = request.json.get("fileName")
-        subtitleId = request.json.get("subtitleId")
-        searchLang = request.json.get("searchLang")
-        if searchLang:
-            searchLang = int(searchLang)
-        if subtitleId is not None and str(subtitleId).strip() != "":
-            subtitleId = int(subtitleId)
-        else:
-            subtitleId = None
-
-        start = time.time()
-        contents = controllers.getSubtitleContext(fileName, subtitleId, searchLang)
-        end = time.time()
-
-        return buildResponse({
-            "contents": contents,
-            "time": (end - start) * 1000
-        })
-
-    @app.route("/api/nameSearch", methods=["POST"])
-    def nameSearch():
-        import controllers
-
-        langCode = int(request.json["langCode"])
-        keyword: str = request.json.get("keyword", "")
-        createdVersion = request.json.get("createdVersion")
-        updatedVersion = request.json.get("updatedVersion")
-
-        has_keyword = keyword.strip() != ""
-        has_created = _has_non_empty(createdVersion)
-        has_updated = _has_non_empty(updatedVersion)
-        if not has_keyword and not has_created and not has_updated:
-            return buildResponse({
-                "contents": {
-                    "quests": [],
-                    "readables": []
-                },
-                "time": 0
-            })
-
-        start = time.time()
-        contents = controllers.searchNameEntries(
-            keyword,
-            langCode,
-            created_version=createdVersion,
-            updated_version=updatedVersion,
-        )
-        end = time.time()
-
-        return buildResponse({
-            "contents": contents,
-            "time": (end - start) * 1000
-        })
-
-    @app.route("/api/avatarSearch", methods=["POST"])
-    def avatarSearch():
-        import controllers
-
-        langCode = int(request.json["langCode"])
-        keyword: str = request.json["keyword"]
-
-        if keyword.strip() == "":
-            return buildResponse({
-                "avatars": []
-            })
-
-        start = time.time()
-        contents = controllers.searchAvatarEntries(keyword, langCode)
-        end = time.time()
-
-        return buildResponse({
-            "contents": contents,
-            "time": (end - start) * 1000
-        })
-
-    @app.route("/api/avatarVoice", methods=["POST"])
-    def avatarVoice():
-        import controllers
-
-        avatarId = request.json.get("avatarId")
-        searchLang = request.json.get("searchLang")
-        if searchLang:
-            searchLang = int(searchLang)
-
-        if avatarId is None:
-            return buildResponse(code=400, msg="avatarId is required")
-
-        avatarId = int(avatarId)
-
-        start = time.time()
-        contents = controllers.getAvatarVoices(avatarId, searchLang)
-        end = time.time()
-
-        return buildResponse({
-            "contents": contents,
-            "time": (end - start) * 1000
-        })
-
-    @app.route("/api/avatarVoiceSearch", methods=["POST"])
-    def avatarVoiceSearch():
-        import controllers
-
-        titleKeyword = request.json.get("titleKeyword", "")
-        createdVersion = request.json.get("createdVersion")
-        updatedVersion = request.json.get("updatedVersion")
-        searchLang = request.json.get("searchLang")
-        if searchLang:
-            searchLang = int(searchLang)
-
-        has_title = str(titleKeyword).strip() != ""
-        has_created = _has_non_empty(createdVersion)
-        has_updated = _has_non_empty(updatedVersion)
-        if not has_title and not has_created and not has_updated:
-            return buildResponse({
-                "contents": {
-                    "voices": []
-                },
-                "time": 0
-            })
-
-        start = time.time()
-        contents = controllers.searchAvatarVoicesByFilters(
-            title_keyword=titleKeyword,
-            searchLang=searchLang,
-            created_version=createdVersion,
-            updated_version=updatedVersion,
-        )
-        end = time.time()
-
-        return buildResponse({
-            "contents": contents,
-            "time": (end - start) * 1000
-        })
-
-    @app.route("/api/avatarStory", methods=["POST"])
-    def avatarStory():
-        import controllers
-
-        avatarId = request.json.get("avatarId")
-        searchLang = request.json.get("searchLang")
-        if searchLang:
-            searchLang = int(searchLang)
-
-        if avatarId is None:
-            return buildResponse(code=400, msg="avatarId is required")
-
-        avatarId = int(avatarId)
-
-        start = time.time()
-        contents = controllers.getAvatarStories(avatarId, searchLang)
-        end = time.time()
-
-        return buildResponse({
-            "contents": contents,
-            "time": (end - start) * 1000
-        })
-
-    @app.route("/api/avatarStorySearch", methods=["POST"])
-    def avatarStorySearch():
-        import controllers
-
-        titleKeyword = request.json.get("titleKeyword", "")
-        createdVersion = request.json.get("createdVersion")
-        updatedVersion = request.json.get("updatedVersion")
-        searchLang = request.json.get("searchLang")
-        if searchLang:
-            searchLang = int(searchLang)
-
-        has_title = str(titleKeyword).strip() != ""
-        has_created = _has_non_empty(createdVersion)
-        has_updated = _has_non_empty(updatedVersion)
-        if not has_title and not has_created and not has_updated:
-            return buildResponse({
-                "contents": {
-                    "stories": []
-                },
-                "time": 0
-            })
-
-        start = time.time()
-        contents = controllers.searchAvatarStoriesByFilters(
-            title_keyword=titleKeyword,
-            searchLang=searchLang,
-            created_version=createdVersion,
-            updated_version=updatedVersion,
-        )
-        end = time.time()
-
-        return buildResponse({
-            "contents": contents,
-            "time": (end - start) * 1000
-        })
-
-    @app.route("/api/getReadableContent", methods=["POST"])
-    def getReadableContent():
-        import controllers
-
-        readableId = request.json.get("readableId")
-        fileName = request.json.get("fileName")
-        searchLang = request.json.get("searchLang")
-        if searchLang:
-            searchLang = int(searchLang)
-        if readableId is not None:
-            readableId = int(readableId)
-
-        start = time.time()
-        contents = controllers.getReadableContent(readableId, fileName, searchLang)
-        end = time.time()
-
-        return buildResponse({
-            "contents": contents,
-            "time": (end - start) * 1000
-        })
-
-    @app.route("/api/getQuestDialogues", methods=["POST"])
-    def getQuestDialogues():
-        import controllers
-
-        questId = request.json.get("questId")
-        searchLang = request.json.get("searchLang")
-        page = request.json.get("page", 1)
-        pageSize = request.json.get("pageSize", 200)
-        if searchLang:
-            searchLang = int(searchLang)
-
-        if questId is None:
-            return buildResponse(code=400, msg="questId is required")
-
-        questId = int(questId)
-        try:
-            page = int(page)
-        except Exception:
-            page = 1
-        try:
-            pageSize = int(pageSize)
-        except Exception:
-            pageSize = 200
-        if page < 1:
-            page = 1
-        if pageSize < 1:
-            pageSize = 200
-
-        start = time.time()
-        contents, total = controllers.getQuestDialogues(questId, searchLang, page, pageSize)
-        end = time.time()
-
-        return buildResponse({
-            "contents": contents,
-            "total": total,
-            "page": page,
-            "pageSize": pageSize,
-            "time": (end - start) * 1000
-        })
-
-    @app.route("/api/saveSettings", methods=["POST"])
-    def saveSettings():
-        import controllers
-
-        newConfig = request.json["config"]
-        if "defaultSearchLanguage" in newConfig:
-            controllers.setDefaultSearchLanguage(newConfig["defaultSearchLanguage"])
-
-        if "resultLanguages" in newConfig:
-            controllers.setResultLanguages(newConfig["resultLanguages"])
-
-        if "sourceLanguage" in newConfig:
-            controllers.setSourceLanguage(newConfig["sourceLanguage"])
-
-        if "isMale" in newConfig:
-            controllers.setIsMale(newConfig["isMale"])
-
-        controllers.saveConfig()
-        return buildResponse(controllers.getConfig())
-
-    @app.route("/api/getSettings")
-    def getConfigApi():
-        import controllers
-        return buildResponse(controllers.getConfig())
 
     # ----------------------------
     # Static frontend (webui/dist)
@@ -551,6 +62,65 @@ def maybe_open_browser(url: str):
 
 
 if __name__ == "__main__":
+    # 检查游戏目录是否存在且有效
+    import config
+    # 导入缓存模块，在启动时刷新缓存
+    from utils.cache import search_cache
+    # 递增缓存版本号，确保修复bug后缓存自动刷新
+    search_cache.increment_version()
+
+    # 如果没有游戏目录或目录无效，弹出提示框让用户选择
+    if not config.getAssetDir() or not config.isAssetDirValid():
+        # 尝试导入tkinter和controllers模块
+        try:
+            import tkinter as tk
+            from tkinter import messagebox
+            import importlib.util
+            import os
+            import sys
+
+            # 动态加载controllers.py文件
+            server_dir = os.path.dirname(os.path.abspath(__file__))
+            controllers_path = os.path.join(server_dir, 'controllers.py')
+            spec = importlib.util.spec_from_file_location('controllers_module', controllers_path)
+            if spec and spec.loader:
+                controllers_module = importlib.util.module_from_spec(spec)
+                spec.loader.exec_module(controllers_module)
+            else:
+                # 如果加载失败，尝试直接导入
+                sys.path.insert(0, server_dir)
+                import controllers as controllers_module
+                sys.path.pop(0)
+
+            # 询问用户是否选择游戏目录
+            root = tk.Tk()
+            root.withdraw()
+            result = messagebox.askyesno("提示", "未找到有效的原神资源目录，是否现在选择？")
+            root.destroy()
+
+            if result:
+                # 弹出目录选择对话框
+                try:
+                    picked = controllers_module.pickAssetDirViaDialog() # type: ignore
+                    if picked:
+                        config.setAssetDir(picked)
+                        config.saveConfig()
+                        # 再次检查目录是否有效
+                        if not config.isAssetDirValid():
+                            root = tk.Tk()
+                            root.withdraw()
+                            messagebox.showerror("错误", "所选路径不是有效的原神资源目录！\n请在设置页面重新选择。")
+                            root.destroy()
+                except Exception:
+                    # 如果pickAssetDirViaDialog调用失败，显示错误信息
+                    root = tk.Tk()
+                    root.withdraw()
+                    messagebox.showerror("错误", "无法打开目录选择对话框！\n请在设置页面手动选择游戏目录。")
+                    root.destroy()
+        except Exception:
+            # 如果导入或操作失败，忽略错误
+            pass
+
     app = create_app()
     maybe_open_browser("http://127.0.0.1:5000/")
     # 桌面发行版建议只监听本机
