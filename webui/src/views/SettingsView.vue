@@ -10,13 +10,13 @@
 
     <el-form :label-width="120" label-position="left">
       <el-form-item label="默认搜索语言">
-        <el-select v-model="selectedInputLanguage" placeholder="Select" class="languageSelector">
+        <el-select v-model="selectedInputLanguage" placeholder="选择语言" class="languageSelector">
           <el-option v-for="(v, k) in supportedInputLanguage" :label="v" :value="k" :key="k" />
         </el-select>
       </el-form-item>
 
       <el-form-item label="来源语言">
-        <el-select v-model="selectedSourceLanguage" placeholder="Select" class="languageSelector">
+        <el-select v-model="selectedSourceLanguage" placeholder="选择语言" class="languageSelector">
           <el-option v-for="(v, k) in supportedInputLanguage" :label="v" :value="k" :key="k" />
         </el-select>
       </el-form-item>
@@ -99,10 +99,7 @@ import global from "@/global/global"
 import api from "@/api/basicInfo"
 import { computed, onBeforeMount, ref } from "vue"
 import { ElMessage } from "element-plus"
-
-const selectedInputLanguage = ref(global.config.defaultSearchLanguage + "")
-const selectedSourceLanguage = ref(global.config.sourceLanguage + "")
-const supportedInputLanguage = ref({})
+import useLanguage from "@/composables/useLanguage"
 
 const twinList = ref([
   { value: false, label: "荧" },
@@ -117,6 +114,17 @@ const transferComponentValue = ref([])
 const picking = ref(false)
 const refreshingVoice = ref(false)
 
+// 使用语言处理组合式API
+const {
+  selectedInputLanguage,
+  selectedSourceLanguage: selectedSourceLanguageRef,
+  supportedInputLanguage,
+  loadLanguages
+} = useLanguage()
+
+// 由于SettingsView需要同时处理输入语言和源语言，我们需要单独处理源语言
+const selectedSourceLanguage = ref(global.config.sourceLanguage + "")
+
 // ✅ 用全局 config 的状态（后端 getConfig() / startupStatus 会带）
 const assetDirValid = ref(!!global.config.assetDirValid)
 
@@ -129,10 +137,25 @@ const voiceTagList = computed(() => {
 })
 
 onBeforeMount(async () => {
-  supportedInputLanguage.value = global.languages
+  await loadLanguages()
+  // 获取完整的配置
+  try {
+    const configResp = await api.getConfig()
+    if (configResp.code === 200) {
+      // 更新全局配置
+      Object.assign(global.config, configResp.data)
+      // 更新本地状态
+      selectedSourceLanguage.value = global.config.sourceLanguage + ""
+      selectedTwin.value = global.config.isMale
+      assetDirValid.value = !!global.config.assetDirValid
+    }
+  } catch (e) {
+    console.error("获取配置失败:", e)
+  }
+  const languages = supportedInputLanguage.value
 
   // transfer 语言列表
-  for (const [languageCode, languageName] of Object.entries(global.languages)) {
+  for (const [languageCode, languageName] of Object.entries(languages)) {
     transferComponentData.value.push({
       key: languageCode,
       label: languageName,
@@ -209,25 +232,36 @@ const pickDir = async () => {
 }
 
 const save = async () => {
-  let newConfig = (await api.saveConfig(
-    transferComponentValue.value,
-    selectedInputLanguage.value,
-    selectedSourceLanguage.value,
-    selectedTwin.value
-  )).json
+  try {
+    const response = await api.saveConfig(
+      transferComponentValue.value,
+      selectedInputLanguage.value,
+      selectedSourceLanguage.value,
+      selectedTwin.value
+    )
+    
+    if (response.json) {
+      const newConfig = response.json
+      
+      global.config.resultLanguages = newConfig.resultLanguages
+      global.config.defaultSearchLanguage = newConfig.defaultSearchLanguage
+      global.config.sourceLanguage = newConfig.sourceLanguage
+      global.config.isMale = newConfig.isMale
 
-  global.config.resultLanguages = newConfig.resultLanguages
-  global.config.defaultSearchLanguage = newConfig.defaultSearchLanguage
-  global.config.sourceLanguage = newConfig.sourceLanguage
-  global.config.isMale = newConfig.isMale
+      // 后端新版 getConfig() 会带 assetDirValid
+      if (typeof newConfig.assetDirValid !== "undefined") {
+        global.config.assetDirValid = !!newConfig.assetDirValid
+        assetDirValid.value = !!newConfig.assetDirValid
+      }
 
-  // 后端新版 getConfig() 会带 assetDirValid
-  if (typeof newConfig.assetDirValid !== "undefined") {
-    global.config.assetDirValid = !!newConfig.assetDirValid
-    assetDirValid.value = !!newConfig.assetDirValid
+      ElMessage({ type: "success", message: "设置已保存" })
+    } else {
+      ElMessage({ type: "error", message: "保存失败：返回数据格式错误" })
+    }
+  } catch (error) {
+    console.error("保存配置失败:", error)
+    ElMessage({ type: "error", message: "保存失败：网络错误" })
   }
-
-  ElMessage({ type: "success", message: "设置已保存" })
 }
 </script>
 

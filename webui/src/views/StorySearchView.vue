@@ -1,17 +1,43 @@
 <script setup>
-import { onBeforeMount, ref, computed } from 'vue';
+import { onBeforeMount, ref, computed, watch } from 'vue';
 import { Search } from '@element-plus/icons-vue';
 import global from "@/global/global";
 import api from "@/api/keywordQuery";
 import basicInfoApi from "@/api/basicInfo";
 import TranslateDisplay from "@/components/ResultEntry.vue";
+import useLanguage from "@/composables/useLanguage";
+import useVersion from "@/composables/useVersion";
+import useSearchCommon from "@/composables/useSearchCommon";
 
-const keyword = ref("")
-const selectedInputLanguage = ref(global.config.defaultSearchLanguage + '')
-const supportedInputLanguage = ref({})
-const searchSummary = ref("")
+// 使用语言处理组合式API
+const {
+  selectedInputLanguage,
+  supportedInputLanguage,
+  loadLanguages
+} = useLanguage()
+
+// 使用版本处理组合式API
+const {
+  versionOptions,
+  loadVersionOptions
+} = useVersion()
+
+// 使用搜索公共组合式API
+const {
+  keyword,
+  keywordLast,
+  searchSummary,
+  isLoading,
+  createdVersionFilter,
+  updatedVersionFilter,
+  normalizeText,
+  normalizeVersion,
+  getNormalizedEntryVersion,
+  isSameCreatedUpdatedVersion,
+  setupVersionWatchers
+} = useSearchCommon()
+
 const storySummary = ref("")
-
 const avatarResults = ref([])
 const storyEntries = ref([])
 const globalStoryEntries = ref([])
@@ -19,38 +45,11 @@ const useGlobalStoryEntries = ref(false)
 const selectedAvatar = ref(null)
 const loadingStories = ref(false)
 const textFilter = ref("")
-const createdVersionFilter = ref("")
-const updatedVersionFilter = ref("")
-const versionOptions = ref([])
 
 onBeforeMount(async () => {
-    supportedInputLanguage.value = global.languages
-    try {
-        const ans = await basicInfoApi.getAvailableVersions()
-        versionOptions.value = ans.json || []
-    } catch (_) {
-        versionOptions.value = []
-    }
+    await loadLanguages()
+    await loadVersionOptions()
 })
-
-const normalizeText = (value) => {
-    if (!value) return ""
-    return String(value).trim().toLowerCase()
-}
-
-const normalizeVersion = (value) => normalizeText(value)
-
-const getNormalizedEntryVersion = (entry, kind) => {
-    if (kind === "created") return normalizeVersion(entry.createdVersion || entry.createdVersionRaw || "")
-    return normalizeVersion(entry.updatedVersion || entry.updatedVersionRaw || "")
-}
-
-const isSameCreatedUpdatedVersion = (entry) => {
-    const createdVersion = getNormalizedEntryVersion(entry, "created")
-    const updatedVersion = getNormalizedEntryVersion(entry, "updated")
-    if (!createdVersion || !updatedVersion) return false
-    return createdVersion === updatedVersion
-}
 
 const filteredStories = computed(() => {
     const text = normalizeText(textFilter.value)
@@ -201,6 +200,9 @@ const onAvatarClicked = async (avatar) => {
         loadingStories.value = false
     }
 }
+
+// 设置版本变化监听
+setupVersionWatchers(onSearchClicked)
 </script>
 
 <template>
@@ -220,7 +222,7 @@ const onAvatarClicked = async (avatar) => {
                 clearable
             >
                 <template #prepend>
-                    <el-select v-model="selectedInputLanguage" placeholder="Select" class="languageSelector">
+                    <el-select v-model="selectedInputLanguage" placeholder="选择语言" class="languageSelector">
                         <el-option v-for="(v, k) in supportedInputLanguage" :label="v" :value="k" :key="k" />
                     </el-select>
                 </template>

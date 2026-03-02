@@ -29,7 +29,8 @@ const canOpenDetail = () => {
     return Boolean(
         props.translateObj.isTalk ||
         props.translateObj.isSubtitle ||
-        props.translateObj.viewAsTextHash
+        props.translateObj.viewAsTextHash ||
+        props.translateObj.isReadable
     )
 }
 
@@ -78,6 +79,16 @@ const gotoTalk = () => {
         }
         if (props.translateObj.subtitleId) {
             query.subtitleId = props.translateObj.subtitleId
+        }
+        router.push({ path: "/talk", query })
+        return
+    }
+    if (props.translateObj.isReadable) {
+        const query = {
+            readableId: props.translateObj.readableId,
+            fileName: props.translateObj.fileName,
+            keyword: props.keyword,
+            searchLang: props.searchLang,
         }
         router.push({ path: "/talk", query })
         return
@@ -207,7 +218,7 @@ const showUpdatedVersionTag = () => {
 }
 
 .copyButton {
-    margin-left: auto;
+    margin-left: 8px;
     vertical-align: middle;
     transition: all 0.3s ease;
 }
@@ -277,16 +288,16 @@ const showUpdatedVersionTag = () => {
         padding: 12px;
         margin-bottom: 10px;
     }
-    
+
     .info {
         flex-wrap: wrap;
         gap: 6px;
     }
-    
+
     .copyButton {
         margin-left: 0;
     }
-    
+
     .versionTags {
         margin: 8px 0;
     }

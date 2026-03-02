@@ -1,66 +1,51 @@
-﻿<script setup>
-import { onBeforeMount, ref, computed } from 'vue'
+<script setup>
+import { onBeforeMount, ref, computed, watch } from 'vue'
 import { Search } from '@element-plus/icons-vue'
 import { useRouter } from 'vue-router'
 import global from '@/global/global'
 import api from '@/api/keywordQuery'
 import basicInfoApi from '@/api/basicInfo'
 import StylizedText from '@/components/StylizedText.vue'
+import useLanguage from '@/composables/useLanguage'
+import useVersion from '@/composables/useVersion'
+import useSearchCommon from '@/composables/useSearchCommon'
 
 const router = useRouter()
-const keyword = ref('')
-const keywordLast = ref('')
-const selectedInputLanguage = ref(global.config.defaultSearchLanguage + '')
-const supportedInputLanguage = ref({})
-const searchSummary = ref('')
+
+// 使用语言处理组合式API
+const {
+  selectedInputLanguage,
+  supportedInputLanguage,
+  loadLanguages
+} = useLanguage()
+
+// 使用版本处理组合式API
+const {
+  versionOptions,
+  loadVersionOptions
+} = useVersion()
+
+// 使用搜索公共组合式API
+const {
+  keyword,
+  keywordLast,
+  searchSummary,
+  isLoading,
+  createdVersionFilter,
+  updatedVersionFilter,
+  matchVersionFilter,
+  displayVersion,
+  showUpdatedVersionTag,
+  setupVersionWatchers
+} = useSearchCommon()
 
 const questResults = ref([])
 const readableResults = ref([])
-const createdVersionFilter = ref('')
-const updatedVersionFilter = ref('')
-const versionOptions = ref([])
 
 onBeforeMount(async () => {
-    supportedInputLanguage.value = global.languages
-    try {
-        const ans = await basicInfoApi.getAvailableVersions()
-        versionOptions.value = ans.json || []
-    } catch (_) {
-        versionOptions.value = []
-    }
+    await loadLanguages()
+    await loadVersionOptions()
 })
-
-const normalizeText = (value) => {
-    if (!value) return ''
-    return String(value).trim().toLowerCase()
-}
-
-const normalizeVersion = (value) => normalizeText(value)
-
-const getNormalizedEntryVersion = (entry, kind) => {
-    if (kind === 'created') return normalizeVersion(entry.createdVersion || entry.createdVersionRaw || '')
-    return normalizeVersion(entry.updatedVersion || entry.updatedVersionRaw || '')
-}
-
-const isSameCreatedUpdatedVersion = (entry) => {
-    const createdValue = getNormalizedEntryVersion(entry, 'created')
-    const updatedValue = getNormalizedEntryVersion(entry, 'updated')
-    if (!createdValue || !updatedValue) return false
-    return createdValue === updatedValue
-}
-
-const matchVersionFilter = (entry) => {
-    const createdFilter = normalizeVersion(createdVersionFilter.value)
-    const updatedFilter = normalizeVersion(updatedVersionFilter.value)
-    const createdValue = getNormalizedEntryVersion(entry, 'created')
-    const updatedValue = getNormalizedEntryVersion(entry, 'updated')
-    if (createdFilter && !createdValue.includes(createdFilter)) return false
-    if (updatedFilter) {
-        if (!updatedValue.includes(updatedFilter)) return false
-        if (isSameCreatedUpdatedVersion(entry)) return false
-    }
-    return true
-}
 
 const filteredQuestResults = computed(() => {
     return questResults.value.filter(matchVersionFilter)
@@ -69,15 +54,6 @@ const filteredQuestResults = computed(() => {
 const filteredReadableResults = computed(() => {
     return readableResults.value.filter(matchVersionFilter)
 })
-
-const displayVersion = (entry, kind) => {
-    if (kind === 'created') return entry.createdVersion || entry.createdVersionRaw || '未知'
-    return entry.updatedVersion || entry.updatedVersionRaw || '未知'
-}
-
-const showUpdatedVersionTag = (entry) => {
-    return displayVersion(entry, 'created') !== displayVersion(entry, 'updated')
-}
 
 const onSearchClicked = async () => {
     const keywordText = keyword.value.trim()
@@ -110,6 +86,9 @@ const onSearchClicked = async () => {
         searchSummary.value = `查询耗时: ${ans.time.toFixed(2)}ms，任务 ${questCount} 条，阅读物 ${readableCount} 条`
     }
 }
+
+// 设置版本变化监听
+setupVersionWatchers(onSearchClicked)
 
 const gotoQuest = (questId) => {
     router.push({
@@ -152,7 +131,7 @@ const gotoReadable = (entry) => {
                 clearable
             >
                 <template #prepend>
-                    <el-select v-model="selectedInputLanguage" placeholder="Select" class="languageSelector">
+                    <el-select v-model="selectedInputLanguage" placeholder="选择语言" class="languageSelector">
                         <el-option v-for="(v, k) in supportedInputLanguage" :label="v" :value="k" :key="k" />
                     </el-select>
                 </template>

@@ -542,7 +542,7 @@ onDeactivated(() => {
                     <h3 v-if="group.talkId" class="dialogueGroupTitle">Talk ID: {{ group.talkId }}</h3>
                     <el-table :data="group.rows" :row-class-name="tableRowClassName">
                         <el-table-column prop="talker" :label="UI_TEXT.speaker" width="110" />
-                        <el-table-column v-if="showDialogueVersions" :label="UI_TEXT.version" width="140">
+                        <el-table-column v-if="showDialogueVersions" :label="UI_TEXT.version" width="110">
                             <template #default="scope">
                                 <div class="rowVersionTags">
                                     <el-tag

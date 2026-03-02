@@ -7,13 +7,39 @@ import basicInfoApi from "@/api/basicInfo";
 import TranslateDisplay from "@/components/ResultEntry.vue";
 import AudioPlayer from "@liripeng/vue-audio-player";
 import * as converter from "@/assets/wem2wav";
+import useLanguage from "@/composables/useLanguage";
+import useVersion from "@/composables/useVersion";
+import useSearchCommon from "@/composables/useSearchCommon";
 
-const keyword = ref("")
-const selectedInputLanguage = ref(global.config.defaultSearchLanguage + '')
-const supportedInputLanguage = ref({})
-const searchSummary = ref("")
+// 使用语言处理组合式API
+const {
+  selectedInputLanguage,
+  supportedInputLanguage,
+  loadLanguages
+} = useLanguage()
+
+// 使用版本处理组合式API
+const {
+  versionOptions,
+  loadVersionOptions
+} = useVersion()
+
+// 使用搜索公共组合式API
+const {
+  keyword,
+  keywordLast,
+  searchSummary,
+  isLoading,
+  createdVersionFilter,
+  updatedVersionFilter,
+  normalizeText,
+  normalizeVersion,
+  getNormalizedEntryVersion,
+  isSameCreatedUpdatedVersion,
+  setupVersionWatchers
+} = useSearchCommon()
+
 const voiceSummary = ref("")
-
 const avatarResults = ref([])
 const voiceEntries = ref([])
 const selectedAvatar = ref(null)
@@ -21,9 +47,6 @@ const loadingVoices = ref(false)
 
 const categoryFilter = ref("all")
 const textFilter = ref("")
-const createdVersionFilter = ref("")
-const updatedVersionFilter = ref("")
-const versionOptions = ref([])
 const selectedVoiceLanguage = ref("")
 
 const showPlayer = ref(false)
@@ -39,13 +62,8 @@ const playlistLoading = reactive({
 })
 
 onBeforeMount(async () => {
-    supportedInputLanguage.value = global.languages
-    try {
-        const ans = await basicInfoApi.getAvailableVersions()
-        versionOptions.value = ans.json || []
-    } catch (_) {
-        versionOptions.value = []
-    }
+    await loadLanguages()
+    await loadVersionOptions()
 })
 
 const availableVoiceLanguages = computed(() => global.voiceLanguages || {})
@@ -62,24 +80,8 @@ watch(voiceLanguageOptions, (options) => {
     }
 }, { immediate: true })
 
-const normalizeText = (value) => {
-    if (!value) return ""
-    return String(value).trim().toLowerCase()
-}
-
-const normalizeVersion = (value) => normalizeText(value)
-
-const getNormalizedEntryVersion = (entry, kind) => {
-    if (kind === "created") return normalizeVersion(entry.createdVersion || entry.createdVersionRaw || "")
-    return normalizeVersion(entry.updatedVersion || entry.updatedVersionRaw || "")
-}
-
-const isSameCreatedUpdatedVersion = (entry) => {
-    const createdVersion = getNormalizedEntryVersion(entry, "created")
-    const updatedVersion = getNormalizedEntryVersion(entry, "updated")
-    if (!createdVersion || !updatedVersion) return false
-    return createdVersion === updatedVersion
-}
+// 设置版本变化监听
+setupVersionWatchers(onSearchClicked)
 
 const deriveCategory = (title) => {
     const raw = (title || "").trim()
@@ -156,14 +158,24 @@ const onSearchClicked = async () => {
     }
 
     if (avatarKeyword) {
-        const ans = (await api.searchAvatar(keyword.value, selectedInputLanguage.value)).json
-        const contents = ans.contents
-        avatarResults.value = contents.avatars || []
-        const avatarCount = avatarResults.value.length
-        searchSummary.value = `查询用时: ${ans.time.toFixed(2)}ms，找到 ${avatarCount} 个角色`
-        voiceEntries.value = []
-        voiceSummary.value = ""
-        selectedAvatar.value = null
+        try {
+            const response = await api.searchAvatar(keyword.value, selectedInputLanguage.value)
+            const ans = response.data
+            const contents = ans.contents
+            avatarResults.value = contents.avatars || []
+            const avatarCount = avatarResults.value.length
+            searchSummary.value = `查询用时: ${ans.time.toFixed(2)}ms，找到 ${avatarCount} 个角色`
+            voiceEntries.value = []
+            voiceSummary.value = ""
+            selectedAvatar.value = null
+        } catch (error) {
+            console.error('搜索角色失败:', error)
+            searchSummary.value = "搜索角色失败，请稍后重试。"
+            voiceSummary.value = ""
+            avatarResults.value = []
+            voiceEntries.value = []
+            selectedAvatar.value = null
+        }
         return
     }
 
@@ -172,29 +184,38 @@ const onSearchClicked = async () => {
     avatarResults.value = []
     selectedAvatar.value = { avatarId: null, name: "全角色（按筛选）" }
 
-    const ans = (await api.searchAvatarVoices(
-        titleKeyword,
-        createdVersionFilter.value,
-        updatedVersionFilter.value,
-        selectedInputLanguage.value,
-    )).json
-    const contents = ans.contents
-    voiceEntries.value = contents.voices || []
-    const avatarMap = new Map()
-    for (const entry of voiceEntries.value) {
-        if (entry.avatarId === null || entry.avatarId === undefined) continue
-        if (avatarMap.has(entry.avatarId)) continue
-        avatarMap.set(entry.avatarId, {
-            avatarId: entry.avatarId,
-            name: (entry.avatarName || "").trim() || `角色 ${entry.avatarId}`
-        })
+    try {
+        const response = await api.searchAvatarVoices(
+            titleKeyword,
+            createdVersionFilter.value,
+            updatedVersionFilter.value,
+            selectedInputLanguage.value,
+        )
+        const ans = response.data
+        const contents = ans.contents
+        voiceEntries.value = contents.voices || []
+        const avatarMap = new Map()
+        for (const entry of voiceEntries.value) {
+            if (entry.avatarId === null || entry.avatarId === undefined) continue
+            if (avatarMap.has(entry.avatarId)) continue
+            avatarMap.set(entry.avatarId, {
+                avatarId: entry.avatarId,
+                name: (entry.avatarName || "").trim() || `角色 ${entry.avatarId}`
+            })
+        }
+        avatarResults.value = Array.from(avatarMap.values()).sort((a, b) => a.name.localeCompare(b.name))
+        const avatarCount = avatarResults.value.length
+        const voiceCount = voiceEntries.value.length
+        searchSummary.value = `查询用时: ${ans.time.toFixed(2)}ms，按标题/版本检索，涉及 ${avatarCount} 个角色`
+        voiceSummary.value = `查询用时: ${ans.time.toFixed(2)}ms，找到 ${voiceCount} 条语音结果`
+    } catch (error) {
+        console.error('搜索语音失败:', error)
+        searchSummary.value = "搜索语音失败，请稍后重试。"
+        voiceSummary.value = ""
+        voiceEntries.value = []
+    } finally {
+        loadingVoices.value = false
     }
-    avatarResults.value = Array.from(avatarMap.values()).sort((a, b) => a.name.localeCompare(b.name))
-    const avatarCount = avatarResults.value.length
-    const voiceCount = voiceEntries.value.length
-    searchSummary.value = `查询用时: ${ans.time.toFixed(2)}ms，按标题/版本检索，涉及 ${avatarCount} 个角色`
-    voiceSummary.value = `查询用时: ${ans.time.toFixed(2)}ms，找到 ${voiceCount} 条语音结果`
-    loadingVoices.value = false
 }
 
 const onAvatarClicked = async (avatar) => {
@@ -204,12 +225,20 @@ const onAvatarClicked = async (avatar) => {
     loadingVoices.value = true
     categoryFilter.value = "all"
 
-    const ans = (await api.getAvatarVoices(avatar.avatarId, selectedInputLanguage.value)).json
-    const contents = ans.contents
-    voiceEntries.value = contents.voices || []
-    const voiceCount = voiceEntries.value.length
-    voiceSummary.value = `查询用时: ${ans.time.toFixed(2)}ms，找到 ${voiceCount} 条语音结果`
-    loadingVoices.value = false
+    try {
+        const response = await api.getAvatarVoices(avatar.avatarId, selectedInputLanguage.value)
+        const ans = response.data
+        const contents = ans.contents
+        voiceEntries.value = contents.voices || []
+        const voiceCount = voiceEntries.value.length
+        voiceSummary.value = `查询用时: ${ans.time.toFixed(2)}ms，找到 ${voiceCount} 条语音结果`
+    } catch (error) {
+        console.error('获取角色语音失败:', error)
+        voiceSummary.value = "获取角色语音失败，请稍后重试。"
+        voiceEntries.value = []
+    } finally {
+        loadingVoices.value = false
+    }
 }
 
 const onVoicePlay = (voiceUrl) => {
@@ -310,7 +339,7 @@ const onShowPlayerButtonClicked = () => {
                 clearable
             >
                 <template #prepend>
-                    <el-select v-model="selectedInputLanguage" placeholder="Select" class="languageSelector">
+                    <el-select v-model="selectedInputLanguage" placeholder="选择语言" class="languageSelector">
                         <el-option v-for="(v, k) in supportedInputLanguage" :label="v" :value="k" :key="k" />
                     </el-select>
                 </template>
