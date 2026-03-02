@@ -241,7 +241,7 @@ def _try_load_fts_extension(extension_path: str, extension_entry: str) -> bool:
     try:
         if extension_entry:
             try:
-                conn.load_extension(extension_path, extension_entry)
+                conn.load_extension(extension_path)
             except TypeError:
                 conn.load_extension(extension_path)
         else:
@@ -581,11 +581,11 @@ def get_or_create_version_id(raw_version: str | None) -> int | None:
         ).fetchone()
         if row:
             return int(row[0])
-        
+
         # 获取当前最大ID
         max_id_row = cur.execute(f"SELECT MAX(id) FROM {VERSION_DIM_TABLE}").fetchone()
         new_id = max_id_row[0] + 1 if max_id_row[0] else 1
-        
+
         # 插入新版本，使用指定的ID
         cur.execute(
             f"""
@@ -614,7 +614,8 @@ def _backfill_version_dim_and_ids():
             if not _table_exists(table_name):
                 continue
             cols = _table_columns(table_name)
-            if "created_version_id" in cols and "updated_version_id" in cols:
+            # 跳过quest表，因为它的更新版本存储在quest_version表中
+            if table_name != "quest" and "created_version_id" in cols and "updated_version_id" in cols:
                 cur.execute(
                     f"""
                     UPDATE {table_name}
@@ -636,7 +637,7 @@ def _backfill_version_dim_and_ids():
 
 
 def _ensure_updated_version_autofill_rules():
-    tables = ("textMap", "readable", "subtitle", "quest")
+    tables = ("textMap", "readable", "subtitle")
     cur = conn.cursor()
     try:
         for table_name in tables:
@@ -779,14 +780,28 @@ def rebuild_version_catalog(
                     f"WHERE t.created_version_id IS NOT NULL"
                 )
                 # 只记录与创建版本不同的更新版本
-                query_parts.append(
-                    f"SELECT vd_u.raw_version AS v FROM {table_name} t "
-                    f"JOIN {VERSION_DIM_TABLE} vd_c ON vd_c.id = t.created_version_id "
-                    f"JOIN {VERSION_DIM_TABLE} vd_u ON vd_u.id = t.updated_version_id "
-                    f"WHERE t.created_version_id IS NOT NULL "
-                    f"AND t.updated_version_id IS NOT NULL "
-                    f"AND vd_c.raw_version != vd_u.raw_version"
-                )
+                if table_name != "quest":
+                    # 对于非quest表，从表本身的updated_version_id列获取更新版本
+                    query_parts.append(
+                        f"SELECT vd_u.raw_version AS v FROM {table_name} t "
+                        f"JOIN {VERSION_DIM_TABLE} vd_c ON vd_c.id = t.created_version_id "
+                        f"JOIN {VERSION_DIM_TABLE} vd_u ON vd_u.id = t.updated_version_id "
+                        f"WHERE t.created_version_id IS NOT NULL "
+                        f"AND t.updated_version_id IS NOT NULL "
+                        f"AND vd_c.raw_version != vd_u.raw_version"
+                    )
+                else:
+                    # 对于quest表，从quest_version表获取更新版本
+                    if _table_exists("quest_version"):
+                        query_parts.append(
+                            f"SELECT vd_u.raw_version AS v FROM quest_version qv "
+                            f"JOIN quest q ON q.questId = qv.questId "
+                            f"JOIN {VERSION_DIM_TABLE} vd_c ON vd_c.id = q.created_version_id "
+                            f"JOIN {VERSION_DIM_TABLE} vd_u ON vd_u.id = qv.updated_version_id "
+                            f"WHERE q.created_version_id IS NOT NULL "
+                            f"AND qv.updated_version_id IS NOT NULL "
+                            f"AND vd_c.raw_version != vd_u.raw_version"
+                        )
             if not query_parts:
                 stats[table_name] = 0
                 continue
@@ -835,9 +850,11 @@ def ensure_version_schema():
     _ensure_version_catalog_table()
     _ensure_quest_hash_map_table()
 
-    for table_name in ("textMap", "readable", "subtitle", "quest"):
+    for table_name in ("textMap", "readable", "subtitle"):
         _ensure_column(table_name, "created_version_id", "INTEGER")
         _ensure_column(table_name, "updated_version_id", "INTEGER")
+    # 为quest表只添加created_version_id列，updated_version_id现在存储在quest_version表中
+    _ensure_column("quest", "created_version_id", "INTEGER")
 
     _ensure_column("subtitle", "subtitleKey", "TEXT")
 
@@ -858,7 +875,7 @@ def ensure_version_schema():
     _ensure_index("CREATE INDEX IF NOT EXISTS textMap_created_version_id_index ON textMap(created_version_id)")
     _ensure_index("CREATE INDEX IF NOT EXISTS textMap_updated_version_id_index ON textMap(updated_version_id)")
     _ensure_index("CREATE INDEX IF NOT EXISTS quest_created_version_id_index ON quest(created_version_id)")
-    _ensure_index("CREATE INDEX IF NOT EXISTS quest_updated_version_id_index ON quest(updated_version_id)")
+    # 不再为quest表的updated_version_id列创建索引，因为它现在存储在quest_version表中
     _ensure_index("CREATE INDEX IF NOT EXISTS readable_created_version_id_index ON readable(created_version_id)")
     _ensure_index("CREATE INDEX IF NOT EXISTS readable_updated_version_id_index ON readable(updated_version_id)")
     _ensure_index("CREATE INDEX IF NOT EXISTS subtitle_created_version_id_index ON subtitle(created_version_id)")

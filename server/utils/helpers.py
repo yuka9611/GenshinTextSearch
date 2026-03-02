@@ -140,11 +140,20 @@ def _build_text_map_translates(text_hash: int | None, langs: 'list[int]'):
 
 
 def _build_lang_str_to_id_map() -> dict[str, int]:
+    """
+    构建语言字符串到语言ID的映射
+    - 从数据库获取语言代码映射
+    - 为每种语言添加别名，包括大写形式
+    - 处理TextMap文件名格式的语言代码
+    """
     import databaseHelper
     result: dict[str, int] = {}
     lang_map = databaseHelper.getLangCodeMap()
 
     def add_alias(alias: str, lang_id: int):
+        """
+        添加语言别名到映射中
+        """
         if not alias:
             return
         result[alias] = lang_id
@@ -157,6 +166,7 @@ def _build_lang_str_to_id_map() -> dict[str, int]:
         if not code_text:
             continue
         add_alias(code_text, lang_id)
+        # 处理TextMap文件名格式的语言代码
         m = re.match(r"^Text(?:Map)?([A-Za-z0-9_]+)\.json$", code_text, re.IGNORECASE)
         if m:
             short = m.group(1)
@@ -168,3 +178,88 @@ def _build_lang_str_to_id_map() -> dict[str, int]:
             add_alias(f"TextMap{upper}.json", lang_id)
             add_alias(f"Text{upper}.json", lang_id)
     return result
+
+
+def resource_path(rel_path: str) -> str:
+    """
+    兼容 PyInstaller 和源码运行的资源路径
+    - 打包后资源在 sys._MEIPASS
+    - 源码运行时以项目根目录为基准（server/..）
+    """
+    import os
+    import sys
+    if hasattr(sys, "_MEIPASS"):
+        base_path = sys._MEIPASS  # type: ignore
+    else:
+        base_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
+    return os.path.join(base_path, rel_path)
+
+
+def buildResponse(data=None, code=200, msg="ok"):
+    from flask import jsonify
+    return jsonify({"data": data, "code": code, "msg": msg})
+
+
+def _has_non_empty(value) -> bool:
+    return not (value is None or str(value).strip() == "")
+
+
+def _to_int_or_default(value, default: int) -> int:
+    try:
+        return int(value)
+    except Exception:
+        return default
+
+
+def _to_positive_int_or_default(value, default: int) -> int:
+    result = _to_int_or_default(value, default)
+    return result if result > 0 else default
+
+
+def getLangFromRequest():
+    from flask import request
+    lang = request.args.get('lang', 'zh-cn', type=str)
+    return lang
+
+
+def normalizeSearchTerm(term: str) -> str:
+    # 标准化搜索词，移除多余空格等
+    return term.strip().lower()
+
+
+def getLanguageName(lang_code: str) -> str:
+    # 根据语言代码获取语言名称
+    lang_names = {
+        "zh-cn": "中文",
+        "en-us": "English",
+        "ja-jp": "日本語",
+        "ko-kr": "한국어"
+    }
+    return lang_names.get(lang_code, lang_code)
+
+
+def buildErrorResponse(code=400, msg="Bad Request"):
+    """
+    构建错误响应
+    """
+    from flask import jsonify
+    return jsonify({"data": None, "code": code, "msg": msg})
+
+
+def buildSuccessResponse(data=None, msg="ok"):
+    """
+    构建成功响应
+    """
+    from flask import jsonify
+    return jsonify({"data": data, "code": 200, "msg": msg})
+
+
+def handle_error(e, code=500, msg="Internal Server Error"):
+    """
+    统一处理错误
+    """
+    import traceback
+    print(f"Error: {e}")
+    print(traceback.format_exc())
+    from flask import jsonify
+    return jsonify({"data": None, "code": code, "msg": f"{msg}: {str(e)}"})

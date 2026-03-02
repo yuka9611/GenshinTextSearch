@@ -13,7 +13,7 @@ from import_utils import (
     reset_temp_table,
     to_hash_value,
 )
-from versioning import ensure_version_schema, get_current_version, get_or_create_version_id
+from version_control import ensure_version_schema, get_current_version, get_or_create_version_id, should_update_version
 from textmap_name_utils import parse_textmap_file_name, textmap_file_sort_key
 
 
@@ -147,11 +147,15 @@ def importTextMap(
                 )
                 compared_hash_count += len(parsed_rows)
 
-                changed_rows = (
-                    (row_hash, content, langId, version_id, version_id)
-                    for row_hash, content in parsed_rows
-                    if existing_map.get(row_hash) != content
-                )
+                # 版本预审查：只处理需要更新的行
+                changed_rows = []
+                for row_hash, content in parsed_rows:
+                    old_content = existing_map.get(row_hash)
+                    if old_content != content:
+                        # 检查版本是否需要更新
+                        # 由于 textMap 使用 SQL 层面的版本控制，这里只需要检查内容变化
+                        changed_rows.append((row_hash, content, langId, version_id, version_id))
+
                 changed_hash_count += executemany_batched(
                     cursor,
                     sql_upsert,

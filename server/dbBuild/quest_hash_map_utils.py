@@ -146,7 +146,6 @@ def count_unresolved_quest_versions(cursor) -> tuple[int, int]:
         SELECT COUNT(*)
         FROM quest
         WHERE created_version_id IS NULL
-           OR updated_version_id IS NULL
         """
     ).fetchone()
     unresolved = int(unresolved_row[0] or 0) if unresolved_row else 0

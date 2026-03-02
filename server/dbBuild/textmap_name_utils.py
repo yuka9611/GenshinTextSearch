@@ -341,6 +341,50 @@ def analyze_readable_version_exceptions(cursor) -> dict:
     }
 
 
+def analyze_textmap_version_exceptions(cursor) -> dict:
+    """
+    分析TextMap数据的版本异常情况
+
+    Args:
+        cursor: 数据库游标
+
+    Returns:
+        dict: 异常统计信息
+    """
+    # 检查版本异常情况
+    # 1. 没有创建版本的条目
+    cursor.execute("SELECT COUNT(*) FROM textMap WHERE created_version_id IS NULL")
+    no_created_version = cursor.fetchone()[0]
+
+    # 2. 没有更新版本的条目
+    cursor.execute("SELECT COUNT(*) FROM textMap WHERE updated_version_id IS NULL")
+    no_updated_version = cursor.fetchone()[0]
+
+    # 3. 创建版本晚于更新版本的条目
+    cursor.execute("SELECT COUNT(*) FROM textMap WHERE created_version_id > updated_version_id")
+    created_after_updated = cursor.fetchone()[0]
+
+    # 4. 获取异常条目的示例
+    cursor.execute("SELECT lang, hash FROM textMap WHERE created_version_id IS NULL LIMIT 10")
+    no_created_version_samples = [f"lang:{lang} hash:{hash}" for lang, hash in cursor.fetchall()]
+
+    cursor.execute("SELECT lang, hash FROM textMap WHERE updated_version_id IS NULL LIMIT 10")
+    no_updated_version_samples = [f"lang:{lang} hash:{hash}" for lang, hash in cursor.fetchall()]
+
+    cursor.execute("SELECT lang, hash, created_version_id, updated_version_id FROM textMap WHERE created_version_id > updated_version_id LIMIT 10")
+    created_after_updated_samples = [f"lang:{lang} hash:{hash} (created: {created}, updated: {updated})" for lang, hash, created, updated in cursor.fetchall()]
+
+    return {
+        "total": cursor.execute("SELECT COUNT(*) FROM textMap").fetchone()[0],
+        "no_created_version": no_created_version,
+        "no_updated_version": no_updated_version,
+        "created_after_updated": created_after_updated,
+        "no_created_version_samples": no_created_version_samples,
+        "no_updated_version_samples": no_updated_version_samples,
+        "created_after_updated_samples": created_after_updated_samples
+    }
+
+
 def analyze_subtitle_version_exceptions(cursor) -> dict:
     """
     分析Subtitle数据的版本异常情况

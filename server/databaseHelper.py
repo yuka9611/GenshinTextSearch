@@ -80,13 +80,8 @@ def _try_load_fts_extension(
         return False
 
     try:
-        if extension_entry:
-            try:
-                connection.load_extension(extension_path, extension_entry)
-            except TypeError:
-                connection.load_extension(extension_path)
-        else:
-            connection.load_extension(extension_path)
+        # SQLite的load_extension方法只接受一个参数
+        connection.load_extension(extension_path)
         return True
     except Exception:
         return False
@@ -100,7 +95,7 @@ def _try_load_fts_extension(
 def _configure_connection(connection: sqlite3.Connection) -> None:
     """
     配置数据库连接，优化搜索速度和平衡数据库体积
-    
+
     优化措施：
     1. 增加缓存大小至262144页（约2GB），减少磁盘I/O
     2. 增加内存映射大小至2GB，提高大数据库的访问速度
@@ -108,7 +103,7 @@ def _configure_connection(connection: sqlite3.Connection) -> None:
     4. 禁用外键检查，提高查询速度
     5. 启用内存临时表，加快临时数据处理
     6. 自动优化数据库，保持最佳性能状态
-    
+
     这些设置平衡了搜索速度和数据库体积，在保证查询性能的同时，不会显著增加数据库文件大小
     """
     tokenizer, ext_path, ext_entry = _resolve_fts_settings()
@@ -135,12 +130,12 @@ def _configure_connection(connection: sqlite3.Connection) -> None:
 
 def get_connection() -> sqlite3.Connection:
     """
-    霑樊磁逕ｨ謌ｷ逶ｮ蠖穂ｸ狗噪 DB・亥庄蜀吶∫ｨｳ螳夲ｼ・
-    螯よ棡荳榊ｭ伜惠蟆ｱ莉取遠蛹・ｵ・ｺ仙､榊宛蜃ｺ譚･
+    获取数据库连接
+    配置连接参数并返回一个sqlite3.Connection对象
     """
     db_path: Path = config.get_db_path()
     if not db_path.exists():
-        # 扈吩ｸ荳ｪ譖ｴ逶ｴ隗ら噪髞呵ｯｯ
+        # 数据库文件不存在
         raise FileNotFoundError(
             f"Database file not found: {db_path}. "
             "Please place data.db in the server folder."
@@ -151,33 +146,56 @@ def get_connection() -> sqlite3.Connection:
     return connection
 
 
-# 蜊穂ｾ玖ｿ樊磁・井ｽ蜴滓悽蟆ｱ譏ｯ蜊戊ｿ樊磁隶ｾ隶｡・・
+# 全局数据库连接
 conn = get_connection()
-_COLUMN_CACHE: dict[tuple[str, str], bool] = {}
+
+# 缓存字典
+_CACHE: dict[str, dict] = {
+    "column": {},  # 表列信息缓存
+    "fts": {  # FTS相关缓存
+        "available": None,
+        "tokenizer": None,
+        "langs": None
+    },
+    "version": {},  # 版本相关缓存
+    "names": {  # 名称缓存
+        "characters": {},  # 角色名称缓存
+        "wander": {},  # 旅行者名称缓存
+        "traveller": {}  # 空旅行者名称缓存
+    }
+}
 
 
 def _table_has_column(table_name: str, column_name: str) -> bool:
-    key = (table_name, column_name)
-    if key in _COLUMN_CACHE:
-        return _COLUMN_CACHE[key]
+    """
+    检查表是否包含指定列
+    """
+    key = f"{table_name}:{column_name}"
+    if key in _CACHE["column"]:
+        return _CACHE["column"][key]
     with closing(conn.cursor()) as cursor:
         try:
             rows = cursor.execute(f"PRAGMA table_info({table_name})").fetchall()
         except Exception:
-            _COLUMN_CACHE[key] = False
+            _CACHE["column"][key] = False
             return False
     exists = any(row[1] == column_name for row in rows)
-    _COLUMN_CACHE[key] = exists
+    _CACHE["column"][key] = exists
     return exists
 
 
+# 版本处理相关常量
 _VERSION_CATALOG_TABLE = "version_catalog"
 _VERSION_DIM_TABLE = "version_dim"
 _VERSION_SOURCE_TABLES = ("textMap", "quest", "subtitle", "readable")
 _VERSION_TAG_RE = re.compile(r"(\d+)\.(\d+)(?:\.\d+)?")
 
 
+# 版本处理相关函数
 def _extract_version_tag(raw_version: str | None) -> str | None:
+    """
+    从版本字符串中提取版本标签
+    """
     if raw_version is None:
         return None
     text = str(raw_version).strip()
@@ -190,7 +208,20 @@ def _extract_version_tag(raw_version: str | None) -> str | None:
     return f"{major}.{minor}"
 
 
+def _normalize_version_filter(value: str | None) -> str | None:
+    """
+    标准化版本过滤器值，提取主要版本号和次要版本号
+    """
+    return _extract_version_tag(value)
+
+
 def _has_version_id_columns(table_name: str) -> bool:
+    """
+    检查表是否有版本ID列
+    """
+    if table_name == 'quest':
+        # For quest table, only check created_version_id since updated_version_id is in quest_version
+        return _table_has_column(table_name, "created_version_id")
     return (
         _table_has_column(table_name, "created_version_id")
         and _table_has_column(table_name, "updated_version_id")
@@ -198,12 +229,18 @@ def _has_version_id_columns(table_name: str) -> bool:
 
 
 def _has_version_dim() -> bool:
+    """
+    检查版本维度表是否存在
+    """
     return _table_has_column(_VERSION_DIM_TABLE, "id") and _table_has_column(
         _VERSION_DIM_TABLE, "raw_version"
     )
 
 
 def _version_value_expr(table_alias: str, prefix: str, table_name: str | None = None) -> str:
+    """
+    构建版本值表达式
+    """
     version_id_col = f"{prefix}_version_id"
     has_id_mode = bool(table_name and _has_version_id_columns(table_name) and _has_version_dim())
     if has_id_mode:
@@ -214,8 +251,24 @@ def _version_value_expr(table_alias: str, prefix: str, table_name: str | None = 
     return "NULL"
 
 
-def _version_select_expr(table_alias: str, table_name: str | None = None) -> str:
-    if not table_name or not _has_version_id_columns(table_name):
+def _version_select_expr(table_alias: str, table_name: str | None = None, lang_code: int | None = None) -> str:
+    """
+    构建版本选择表达式
+    """
+    if not table_name:
+        return "NULL as created_version, NULL as updated_version"
+    if table_name == 'quest':
+        # For quest table, only check created_version_id since updated_version_id is in quest_version
+        if not _table_has_column(table_name, "created_version_id"):
+            return "NULL as created_version, NULL as updated_version"
+        created_expr = _version_value_expr(table_alias, "created", table_name)
+        if lang_code is not None:
+            # For quest table, updated version is in quest_version table with language filter
+            updated_expr = f"(SELECT vd.raw_version FROM version_dim vd JOIN quest_version qv ON vd.id = qv.updated_version_id WHERE qv.questId = {table_alias}.questId AND qv.lang = {lang_code} LIMIT 1)"
+        else:
+            updated_expr = "NULL"
+        return f"{created_expr} as created_version, {updated_expr} as updated_version"
+    if not _has_version_id_columns(table_name):
         return "NULL as created_version, NULL as updated_version"
     created_expr = _version_value_expr(table_alias, "created", table_name)
     updated_expr = _version_value_expr(table_alias, "updated", table_name)
@@ -223,6 +276,9 @@ def _version_select_expr(table_alias: str, table_name: str | None = None) -> str
 
 
 def _ensure_version_catalog_schema(cursor: sqlite3.Cursor):
+    """
+    确保版本目录表结构存在
+    """
     cursor.execute(
         f"""
         CREATE TABLE IF NOT EXISTS {_VERSION_CATALOG_TABLE} (
@@ -245,6 +301,9 @@ def _ensure_version_catalog_schema(cursor: sqlite3.Cursor):
 
 
 def _rebuild_version_catalog(cursor: sqlite3.Cursor, source_tables: tuple[str, ...] = _VERSION_SOURCE_TABLES):
+    """
+    重建版本目录
+    """
     for table_name in source_tables:
         cursor.execute(
             f"DELETE FROM {_VERSION_CATALOG_TABLE} WHERE source_table=?",
@@ -259,6 +318,12 @@ def _rebuild_version_catalog(cursor: sqlite3.Cursor, source_tables: tuple[str, .
                     f"SELECT vd.raw_version AS v FROM {table_name} t "
                     f"JOIN {_VERSION_DIM_TABLE} vd ON vd.id = t.created_version_id "
                     f"WHERE t.created_version_id IS NOT NULL",
+                ]
+            )
+        if table_name != 'quest' and _has_version_id_columns(table_name) and _has_version_dim():
+            # For non-quest tables, also include updated_version_id
+            query_parts.extend(
+                [
                     f"SELECT vd.raw_version AS v FROM {table_name} t "
                     f"JOIN {_VERSION_DIM_TABLE} vd ON vd.id = t.updated_version_id "
                     f"WHERE t.updated_version_id IS NOT NULL",
@@ -324,37 +389,45 @@ _SUBTITLE_LANG_SUFFIX_SET = set(_SUBTITLE_LANG_SUFFIX_BY_ID.values())
 
 
 def _has_textmap_fts() -> bool:
-    global _TEXTMAP_FTS_AVAILABLE, _TEXTMAP_FTS_TOKENIZER
+    """
+    检查是否启用了文本映射的全文搜索
+    """
     if not config.getEnableTextMapFts():
-        _TEXTMAP_FTS_AVAILABLE = False
+        _CACHE["fts"]["available"] = False
         return False
-    if _TEXTMAP_FTS_AVAILABLE is not None:
-        return _TEXTMAP_FTS_AVAILABLE
+    if _CACHE["fts"]["available"] is not None:
+        return _CACHE["fts"]["available"]
     with closing(conn.cursor()) as cursor:
         row = cursor.execute(
             "SELECT sql FROM sqlite_master WHERE type='table' AND name=? LIMIT 1",
             (_TEXTMAP_FTS_TABLE,),
         ).fetchone()
-    _TEXTMAP_FTS_AVAILABLE = row is not None
+    _CACHE["fts"]["available"] = row is not None
     if row and row[0]:
         m = re.search(r"tokenize='([^']+)'", str(row[0]))
         if m:
             token_spec = _normalize_fts_tokenizer(m.group(1))
-            _TEXTMAP_FTS_TOKENIZER = token_spec.split()[0] if token_spec else "trigram"
-    return _TEXTMAP_FTS_AVAILABLE
+            _CACHE["fts"]["tokenizer"] = token_spec.split()[0] if token_spec else "trigram"
+    return _CACHE["fts"]["available"]
 
 
 def _get_textmap_fts_tokenizer() -> str:
-    if _TEXTMAP_FTS_TOKENIZER:
-        return _TEXTMAP_FTS_TOKENIZER
+    """
+    获取文本映射的全文搜索分词器
+    """
+    if _CACHE["fts"]["tokenizer"]:
+        return _CACHE["fts"]["tokenizer"]
     token_spec = _resolve_fts_settings()[0]
-    return token_spec.split()[0] if token_spec else "trigram"
+    _CACHE["fts"]["tokenizer"] = token_spec.split()[0] if token_spec else "trigram"
+    return _CACHE["fts"]["tokenizer"]
 
 
 def _get_textmap_fts_langs() -> set[int]:
-    global _TEXTMAP_FTS_LANGS
-    if _TEXTMAP_FTS_LANGS is not None:
-        return _TEXTMAP_FTS_LANGS
+    """
+    获取启用了全文搜索的语言代码
+    """
+    if _CACHE["fts"]["langs"] is not None:
+        return _CACHE["fts"]["langs"]
 
     langs: set[int] = set()
     with closing(conn.cursor()) as cursor:
@@ -375,8 +448,8 @@ def _get_textmap_fts_langs() -> set[int]:
                 continue
     if not langs:
         langs = set(config.getFtsLangAllowList())
-    _TEXTMAP_FTS_LANGS = langs
-    return _TEXTMAP_FTS_LANGS
+    _CACHE["fts"]["langs"] = langs
+    return _CACHE["fts"]["langs"]
 
 
 def _is_textmap_fts_lang_enabled(lang_code: int) -> bool:
@@ -479,6 +552,9 @@ def _execute_with_fallback(
     sql_fallback: str | None = None,
     params_fallback: list | None = None,
 ):
+    """
+    执行SQL查询，如果失败则使用备用查询
+    """
     try:
         cursor.execute(sql_main, params_main)
     except sqlite3.OperationalError:
@@ -487,7 +563,21 @@ def _execute_with_fallback(
         cursor.execute(sql_fallback, params_fallback if params_fallback is not None else [])
 
 
+def _safe_execute(cursor: sqlite3.Cursor, sql: str, params: list = []) -> list:
+    """
+    安全执行SQL查询，处理异常并返回结果
+    """
+    try:
+        cursor.execute(sql, params)
+        return cursor.fetchall()
+    except Exception:
+        return []
+
+
 def _build_like_patterns(keyword: str, lang_code: int) -> tuple[str, str]:
+    """
+    构建LIKE查询模式
+    """
     escaped = _escape_like(keyword)
     exact = f"%{escaped}%"
 
@@ -498,6 +588,144 @@ def _build_like_patterns(keyword: str, lang_code: int) -> tuple[str, str]:
     else:
         fuzzy = exact
     return exact, fuzzy
+
+
+def _build_textmap_query(
+    use_fts: bool,
+    langCode: int,
+    exact: str,
+    fuzzy: str,
+    fts_match: str | None,
+    voice_expr: str | None,
+    voice_filter: str | None,
+    created_version: str | None,
+    updated_version: str | None,
+    hash_value: int | None = None,
+    limit: int | None = None,
+    offset: int | None = None
+) -> tuple[str, list]:
+    """
+    构建文本映射查询
+    """
+    params: list = []
+    version_select = _version_select_expr("tm", "textMap")
+
+    if use_fts and fts_match:
+        # 使用FTS查询
+        sql = (
+            f"select tm.hash, tm.content, {version_select} from textMap tm "
+            f"join {_TEXTMAP_FTS_TABLE} fts on fts.rowid = tm.id "
+            f"where fts match ? and fts.lang=? "
+            "and tm.lang=? "
+            "and (tm.content like ? escape '\\' or tm.content like ? escape '\\') "
+        )
+        params = [fts_match, langCode, langCode, exact, fuzzy]
+    else:
+        # 使用LIKE查询
+        sql = (
+            f"select tm.hash, tm.content, {version_select} from textMap tm "
+            "where tm.lang=? and (tm.content like ? escape '\\' or tm.content like ? escape '\\') "
+        )
+        params = [langCode, exact, fuzzy]
+
+    # 添加版本过滤
+    sql = _append_version_filter_clause(
+        sql,
+        params,
+        "tm",
+        created_version,
+        updated_version,
+        "textMap",
+    )
+
+    # 添加语音过滤
+    if voice_filter and voice_expr:
+        if voice_filter == "with":
+            sql += f"and ({voice_expr}) "
+        elif voice_filter == "without":
+            sql += f"and not ({voice_expr}) "
+
+    # 添加排序和分页
+    if hash_value is not None:
+        sql += (
+            "order by "
+            "case when tm.hash = ? then 0 else 1 end, "
+            "case when tm.content like ? escape '\\' then 0 else 1 end, "
+            "case when exists (select 1 from dialogue d join voice v on v.dialogueId = d.dialogueId where d.textHash = tm.hash limit 1) or exists (select 1 from fetters f join voice v on v.dialogueId = f.voiceFile and (v.avatarId = f.avatarId or v.avatarId = 0) where f.voiceFileTextTextMapHash = tm.hash limit 1) then 0 else 1 end, "
+            "case when exists (select 1 from dialogue d join questTalk qt on d.talkId = qt.talkId join quest q on qt.questId = q.questId where d.textHash = tm.hash limit 1) then 0 else 1 end "
+        )
+        params.extend([hash_value, exact])
+    else:
+        sql += (
+            "order by "
+            "case when tm.content like ? escape '\\' then 0 else 1 end, "
+            "case when exists (select 1 from dialogue d join voice v on v.dialogueId = d.dialogueId where d.textHash = tm.hash limit 1) or exists (select 1 from fetters f join voice v on v.dialogueId = f.voiceFile and (v.avatarId = f.avatarId or v.avatarId = 0) where f.voiceFileTextTextMapHash = tm.hash limit 1) then 0 else 1 end, "
+            "case when exists (select 1 from dialogue d join questTalk qt on d.talkId = qt.talkId join quest q on qt.questId = q.questId where d.textHash = tm.hash limit 1) then 0 else 1 end "
+        )
+        params.append(exact)
+
+    if limit is not None:
+        sql += "limit ?"
+        params.append(limit)
+        if offset is not None:
+            sql += " offset ?"
+            params.append(offset)
+
+    return sql, params
+
+
+def _build_textmap_count_query(
+    use_fts: bool,
+    langCode: int,
+    exact: str,
+    fuzzy: str,
+    fts_match: str | None,
+    voice_expr: str | None,
+    voice_filter: str | None,
+    created_version: str | None,
+    updated_version: str | None
+) -> tuple[str, list]:
+    """
+    构建文本映射计数查询
+    """
+    params: list = []
+
+    if use_fts and fts_match:
+        # 使用FTS查询
+        sql = (
+            f"select count(*) from textMap tm "
+            f"join {_TEXTMAP_FTS_TABLE} fts on fts.rowid = tm.id "
+            f"where fts match ? and fts.lang=? "
+            "and tm.lang=? "
+            "and (tm.content like ? escape '\\' or tm.content like ? escape '\\') "
+        )
+        params = [fts_match, langCode, langCode, exact, fuzzy]
+    else:
+        # 使用LIKE查询
+        sql = (
+            "select count(*) from textMap tm "
+            "where tm.lang=? and (tm.content like ? escape '\\' or tm.content like ? escape '\\') "
+        )
+        params = [langCode, exact, fuzzy]
+
+    # 添加版本过滤
+    sql = _append_version_filter_clause(
+        sql,
+        params,
+        "tm",
+        created_version,
+        updated_version,
+        "textMap",
+    )
+
+    # 添加语音过滤
+    if voice_filter and voice_expr:
+        if voice_filter == "with":
+            sql += f"and ({voice_expr})"
+        elif voice_filter == "without":
+            sql += f"and not ({voice_expr})"
+
+    return sql, params
 
 
 def _readable_lang_aliases(lang_value: str | None) -> list[str]:
@@ -600,19 +828,6 @@ def _voice_exists_expr(text_hash_field: str) -> str:
     )
 
 
-def _normalize_version_filter(value: str | None) -> str | None:
-    if value is None:
-        return None
-    text = str(value).strip()
-    if not text:
-        return None
-    m = re.findall(r"(\d+)\.(\d+)(?:\.\d+)?", text)
-    if m:
-        major, minor = m[-1]
-        return f"{major}.{minor}"
-    return text
-
-
 def _append_version_filter_clause(
     sql: str,
     params: list,
@@ -620,14 +835,23 @@ def _append_version_filter_clause(
     created_version: str | None,
     updated_version: str | None,
     table_name: str | None = None,
+    lang_code: int | None = None,
 ) -> str:
     created = _normalize_version_filter(created_version)
     updated = _normalize_version_filter(updated_version)
-    if table_name and not _has_version_id_columns(table_name):
-        if created or updated:
-            sql += "and 1=0 "
-        return sql
-    has_id_mode = bool(table_name and _has_version_id_columns(table_name) and _has_version_dim())
+    if table_name == 'quest':
+        # For quest table, only check created_version_id since updated_version_id is in quest_version
+        if not _table_has_column(table_name, "created_version_id"):
+            if created or updated:
+                sql += "and 1=0 "
+            return sql
+        has_id_mode = bool(_table_has_column(table_name, "created_version_id") and _has_version_dim())
+    else:
+        if table_name and not _has_version_id_columns(table_name):
+            if created or updated:
+                sql += "and 1=0 "
+            return sql
+        has_id_mode = bool(table_name and _has_version_id_columns(table_name) and _has_version_dim())
     if created:
         if has_id_mode:
             sql += (
@@ -642,28 +866,58 @@ def _append_version_filter_clause(
             sql += "and 1=0 "
     if updated:
         if has_id_mode:
-            sql += (
-                f"and exists ("
-                f"select 1 from {_VERSION_DIM_TABLE} vdu "
-                f"where vdu.id = {table_alias}.updated_version_id "
-                f"and coalesce(vdu.version_tag, '') = ? "
-                f"limit 1) "
-            )
-            params.append(updated)
+            if table_name == 'quest' and lang_code is not None:
+                # For quest table, updated version is in quest_version table with language filter
+                sql += (
+                    f"and exists ("
+                    f"select 1 from quest_version qv "
+                    f"join {_VERSION_DIM_TABLE} vdu on vdu.id = qv.updated_version_id "
+                    f"where qv.questId = {table_alias}.questId "
+                    f"and qv.lang = ? "
+                    f"and coalesce(vdu.version_tag, '') = ? "
+                    f"limit 1) "
+                )
+                params.append(lang_code)
+                params.append(updated)
+
+                # "updated version" filter should only include rows that were actually updated
+                # after creation, excluding rows where created_version == updated_version.
+                sql += (
+                    f"and not exists ("
+                    f"select 1 from {_VERSION_DIM_TABLE} vdc "
+                    f"join quest_version qv on qv.questId = {table_alias}.questId "
+                    f"join {_VERSION_DIM_TABLE} vdu on vdu.id = qv.updated_version_id "
+                    f"where vdc.id = {table_alias}.created_version_id "
+                    f"and qv.lang = ? "
+                    f"and lower(trim(coalesce(vdc.version_tag, vdc.raw_version, ''))) "
+                    f"= lower(trim(coalesce(vdu.version_tag, vdu.raw_version, ''))) "
+                    f"limit 1) "
+                )
+                params.append(lang_code)
+            else:
+                # For other tables, updated version is in the same table
+                sql += (
+                    f"and exists ("
+                    f"select 1 from {_VERSION_DIM_TABLE} vdu "
+                    f"where vdu.id = {table_alias}.updated_version_id "
+                    f"and coalesce(vdu.version_tag, '') = ? "
+                    f"limit 1) "
+                )
+                params.append(updated)
+
+                # "updated version" filter should only include rows that were actually updated
+                # after creation, excluding rows where created_version == updated_version.
+                sql += (
+                    f"and not exists ("
+                    f"select 1 from {_VERSION_DIM_TABLE} vdc "
+                    f"join {_VERSION_DIM_TABLE} vdu on vdu.id = {table_alias}.updated_version_id "
+                    f"where vdc.id = {table_alias}.created_version_id "
+                    f"and lower(trim(coalesce(vdc.version_tag, vdc.raw_version, ''))) "
+                    f"= lower(trim(coalesce(vdu.version_tag, vdu.raw_version, ''))) "
+                    f"limit 1) "
+                )
         else:
             sql += "and 1=0 "
-        # "updated version" filter should only include rows that were actually updated
-        # after creation, excluding rows where created_version == updated_version.
-        if has_id_mode:
-            sql += (
-                f"and not exists ("
-                f"select 1 from {_VERSION_DIM_TABLE} vdc "
-                f"join {_VERSION_DIM_TABLE} vdu on vdu.id = {table_alias}.updated_version_id "
-                f"where vdc.id = {table_alias}.created_version_id "
-                f"and lower(trim(coalesce(vdc.version_tag, vdc.raw_version, ''))) "
-                f"= lower(trim(coalesce(vdu.version_tag, vdu.raw_version, ''))) "
-                f"limit 1) "
-            )
     return sql
 
 
@@ -766,7 +1020,7 @@ def selectTextMapFromKeywordPaged(
 ):
     """
     分页搜索文本，优化搜索速度和结果质量
-    
+
     优化措施：
     1. 使用FTS（全文搜索）与LIKE查询结合，提高搜索速度和准确性
     2. 优化FTS查询：使用JOIN代替子查询，减少查询开销
@@ -774,7 +1028,7 @@ def selectTextMapFromKeywordPaged(
     4. 按匹配程度和文本长度排序，确保最相关的结果排在前面
     5. 支持版本过滤，允许用户按游戏版本筛选结果
     6. 支持语音过滤，允许用户筛选带语音的文本
-    
+
     这些优化措施在保证搜索速度的同时，不会增加数据库体积，实现了速度与体积的平衡
     """
     with closing(conn.cursor()) as cursor:
@@ -782,52 +1036,39 @@ def selectTextMapFromKeywordPaged(
         fts_match = _build_textmap_fts_match(keyWord, langCode)
         hash_value = hash_value if hash_value is not None else -1
         voice_expr = _voice_exists_expr("tm.hash")
-        version_select = _version_select_expr("tm", "textMap")
 
-        def build_sql(use_fts: bool) -> tuple[str, list]:
-            if use_fts:
-                # 优化FTS查询：使用JOIN代替子查询，提高性能
-                sql = (
-                    f"select tm.hash, tm.content, {version_select} from textMap tm "
-                    f"join {_TEXTMAP_FTS_TABLE} fts on fts.rowid = tm.id "
-                    f"where fts match ? and fts.lang=? "
-                    "and tm.lang=? "
-                    "and (tm.content like ? escape '\\' or tm.content like ? escape '\\') "
-                )
-                params = [fts_match, langCode, langCode, exact, fuzzy]
-            else:
-                sql = (
-                    f"select tm.hash, tm.content, {version_select} from textMap tm "
-                    "where tm.lang=? and (tm.content like ? escape '\\' or tm.content like ? escape '\\') "
-                )
-                params = [langCode, exact, fuzzy]
+        # 构建LIKE查询
+        sql_like, params_like = _build_textmap_query(
+            use_fts=False,
+            langCode=langCode,
+            exact=exact,
+            fuzzy=fuzzy,
+            fts_match=fts_match,
+            voice_expr=voice_expr,
+            voice_filter=voice_filter,
+            created_version=created_version,
+            updated_version=updated_version,
+            hash_value=hash_value,
+            limit=limit,
+            offset=offset
+        )
 
-            sql = _append_version_filter_clause(
-                sql,
-                params,
-                "tm",
-                created_version,
-                updated_version,
-                "textMap",
-            )
-            if voice_filter == "with":
-                sql += f"and ({voice_expr}) "
-            elif voice_filter == "without":
-                sql += f"and not ({voice_expr}) "
-            sql += (
-                "order by "
-                "case when tm.hash = ? then 0 else 1 end, "
-                "case when tm.content like ? escape '\\' then 0 else 1 end, "
-                "length(tm.content) "
-                "limit ? offset ?"
-            )
-            # 移除重复的条件，简化查询
-            params.extend([hash_value, exact, limit, offset])
-            return sql, params
-
-        sql_like, params_like = build_sql(False)
+        # 如果启用了FTS且有匹配表达式，构建FTS查询
         if _is_textmap_fts_lang_enabled(langCode) and fts_match is not None:
-            sql_fts, params_fts = build_sql(True)
+            sql_fts, params_fts = _build_textmap_query(
+                use_fts=True,
+                langCode=langCode,
+                exact=exact,
+                fuzzy=fuzzy,
+                fts_match=fts_match,
+                voice_expr=voice_expr,
+                voice_filter=voice_filter,
+                created_version=created_version,
+                updated_version=updated_version,
+                hash_value=hash_value,
+                limit=limit,
+                offset=offset
+            )
             _execute_with_fallback(cursor, sql_fts, params_fts, sql_like, params_like)
         else:
             cursor.execute(sql_like, params_like)
@@ -842,50 +1083,44 @@ def countTextMapFromKeyword(
 ) -> int:
     """
     计算搜索结果数量，优化搜索速度
-    
+
     优化措施：
     1. 使用FTS（全文搜索）与LIKE查询结合，提高搜索速度
     2. 优化FTS查询：使用JOIN代替子查询，减少查询开销
     3. 支持版本过滤，允许用户按游戏版本筛选结果
     4. 使用execute_with_fallback确保查询在不同环境下都能正常执行
-    
+
     这些优化措施在保证计数速度的同时，不会增加数据库体积，实现了速度与体积的平衡
     """
     with closing(conn.cursor()) as cursor:
         exact, fuzzy = _build_like_patterns(keyWord, langCode)
         fts_match = _build_textmap_fts_match(keyWord, langCode)
 
-        sql_like = (
-            "select count(*) from textMap tm "
-            "where tm.lang=? and (tm.content like ? escape '\\' or tm.content like ? escape '\\') "
-        )
-        params_like = [langCode, exact, fuzzy]
-        sql_like = _append_version_filter_clause(
-            sql_like,
-            params_like,
-            "tm",
-            created_version,
-            updated_version,
-            "textMap",
+        # 构建LIKE查询
+        sql_like, params_like = _build_textmap_count_query(
+            use_fts=False,
+            langCode=langCode,
+            exact=exact,
+            fuzzy=fuzzy,
+            fts_match=fts_match,
+            voice_expr=None,
+            voice_filter=None,
+            created_version=created_version,
+            updated_version=updated_version
         )
 
         if _is_textmap_fts_lang_enabled(langCode) and fts_match is not None:
-            # 优化FTS查询：使用JOIN代替子查询，提高性能
-            sql_fts = (
-                f"select count(*) from textMap tm "
-                f"join {_TEXTMAP_FTS_TABLE} fts on fts.rowid = tm.id "
-                f"where fts match ? and fts.lang=? "
-                "and tm.lang=? "
-                "and (tm.content like ? escape '\\' or tm.content like ? escape '\\') "
-            )
-            params_fts = [fts_match, langCode, langCode, exact, fuzzy]
-            sql_fts = _append_version_filter_clause(
-                sql_fts,
-                params_fts,
-                "tm",
-                created_version,
-                updated_version,
-                "textMap",
+            # 构建FTS查询
+            sql_fts, params_fts = _build_textmap_count_query(
+                use_fts=True,
+                langCode=langCode,
+                exact=exact,
+                fuzzy=fuzzy,
+                fts_match=fts_match,
+                voice_expr=None,
+                voice_filter=None,
+                created_version=created_version,
+                updated_version=updated_version
             )
             _execute_with_fallback(cursor, sql_fts, params_fts, sql_like, params_like)
         else:
@@ -903,14 +1138,14 @@ def countTextMapFromKeywordVoice(
 ) -> int:
     """
     计算带语音过滤的搜索结果数量，优化搜索速度
-    
+
     优化措施：
     1. 使用FTS（全文搜索）与LIKE查询结合，提高搜索速度
     2. 优化FTS查询：使用JOIN代替子查询，减少查询开销
     3. 支持语音过滤，允许用户筛选带语音的文本
     4. 支持版本过滤，允许用户按游戏版本筛选结果
     5. 使用execute_with_fallback确保查询在不同环境下都能正常执行
-    
+
     这些优化措施在保证计数速度的同时，不会增加数据库体积，实现了速度与体积的平衡
     """
     with closing(conn.cursor()) as cursor:
@@ -918,41 +1153,32 @@ def countTextMapFromKeywordVoice(
         fts_match = _build_textmap_fts_match(keyWord, langCode)
         voice_expr = _voice_exists_expr("tm.hash")
 
-        def build_sql(use_fts: bool) -> tuple[str, list]:
-            if use_fts:
-                # 优化FTS查询：使用JOIN代替子查询，提高性能
-                sql = (
-                    f"select count(*) from textMap tm "
-                    f"join {_TEXTMAP_FTS_TABLE} fts on fts.rowid = tm.id "
-                    f"where fts match ? and fts.lang=? "
-                    "and tm.lang=? "
-                    "and (tm.content like ? escape '\\' or tm.content like ? escape '\\') "
-                )
-                params = [fts_match, langCode, langCode, exact, fuzzy]
-            else:
-                sql = (
-                    "select count(*) from textMap tm "
-                    "where tm.lang=? and (tm.content like ? escape '\\' or tm.content like ? escape '\\') "
-                )
-                params = [langCode, exact, fuzzy]
+        # 构建LIKE查询
+        sql_like, params_like = _build_textmap_count_query(
+            use_fts=False,
+            langCode=langCode,
+            exact=exact,
+            fuzzy=fuzzy,
+            fts_match=fts_match,
+            voice_expr=voice_expr,
+            voice_filter=voice_filter,
+            created_version=created_version,
+            updated_version=updated_version
+        )
 
-            sql = _append_version_filter_clause(
-                sql,
-                params,
-                "tm",
-                created_version,
-                updated_version,
-                "textMap",
-            )
-            if voice_filter == "with":
-                sql += f"and ({voice_expr})"
-            elif voice_filter == "without":
-                sql += f"and not ({voice_expr})"
-            return sql, params
-
-        sql_like, params_like = build_sql(False)
         if _is_textmap_fts_lang_enabled(langCode) and fts_match is not None:
-            sql_fts, params_fts = build_sql(True)
+            # 构建FTS查询
+            sql_fts, params_fts = _build_textmap_count_query(
+                use_fts=True,
+                langCode=langCode,
+                exact=exact,
+                fuzzy=fuzzy,
+                fts_match=fts_match,
+                voice_expr=voice_expr,
+                voice_filter=voice_filter,
+                created_version=created_version,
+                updated_version=updated_version
+            )
             _execute_with_fallback(cursor, sql_fts, params_fts, sql_like, params_like)
         else:
             cursor.execute(sql_like, params_like)
@@ -1023,7 +1249,7 @@ def selectVoicePathFromTextHash(textHash: int):
         match = cursor.fetchone()
         if match:
             return match[0]
-        
+
         # 再查询fetters表
         sql_fetter = (
             "select voicePath from fetters join voice on voice.dialogueId = fetters.voiceFile "
@@ -1033,7 +1259,7 @@ def selectVoicePathFromTextHash(textHash: int):
         match = cursor.fetchone()
         if match:
             return match[0]
-        
+
         return None
 
 
@@ -1091,6 +1317,12 @@ def getAllVersionValues() -> list[str]:
                         f"SELECT vd.raw_version AS v FROM {table_name} t "
                         f"JOIN {_VERSION_DIM_TABLE} vd ON vd.id = t.created_version_id "
                         f"WHERE t.created_version_id IS NOT NULL",
+                    ]
+                )
+            if table_name != 'quest' and _has_version_id_columns(table_name) and _has_version_dim():
+                # For non-quest tables, also include updated_version_id
+                query_parts.extend(
+                    [
                         f"SELECT vd.raw_version AS v FROM {table_name} t "
                         f"JOIN {_VERSION_DIM_TABLE} vd ON vd.id = t.updated_version_id "
                         f"WHERE t.updated_version_id IS NOT NULL",
@@ -1130,41 +1362,56 @@ def getSourceFromFetter(textHash: int, langCode: int = 1):
         return "{} · {}".format(avatarName, voiceTitle)
 
 
-wanderNames = {}
-travellerNames = {}
-
-
 def getCharterName(avatarId: int, langCode: int = 1):
+    """
+    获取角色名称
+    """
+    cache_key = f"{avatarId}:{langCode}"
+    if cache_key in _CACHE["names"]["characters"]:
+        return _CACHE["names"]["characters"][cache_key]
     with closing(conn.cursor()) as cursor:
         sql2 = 'select content from avatar, textMap where avatarId=? and avatar.nameTextMapHash=textMap.hash and lang=?'
         cursor.execute(sql2, (avatarId, langCode,))
         ans2 = cursor.fetchall()
-        if len(ans2) == 0:
-            return None
-        return ans2[0][0]
+        result = ans2[0][0] if ans2 else None
+        _CACHE["names"]["characters"][cache_key] = result
+        return result
 
 
 def getWanderName(langCode: int = 1):
-    if langCode not in wanderNames:
-        wanderNames[langCode] = getCharterName(10000075, langCode)
-    return wanderNames[langCode]
+    """
+    获取旅行者名称
+    """
+    if langCode in _CACHE["names"]["wander"]:
+        return _CACHE["names"]["wander"][langCode]
+    _CACHE["names"]["wander"][langCode] = getCharterName(10000075, langCode)
+    return _CACHE["names"]["wander"][langCode]
 
 
 def getTravellerName(langCode: int = 1):
-    if langCode not in travellerNames:
-        travellerNames[langCode] = getCharterName(10000005, langCode)
-    return travellerNames[langCode]
+    """
+    获取空旅行者名称
+    """
+    if langCode in _CACHE["names"]["traveller"]:
+        return _CACHE["names"]["traveller"][langCode]
+    _CACHE["names"]["traveller"][langCode] = getCharterName(10000005, langCode)
+    return _CACHE["names"]["traveller"][langCode]
 
 
-def getTalkInfo(textHash: int):
+def getTalkInfo(textHash):
     with closing(conn.cursor()) as cursor:
-        sql1 = 'select talkerType, talkerId, talkId, coopQuestId from dialogue where textHash=?'
-        cursor.execute(sql1, (textHash,))
-        ans = cursor.fetchall()
-        if len(ans) == 0:
+        try:
+            # 确保 textHash 是整数类型
+            textHash_int = int(textHash)
+            sql1 = 'select talkerType, talkerId, talkId, coopQuestId from dialogue where textHash=?'
+            cursor.execute(sql1, (textHash_int,))
+            ans = cursor.fetchall()
+            if len(ans) == 0:
+                return None
+            talkerType, talkerId, talkId, coopQuestId = ans[0]
+            return talkId, talkerType, talkerId, coopQuestId
+        except (ValueError, TypeError):
             return None
-        talkerType, talkerId, talkId, coopQuestId = ans[0]
-        return talkId, talkerType, talkerId, coopQuestId
 
 
 def getTalkerName(talkerType: str, talkerId: int, langCode: int = 1):
@@ -1289,9 +1536,181 @@ def getManualTextMap(placeHolderName, lang):
         sql1 = 'select content from manualTextMap, textMap where textMapId=? and textHash = hash and lang=?'
         cursor.execute(sql1, (placeHolderName, lang))
         ans = cursor.fetchall()
-        if len(ans) > 0:
-            return ans[0][0]
+        if len(ans) == 0:
+            return None
+        return ans[0][0]
+
+
+def selectVoiceFromKeywordPaged(keyWord: str, page: int, size: int, langCode: int):
+    """
+    分页搜索语音
+    """
+    with closing(conn.cursor()) as cursor:
+        # 构建查询
+        sql = """
+        SELECT DISTINCT v.voicePath, d.textHash, tm.content
+        FROM voice v
+        JOIN dialogue d ON v.dialogueId = d.dialogueId
+        JOIN textMap tm ON tm.hash = d.textHash
+        WHERE tm.lang = ? AND (tm.content LIKE ? ESCAPE '\\' OR tm.content LIKE ? ESCAPE '\\')
+        ORDER BY tm.content
+        LIMIT ? OFFSET ?
+        """
+
+        # 构建LIKE模式
+        exact, fuzzy = _build_like_patterns(keyWord, langCode)
+
+        # 计算偏移量
+        offset = (page - 1) * size
+
+        # 执行查询
+        cursor.execute(sql, (langCode, exact, fuzzy, size, offset))
+
+        # 处理结果
+        results = []
+        for voicePath, textHash, content in cursor.fetchall():
+            results.append({
+                'voicePath': voicePath,
+                'textHash': textHash,
+                'content': content
+            })
+
+        return results
+
+
+def getVoicePath(voice_hash: str, lang: int):
+    """
+    获取语音路径
+    """
+    with closing(conn.cursor()) as cursor:
+        # 先查询dialogue表
+        sql_dialogue = """
+        SELECT v.voicePath
+        FROM voice v
+        JOIN dialogue d ON v.dialogueId = d.dialogueId
+        WHERE d.textHash = ?
+        LIMIT 1
+        """
+        cursor.execute(sql_dialogue, (voice_hash,))
+        result = cursor.fetchone()
+        if result:
+            return result[0]
+
+        # 再查询fetters表
+        sql_fetter = """
+        SELECT v.voicePath
+        FROM voice v
+        JOIN fetters f ON v.dialogueId = f.voiceFile
+        WHERE f.voiceFileTextTextMapHash = ? AND (v.avatarId = f.avatarId OR v.avatarId = 0)
+        LIMIT 1
+        """
+        cursor.execute(sql_fetter, (voice_hash,))
+        result = cursor.fetchone()
+        if result:
+            return result[0]
+
         return None
+
+
+def getTextMapByHash(hash_val: str, lang: int):
+    """
+    根据哈希值获取文本映射
+    """
+    with closing(conn.cursor()) as cursor:
+        sql = """
+        SELECT content
+        FROM textMap
+        WHERE hash = ? AND lang = ?
+        LIMIT 1
+        """
+        cursor.execute(sql, (hash_val, lang))
+        result = cursor.fetchone()
+        return result[0] if result else None
+
+
+# 从 dbBuild/versioning.py 导入 get_current_version 函数
+try:
+    import sys
+    import os
+    import importlib.util
+
+    # 使用 importlib 加载模块
+    versioning_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'dbBuild', 'versioning.py')
+    spec = importlib.util.spec_from_file_location("versioning", versioning_path)
+    if spec and spec.loader:
+        versioning = importlib.util.module_from_spec(spec)
+        sys.modules["versioning"] = versioning
+        spec.loader.exec_module(versioning)
+        get_current_version = versioning.get_current_version
+    else:
+        raise ImportError("Failed to create module spec")
+except Exception:
+    # 如果导入失败，定义一个默认函数
+    def get_current_version():
+        return "unknown"
+
+
+def getVersionData(lang_code: int | None = None, include_current: bool = False):
+    """
+    获取版本数据
+
+    Args:
+        lang_code: 语言代码，用于过滤版本（None表示获取所有版本）
+        include_current: 是否包含当前版本信息
+
+    Returns:
+        如果include_current为True：返回包含versions和currentVersion的字典
+        如果include_current为False：返回版本值列表
+    """
+    if lang_code is None:
+        versions = getAllVersionValues()
+    else:
+        # 根据语言代码从 quest_version 表中获取版本
+        values: set[str] = set()
+        with closing(conn.cursor()) as cursor:
+            # 从 quest_version 表中获取指定语言的更新版本
+            cursor.execute(
+                """
+                SELECT DISTINCT vd.raw_version
+                FROM quest_version qv
+                JOIN version_dim vd ON vd.id = qv.updated_version_id
+                WHERE qv.lang = ?
+                  AND vd.raw_version IS NOT NULL
+                """,
+                (lang_code,)
+            )
+            rows = cursor.fetchall()
+            for (raw_value,) in rows:
+                text = str(raw_value).strip()
+                if text:
+                    values.add(text)
+
+            # 从 quest 表中获取创建版本（共通版本）
+            cursor.execute(
+                """
+                SELECT DISTINCT vd.raw_version
+                FROM quest q
+                JOIN version_dim vd ON vd.id = q.created_version_id
+                WHERE vd.raw_version IS NOT NULL
+                """
+            )
+            rows = cursor.fetchall()
+            for (raw_value,) in rows:
+                text = str(raw_value).strip()
+                if text:
+                    values.add(text)
+
+        versions = list(values)
+
+    if include_current:
+        # 构建版本数据
+        version_data = {
+            'versions': versions,
+            'currentVersion': get_current_version()
+        }
+        return version_data
+    else:
+        return versions
 
 
 def getTalkContent(talkId: int, coopQuestId: int | None):
@@ -1306,6 +1725,18 @@ def getTalkContent(talkId: int, coopQuestId: int | None):
             cursor.execute(sql1, (talkId, coopQuestId))
         ans = cursor.fetchall()
         return ans if len(ans) > 0 else None
+
+
+def isTextHashFromQuest(textHash: int) -> bool:
+    """
+    检查文本哈希是否来自任务相关的对话
+    """
+    talkInfo = getTalkInfo(textHash)
+    if talkInfo is None:
+        return False
+    talkId, _, _, coopQuestId = talkInfo
+    questId = getTalkQuestId(talkId)
+    return questId is not None
 
 
 def getLangCodeMap():
@@ -1343,7 +1774,12 @@ def selectReadableFromKeyword(
             f"select fileName, content, titleTextMapHash, readableId, {version_select} from readable "
             f"where lang in ({lang_placeholders}) and (content like ? escape '\\' or content like ? escape '\\') "
         )
-        params = readable_langs + [exact, fuzzy, exact]
+        params = []
+        for lang in readable_langs:
+            params.append(lang)
+        params.append(exact)
+        params.append(fuzzy)
+        params.append(exact)
         sql = _append_version_filter_clause(
             sql + " ",
             params,
@@ -1355,10 +1791,10 @@ def selectReadableFromKeyword(
         sql += "order by case when content like ? escape '\\' then 0 else 1 end, length(content) "
         if limit is not None:
             sql += " limit ?"
-            params.append(limit)
+            params.append(int(limit))
         if offset is not None and offset > 0:
             sql += " offset ?"
-            params.append(offset)
+            params.append(int(offset))
         cursor.execute(sql, params)
         return cursor.fetchall()
 
@@ -1512,7 +1948,7 @@ def selectQuestByTitleKeyword(
 ):
     with closing(conn.cursor()) as cursor:
         exact, fuzzy = _build_like_patterns(keyword, langCode)
-        version_select = _version_select_expr("quest", "quest")
+        version_select = _version_select_expr("quest", "quest", langCode)
         sql = (
             f"select quest.questId, textMap.content, {version_select} from quest "
             "join textMap on quest.titleTextMapHash=textMap.hash "
@@ -1545,7 +1981,7 @@ def selectQuestByIdContains(
     with closing(conn.cursor()) as cursor:
         escaped = _escape_like(keyword)
         pattern = f"%{escaped}%"
-        version_select = _version_select_expr("quest", "quest")
+        version_select = _version_select_expr("quest", "quest", langCode)
         sql = (
             f"select quest.questId, textMap.content, {version_select} "
             "from quest "
@@ -1560,6 +1996,7 @@ def selectQuestByIdContains(
             created_version,
             updated_version,
             "quest",
+            langCode,
         )
         sql += "order by length(cast(quest.questId as text)) limit 200"
         cursor.execute(sql, params)
@@ -1639,7 +2076,9 @@ def selectAvatarVoiceItemsByFilters(
             "and contentText.lang = ? "
             "where 1=1 "
         )
-        params = [langCode, langCode]
+        params = []
+        params.append(langCode)
+        params.append(langCode)
 
         if keyword_text:
             sql += (
@@ -1648,7 +2087,10 @@ def selectAvatarVoiceItemsByFilters(
                 "or (contentText.content like ? escape '\\' or contentText.content like ? escape '\\')"
                 ") "
             )
-            params.extend([exact, fuzzy, exact, fuzzy])
+            params.append(exact)
+            params.append(fuzzy)
+            params.append(exact)
+            params.append(fuzzy)
 
         sql = _append_textmap_exists_version_filter(
             sql,
@@ -1714,7 +2156,10 @@ def selectAvatarStoryItemsByFilters(
             "left join textMap as contextText on contextText.hash = entries.contextHash and contextText.lang = ? "
             "where 1=1 "
         )
-        params = [langCode, langCode, langCode]
+        params = []
+        params.append(langCode)
+        params.append(langCode)
+        params.append(langCode)
 
         if keyword_text:
             sql += (
@@ -1724,7 +2169,12 @@ def selectAvatarStoryItemsByFilters(
                 "or (contextText.content like ? escape '\\' or contextText.content like ? escape '\\')"
                 ") "
             )
-            params.extend([exact, fuzzy, exact, fuzzy, exact, fuzzy])
+            params.append(exact)
+            params.append(fuzzy)
+            params.append(exact)
+            params.append(fuzzy)
+            params.append(exact)
+            params.append(fuzzy)
 
         sql = _append_textmap_exists_version_filter(
             sql,
@@ -1744,7 +2194,9 @@ def selectAvatarStoryItemsByFilters(
                 "length(coalesce(titleText.content, lockedText.content, contextText.content, '')), "
                 "entries.fetterId "
             )
-            params.extend([exact, exact, exact])
+            params.append(exact)
+            params.append(exact)
+            params.append(exact)
         else:
             sql += "order by entries.fetterId "
 
@@ -1764,7 +2216,7 @@ def selectQuestByChapterKeyword(
 ):
     with closing(conn.cursor()) as cursor:
         exact, fuzzy = _build_like_patterns(keyword, langCode)
-        version_select = _version_select_expr("quest", "quest")
+        version_select = _version_select_expr("quest", "quest", langCode)
         sql = (
             "select quest.questId, questTitle.content, chapterTitle.content, chapterNum.content, "
             f"{version_select} "
@@ -1796,6 +2248,7 @@ def selectQuestByChapterKeyword(
             created_version,
             updated_version,
             "quest",
+            langCode,
         )
         sql += (
             "order by case when (chapterTitle.content like ? escape '\\' or chapterNum.content like ? escape '\\') then 0 else 1 end, "
@@ -1984,7 +2437,7 @@ def selectQuestByVersion(
     limit: int | None = 2000,
 ):
     with closing(conn.cursor()) as cursor:
-        version_select = _version_select_expr("quest", "quest")
+        version_select = _version_select_expr("quest", "quest", langCode)
         sql = (
             f"select quest.questId, textMap.content, {version_select} "
             "from quest "
@@ -1999,6 +2452,7 @@ def selectQuestByVersion(
             created_version,
             updated_version,
             "quest",
+            langCode,
         )
         sql += "order by quest.questId "
         if limit is not None:
@@ -2072,10 +2526,10 @@ def selectSubtitleFromKeyword(
         sql += "order by case when content like ? escape '\\' then 0 else 1 end, length(content) "
         if limit is not None:
             sql += " limit ?"
-            params.append(limit)
+            params.append(int(limit))
         if offset is not None and offset > 0:
             sql += " offset ?"
-            params.append(offset)
+            params.append(int(offset))
         cursor.execute(sql, params)
         return cursor.fetchall()
 
@@ -2360,7 +2814,8 @@ def selectDialogueByTalkerType(
             "from dialogue where talkerType=? "
             " "
         )
-        params = [talkerType]
+        params = []
+        params.append(talkerType)
         sql = _append_textmap_exists_version_filter(
             sql,
             params,
@@ -2371,7 +2826,7 @@ def selectDialogueByTalkerType(
         sql += "order by dialogueId"
         if limit is not None:
             sql += " limit ?"
-            params.append(limit)
+            params.append(int(limit))
         cursor.execute(sql, params)
         return cursor.fetchall()
 
@@ -2604,3 +3059,6 @@ def selectSubtitleContextBySubtitleId(subtitleId: int, langs: list[int]):
         params = file_candidates + langs + [anchor_start - 0.5, anchor_start + 0.5]
         cursor.execute(sql, params)
         return cursor.fetchall()
+
+
+

@@ -7,7 +7,8 @@ class LightweightProgress:
         self.unit = unit
         self.current = 0
         self.start_time = time.time()
-        print(f"{desc}: 0/{total} {unit}")
+        # 初始打印也使用\r格式, 确保与后续更新保持一致
+        print(f"\r{desc}: 0/{total} {unit}", end='', flush=True)
 
     def __enter__(self):
         return self
@@ -38,7 +39,20 @@ class LightweightProgress:
                 remaining_str = self._format_time(remaining)
             else:
                 remaining_str = "N/A"
-            print(f"{self.desc}: {self.current}/{self.total} {self.unit} - 剩余时间: {remaining_str}")
+            # 使用\r实现同一位置刷新，end=''避免自动换行
+            print(f"\r{self.desc}: {self.current}/{self.total} {self.unit} - 剩余时间: {remaining_str}", end='', flush=True)
+            # 完成时添加换行
+            if self.current >= self.total:
+                print()
 
     def set_postfix_str(self, s):
-        pass
+        elapsed = time.time() - self.start_time
+        if self.current > 0:
+            progress_ratio = self.current / self.total
+            total_time = elapsed / progress_ratio
+            remaining = total_time - elapsed
+            remaining_str = self._format_time(remaining)
+        else:
+            remaining_str = "N/A"
+        # 显示带后缀的进度条
+        print(f"\r{self.desc}: {self.current}/{self.total} {self.unit} - 剩余时间: {remaining_str} - {s}", end='', flush=True)

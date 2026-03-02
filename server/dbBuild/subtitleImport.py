@@ -13,8 +13,8 @@ from import_utils import (
 from lang_constants import LANG_CODE_MAP
 from localization_utils import build_subtitle_filename_map, load_localization_entries
 from subtitle_utils import iter_srt_entries, subtitle_key
-from subtitle_version_utils import assign_subtitle_versions_by_text
-from versioning import ensure_version_schema, get_current_version, get_or_create_version_id
+from version_control import assign_subtitle_versions_by_text, should_update_version
+from version_control import ensure_version_schema, get_current_version, get_or_create_version_id
 from textmap_name_utils import analyze_subtitle_exceptions, report_exceptions, delete_empty_subtitle_entries
 
 
@@ -147,21 +147,35 @@ def importSubtitlesByFiles(
                     version_id,
                 )
 
-                cursor.execute("DELETE FROM subtitle WHERE fileName=? AND lang=?", (clean_file_name, lang_id))
+                # 创建现有行的映射，用于快速查找
+                existing_map = {row[0]: (row[1], row[2], row[3]) for row in existing_rows}
+
+                # 只删除需要更新的行
+                to_delete = []
+                to_insert = []
+
                 for key, start_time, end_time, text_content, created_id, updated_id in assigned_rows:
-                    writer.add(
-                        (
-                            clean_file_name,
-                            lang_id,
-                            start_time,
-                            end_time,
-                            text_content,
-                            subtitle_id,
-                            key,
-                            created_id,
-                            updated_id,
-                        )
-                    )
+                    if key in existing_map:
+                        old_content, old_created, old_updated = existing_map[key]
+                        # 只有当版本或内容发生变化时才更新
+                        content_changed = old_content != text_content
+                        created_version_changed = should_update_version(old_created, created_id, is_created=True)
+                        updated_version_changed = should_update_version(old_updated, updated_id, is_created=False)
+
+                        if content_changed or created_version_changed or updated_version_changed:
+                            to_delete.append(key)
+                            to_insert.append((clean_file_name, lang_id, start_time, end_time, text_content, subtitle_id, key, created_id, updated_id))
+                    else:
+                        # 新行，直接插入
+                        to_insert.append((clean_file_name, lang_id, start_time, end_time, text_content, subtitle_id, key, created_id, updated_id))
+
+                # 执行删除和插入操作
+                if to_delete:
+                    placeholders = ",".join(["?"] * len(to_delete))
+                    cursor.execute(f"DELETE FROM subtitle WHERE subtitleKey IN ({placeholders})", to_delete)
+
+                for row in to_insert:
+                    writer.add(row)
             except Exception as e:
                 process_errors.append(f"{lang_name}/{os.path.basename(full_path)} ({e})")
             finally:
@@ -219,8 +233,13 @@ def importSubtitles(
     prune_missing: bool = True,
     batch_size: int = DEFAULT_BATCH_SIZE,
     current_version: str | None = None,
+    write_versions: bool = True,
 ):
     ensure_version_schema()
+    version_id: int | None = None
+    if write_versions:
+        version = current_version or get_current_version()
+        version_id = get_or_create_version_id(version)
 
     filename_to_info = _load_subtitle_filename_map()
 
@@ -280,23 +299,73 @@ def importSubtitles(
                 with open(full_path, "r", encoding="utf-8", errors="ignore") as f:
                     content = f.read()
 
+                # 获取现有的字幕行
+                existing_rows = cursor.execute(
+                    """
+                    SELECT subtitleKey, content, created_version_id, updated_version_id
+                    FROM subtitle
+                    WHERE fileName=? AND lang=?
+                    """,
+                    (cleanFileName, lang_id),
+                ).fetchall()
+
+                # 解析新的字幕行
+                parsed_rows: list[tuple[str, float, float, str]] = []
                 for start_time, end_time, text_content in iter_srt_entries(content):
                     key = subtitle_key(cleanFileName, lang_id, start_time, end_time)
-                    writer.add(
-                        (
-                            cleanFileName,
-                            lang_id,
-                            start_time,
-                            end_time,
-                            text_content,
-                            subtitle_id,
-                            key,
-                            None,
-                            None,
-                        ),
-                        (key,),
-                    )
-                subtitle_data.append((cleanFileName, lang_id, key, start_time, end_time, text_content))
+                    parsed_rows.append((key, start_time, end_time, text_content))
+                    subtitle_data.append((cleanFileName, lang_id, key, start_time, end_time, text_content))
+
+                # 分配版本
+                assigned_rows = assign_subtitle_versions_by_text(
+                    existing_rows,
+                    parsed_rows,
+                    version_id,
+                )
+
+                # 创建现有行的映射，用于快速查找
+                existing_map = {row[0]: (row[1], row[2], row[3]) for row in existing_rows}
+
+                # 只处理需要更新的行
+                for key, start_time, end_time, text_content, created_id, updated_id in assigned_rows:
+                    if key in existing_map:
+                        old_content, old_created, old_updated = existing_map[key]
+                        # 只有当版本或内容发生变化时才更新
+                        content_changed = old_content != text_content
+                        created_version_changed = should_update_version(old_created, created_id, is_created=True)
+                        updated_version_changed = should_update_version(old_updated, updated_id, is_created=False)
+
+                        if content_changed or created_version_changed or updated_version_changed:
+                            writer.add(
+                                (
+                                    cleanFileName,
+                                    lang_id,
+                                    start_time,
+                                    end_time,
+                                    text_content,
+                                    subtitle_id,
+                                    key,
+                                    created_id,
+                                    updated_id,
+                                ),
+                                (key,),
+                            )
+                    else:
+                        # 新行，直接插入
+                        writer.add(
+                            (
+                                cleanFileName,
+                                lang_id,
+                                start_time,
+                                end_time,
+                                text_content,
+                                subtitle_id,
+                                key,
+                                created_id,
+                                updated_id,
+                            ),
+                            (key,),
+                        )
 
             except Exception as e:
                 process_errors.append(f"{lang_name}/{file_name} ({e})")
@@ -304,12 +373,12 @@ def importSubtitles(
                 pbar.update()
 
     writer.flush()
-    
+
     # 分析并报告异常情况
     if subtitle_data:
         exception_data = analyze_subtitle_exceptions(subtitle_data)
         report_exceptions(exception_data, "Subtitle")
-        
+
         # 删除源文件和数据库中内容均为空白的条目
         print("删除空白Subtitle条目...")
         subtitle_root = os.path.join(DATA_PATH, "Subtitle")
