@@ -199,27 +199,37 @@ def selectVoiceOriginFromTextHash(textHash: int, langCode: int) -> tuple[str, bo
 
 
 def queryTextHashInfo(textHash: int, langs: 'list[int]', sourceLangCode: int, queryOrigin=True):
+    """
+    查询文本哈希的信息
+    - 获取多语言翻译
+    - 查询语音路径
+    - 获取版本信息
+    """
     obj = {'translates': {}, 'voicePaths': [], 'hash': textHash}
+    # 去重并添加源语言
     lang_list = list(dict.fromkeys(langs or []))
     if sourceLangCode and sourceLangCode not in lang_list:
         lang_list.append(sourceLangCode)
 
+    # 获取翻译
     translates = databaseHelper.selectTextMapFromTextHash(textHash, lang_list)
     if not translates:
-        # Fallback: selected langs may be missing, return at least one available language.
+        # 回退：如果选择的语言没有翻译，返回至少一种可用语言
         translates = databaseHelper.selectTextMapFromTextHash(textHash, None)
     for translate in translates:
         # #开头的要进行占位符替换
         if translate[0].startswith("#"):
-            obj['translates'][translate[1]] = (placeholderHandler.replace(translate[0], config.getIsMale(), translate[1]))[1:]
+            obj['translates'][str(translate[1])] = placeholderHandler.replace(translate[0], config.getIsMale(), translate[1])
         else:
-            obj['translates'][translate[1]] = translate[0]
+            obj['translates'][str(translate[1])] = translate[0]
 
+    # 查询来源信息
     if queryOrigin:
         origin, isTalk = selectVoiceOriginFromTextHash(textHash, sourceLangCode)
         obj['isTalk'] = isTalk
         obj['origin'] = origin
 
+    # 查询语音路径
     voicePath = selectVoicePathFromTextHash(textHash)
     if voicePath is not None:
         voiceExist = False
@@ -231,12 +241,19 @@ def queryTextHashInfo(textHash: int, langs: 'list[int]', sourceLangCode: int, qu
         if voiceExist:
             obj['voicePaths'].append(voicePath)
 
+    # 添加版本信息
     created_raw, updated_raw = databaseHelper.getTextMapVersionInfo(textHash, sourceLangCode)
     obj.update(_build_version_fields(created_raw, updated_raw))
     return obj
 
 
 def _resolve_avatar_query_langs(search_lang: int | None = None) -> tuple[list[int], int, int]:
+    """
+    解析角色查询的语言设置
+    - 获取结果语言列表
+    - 添加搜索语言（如果不在结果语言列表中）
+    - 确定源语言和关键词语言
+    """
     langs = config.getResultLanguages().copy()
     if search_lang and search_lang not in langs:
         langs.append(search_lang)
@@ -365,7 +382,7 @@ def _build_text_map_translates(text_hash: int | None, langs: 'list[int]'):
         return None
     result = {}
     for content, lang_code in translates:
-        result[lang_code] = _normalize_text_map_content(content, lang_code)
+        result[str(lang_code)] = _normalize_text_map_content(content, lang_code)
     return result if result else None
 
 
@@ -399,222 +416,208 @@ def _build_lang_str_to_id_map() -> dict[str, int]:
     return result
 
 
-def getTranslateObj(
-    keyword: str,
-    langCode: int,
-    speaker: str | None = None,
-    page: int = 1,
-    page_size: int = 50,
-    voice_filter: str = "all",
-    created_version: str | None = None,
-    updated_version: str | None = None,
-):
-    speaker_keyword = (speaker or "").strip()
-    keyword_trim = keyword.strip()
-    created_version_filter = _normalize_version_filter(created_version)
-    updated_version_filter = _normalize_version_filter(updated_version)
-    
-    # 生成缓存键
-    cache_key = (
-        keyword_trim,
-        langCode,
-        speaker_keyword,
-        page,
-        page_size,
-        voice_filter,
-        created_version_filter,
-        updated_version_filter
-    )
-    
-    # 尝试从缓存中获取结果
-    cached_result = search_cache.get(cache_key)
-    if cached_result:
-        return cached_result
+def _normalize_speaker(value: str, langCode: int) -> str:
+    """
+    标准化说话者名称
+    """
+    normalized = value.strip().lower()
+    if langCode in databaseHelper.CHINESE_LANG_CODES:
+        normalized = "".join(normalized.split())
+    return normalized
 
-    def normalize_speaker(value: str) -> str:
-        normalized = value.strip().lower()
-        if langCode in databaseHelper.CHINESE_LANG_CODES:
-            normalized = "".join(normalized.split())
-        return normalized
 
+def _apply_voice_filter(entries: list[dict], voice_filter: str) -> list[dict]:
+    """
+    应用语音过滤
+    """
+    if voice_filter == "with":
+        return [entry for entry in entries if len(entry.get('voicePaths', [])) > 0]
+    if voice_filter == "without":
+        return [entry for entry in entries if len(entry.get('voicePaths', [])) == 0]
+    return entries
+
+
+def _paginate(entries: list[dict], page: int, page_size: int, total: int | None = None) -> tuple[list[dict], int]:
+    """
+    分页处理
+    """
+    total_count = total if total is not None else len(entries)
     safe_page = page if page and page > 0 else 1
     safe_size = page_size if page_size and page_size > 0 else 50
-    page_end = safe_page * safe_size
-    candidate_limit = page_end if voice_filter == "all" else page_end * 3
+    start = (safe_page - 1) * safe_size
+    end = start + safe_size
+    return entries[start:end], total_count
 
-    def apply_voice_filter(entries: list[dict]) -> list[dict]:
-        if voice_filter == "with":
-            return [entry for entry in entries if len(entry.get('voicePaths', [])) > 0]
-        if voice_filter == "without":
-            return [entry for entry in entries if len(entry.get('voicePaths', [])) == 0]
-        return entries
 
-    def paginate(entries: list[dict], total: int | None = None) -> tuple[list[dict], int]:
-        total_count = total if total is not None else len(entries)
-        safe_page = page if page and page > 0 else 1
-        safe_size = page_size if page_size and page_size > 0 else 50
-        start = (safe_page - 1) * safe_size
-        end = start + safe_size
-        return entries[start:end], total_count
+def _handle_speaker_only_query(speaker_keyword: str, langCode: int, page: int, page_size: int, voice_filter: str, created_version_filter: str | None, updated_version_filter: str | None) -> tuple[list[dict], int]:
+    """
+    处理仅说话者查询
+    """
+    ans = []
+    langs = config.getResultLanguages().copy()
+    if langCode not in langs:
+        langs.append(langCode)
+    sourceLangCode = config.getSourceLanguage()
 
-    if keyword_trim == "" and speaker_keyword:
-        ans = []
-        langs = config.getResultLanguages().copy()
-        if langCode not in langs:
-            langs.append(langCode)
-        sourceLangCode = config.getSourceLanguage()
+    seen_hashes = set()
+    speaker_norm = _normalize_speaker(speaker_keyword, langCode)
 
-        seen_hashes = set()
-        speaker_norm = normalize_speaker(speaker_keyword)
+    # 查询对话
+    dialogue_rows = databaseHelper.selectDialogueByTalkerKeyword(
+        speaker_keyword,
+        langCode,
+        page * page_size * 3,
+        created_version_filter,
+        updated_version_filter,
+    )
+    for textHash, talkerType, talkerId, _dialogueId in dialogue_rows:
+        if textHash in seen_hashes:
+            continue
+        seen_hashes.add(textHash)
+        obj = queryTextHashInfo(textHash, langs, sourceLangCode)
+        obj['talker'] = databaseHelper.getTalkerName(talkerType, talkerId, sourceLangCode)
+        ans.append(obj)
 
-        dialogue_rows = databaseHelper.selectDialogueByTalkerKeyword(
-            speaker_keyword,
-            langCode,
-            candidate_limit,
+    total = _count_dialogue_by_talker_keyword_cached(
+        speaker_keyword,
+        langCode,
+        created_version_filter,
+        updated_version_filter,
+    )
+
+    # 查询特殊说话者类型
+    for talkerType in ("TALK_ROLE_PLAYER", "TALK_ROLE_MATE_AVATAR"):
+        talkerName = databaseHelper.getTalkerName(talkerType, 0, langCode)
+        if not talkerName:
+            continue
+        talker_norm = _normalize_speaker(talkerName, langCode)
+        if speaker_norm not in talker_norm:
+            continue
+        talker_rows = databaseHelper.selectDialogueByTalkerType(
+            talkerType,
+            page * page_size * 3,
             created_version_filter,
             updated_version_filter,
         )
-        for textHash, talkerType, talkerId, _dialogueId in dialogue_rows:
+        for textHash, talkerType, talkerId, _dialogueId in talker_rows:
             if textHash in seen_hashes:
                 continue
             seen_hashes.add(textHash)
             obj = queryTextHashInfo(textHash, langs, sourceLangCode)
             obj['talker'] = databaseHelper.getTalkerName(talkerType, talkerId, sourceLangCode)
             ans.append(obj)
-
-        total = _count_dialogue_by_talker_keyword_cached(
-            speaker_keyword,
-            langCode,
+        total += _count_dialogue_by_talker_type_cached(
+            talkerType,
             created_version_filter,
             updated_version_filter,
         )
 
-        for talkerType in ("TALK_ROLE_PLAYER", "TALK_ROLE_MATE_AVATAR"):
-            talkerName = databaseHelper.getTalkerName(talkerType, 0, langCode)
-            if not talkerName:
-                continue
-            talker_norm = normalize_speaker(talkerName)
-            if speaker_norm not in talker_norm:
-                continue
-            talker_rows = databaseHelper.selectDialogueByTalkerType(
-                talkerType,
-                candidate_limit,
-                created_version_filter,
-                updated_version_filter,
-            )
-            for textHash, talkerType, talkerId, _dialogueId in talker_rows:
-                if textHash in seen_hashes:
-                    continue
-                seen_hashes.add(textHash)
-                obj = queryTextHashInfo(textHash, langs, sourceLangCode)
-                obj['talker'] = databaseHelper.getTalkerName(talkerType, talkerId, sourceLangCode)
-                ans.append(obj)
-            total += _count_dialogue_by_talker_type_cached(
-                talkerType,
-                created_version_filter,
-                updated_version_filter,
-            )
+    ans = _apply_voice_filter(ans, voice_filter)
+    return _paginate(ans, page, page_size, total)
 
-        ans = apply_voice_filter(ans)
-        result = paginate(ans, total)
-    # 将结果缓存
-    search_cache.set(cache_key, result)
-    return result
-    if keyword_trim != "" and speaker_keyword:
-        ans = []
-        langs = config.getResultLanguages().copy()
-        if langCode not in langs:
-            langs.append(langCode)
-        sourceLangCode = config.getSourceLanguage()
 
-        seen_hashes = set()
+def _handle_speaker_and_keyword_query(speaker_keyword: str, keyword_trim: str, langCode: int, page: int, page_size: int, voice_filter: str, created_version_filter: str | None, updated_version_filter: str | None) -> tuple[list[dict], int]:
+    """
+    处理说话者和关键词查询
+    """
+    ans = []
+    langs = config.getResultLanguages().copy()
+    if langCode not in langs:
+        langs.append(langCode)
+    sourceLangCode = config.getSourceLanguage()
 
-        dialogue_rows = databaseHelper.selectDialogueByTalkerAndKeyword(
-            speaker_keyword,
+    seen_hashes = set()
+
+    # 查询对话
+    dialogue_rows = databaseHelper.selectDialogueByTalkerAndKeyword(
+        speaker_keyword,
+        keyword_trim,
+        langCode,
+        page * page_size * 3,
+        created_version_filter,
+        updated_version_filter,
+    )
+    for textHash, talkerType, talkerId, _dialogueId in dialogue_rows:
+        if textHash in seen_hashes:
+            continue
+        seen_hashes.add(textHash)
+        obj = queryTextHashInfo(textHash, langs, sourceLangCode)
+        obj['talker'] = databaseHelper.getTalkerName(talkerType, talkerId, langCode)
+        ans.append(obj)
+
+    total = _count_dialogue_by_talker_and_keyword_cached(
+        speaker_keyword,
+        keyword_trim,
+        langCode,
+        created_version_filter,
+        updated_version_filter,
+    )
+
+    # 查询特殊说话者类型
+    speaker_norm = _normalize_speaker(speaker_keyword, langCode)
+    for talkerType in ("TALK_ROLE_PLAYER", "TALK_ROLE_MATE_AVATAR"):
+        talkerName = databaseHelper.getTalkerName(talkerType, 0, langCode)
+        if not talkerName:
+            continue
+        talker_norm = _normalize_speaker(talkerName, langCode)
+        if speaker_norm not in talker_norm:
+            continue
+        talker_rows = databaseHelper.selectDialogueByTalkerTypeAndKeyword(
+            talkerType,
             keyword_trim,
             langCode,
-            candidate_limit,
+            page * page_size * 3,
             created_version_filter,
             updated_version_filter,
         )
-        for textHash, talkerType, talkerId, _dialogueId in dialogue_rows:
+        for textHash, talkerType, talkerId, _dialogueId in talker_rows:
             if textHash in seen_hashes:
                 continue
             seen_hashes.add(textHash)
             obj = queryTextHashInfo(textHash, langs, sourceLangCode)
             obj['talker'] = databaseHelper.getTalkerName(talkerType, talkerId, langCode)
             ans.append(obj)
-
-        total = _count_dialogue_by_talker_and_keyword_cached(
-            speaker_keyword,
+        total += _count_dialogue_by_talker_type_and_keyword_cached(
+            talkerType,
             keyword_trim,
             langCode,
             created_version_filter,
             updated_version_filter,
         )
 
-        speaker_norm = normalize_speaker(speaker_keyword)
-        for talkerType in ("TALK_ROLE_PLAYER", "TALK_ROLE_MATE_AVATAR"):
-            talkerName = databaseHelper.getTalkerName(talkerType, 0, langCode)
-            if not talkerName:
-                continue
-            talker_norm = normalize_speaker(talkerName)
-            if speaker_norm not in talker_norm:
-                continue
-            talker_rows = databaseHelper.selectDialogueByTalkerTypeAndKeyword(
-                talkerType,
-                keyword_trim,
-                langCode,
-                candidate_limit,
-                created_version_filter,
-                updated_version_filter,
-            )
-            for textHash, talkerType, talkerId, _dialogueId in talker_rows:
-                if textHash in seen_hashes:
-                    continue
-                seen_hashes.add(textHash)
-                obj = queryTextHashInfo(textHash, langs, sourceLangCode)
-                obj['talker'] = databaseHelper.getTalkerName(talkerType, talkerId, langCode)
-                ans.append(obj)
-            total += _count_dialogue_by_talker_type_and_keyword_cached(
-                talkerType,
-                keyword_trim,
-                langCode,
-                created_version_filter,
-                updated_version_filter,
-            )
+    # 查询角色语音
+    fetter_rows = databaseHelper.selectFetterBySpeakerAndKeyword(
+        speaker_keyword,
+        keyword_trim,
+        langCode,
+        page * page_size * 3,
+        created_version_filter,
+        updated_version_filter,
+    )
+    for textHash, avatarId in fetter_rows:
+        if textHash in seen_hashes:
+            continue
+        seen_hashes.add(textHash)
+        obj = queryTextHashInfo(textHash, langs, sourceLangCode)
+        obj['talker'] = databaseHelper.getCharterName(avatarId, langCode)
+        ans.append(obj)
+    total += _count_fetter_by_speaker_and_keyword_cached(
+        speaker_keyword,
+        keyword_trim,
+        langCode,
+        created_version_filter,
+        updated_version_filter,
+    )
 
-        fetter_rows = databaseHelper.selectFetterBySpeakerAndKeyword(
-            speaker_keyword,
-            keyword_trim,
-            langCode,
-            candidate_limit,
-            created_version_filter,
-            updated_version_filter,
-        )
-        for textHash, avatarId in fetter_rows:
-            if textHash in seen_hashes:
-                continue
-            seen_hashes.add(textHash)
-            obj = queryTextHashInfo(textHash, langs, sourceLangCode)
-            obj['talker'] = databaseHelper.getCharterName(avatarId, langCode)
-            ans.append(obj)
-        total += _count_fetter_by_speaker_and_keyword_cached(
-            speaker_keyword,
-            keyword_trim,
-            langCode,
-            created_version_filter,
-            updated_version_filter,
-        )
+    ans = _apply_voice_filter(ans, voice_filter)
+    return _paginate(ans, page, page_size, total)
 
-        ans = apply_voice_filter(ans)
-        result = paginate(ans, total)
-    # 将结果缓存
-    search_cache.set(cache_key, result)
-    return result
-    # 找出目标语言的textMap包含keyword的文本
+
+def _handle_keyword_only_query(keyword: str, keyword_trim: str, langCode: int, page: int, page_size: int, voice_filter: str, created_version_filter: str | None, updated_version_filter: str | None) -> tuple[list[dict], int]:
+    """
+    处理仅关键词查询
+    """
     ans = []
-
     langs = config.getResultLanguages().copy()
     if langCode not in langs:
         langs.append(langCode)
@@ -626,6 +629,7 @@ def getTranslateObj(
     hash_obj = None
     hash_extra = False
 
+    # 处理哈希查询
     if hash_value is not None:
         hash_obj = queryTextHashInfo(hash_value, langs, sourceLangCode)
         if hash_obj.get('translates'):
@@ -652,14 +656,138 @@ def getTranslateObj(
         "Wings": "风之翼",
     }
 
+    safe_page = page if page and page > 0 else 1
+    safe_size = page_size if page_size and page > 0 else 50
+
     if voice_filter == "all":
-        total_textmap = _count_textmap_from_keyword_cached(
+        return _handle_all_voice_filter(keyword, keyword_trim, langCode, safe_page, safe_size, hash_value, is_hash_query, hash_obj, hash_extra, text_hashes_seen, langs, sourceLangCode, langStr, targetLangStrs, strToLangId, prefix_labels, created_version_filter, updated_version_filter)
+    else:
+        return _handle_specific_voice_filter(keyword, keyword_trim, langCode, safe_page, safe_size, voice_filter, hash_value, is_hash_query, hash_obj, hash_extra, text_hashes_seen, langs, sourceLangCode, langStr, targetLangStrs, strToLangId, prefix_labels, created_version_filter, updated_version_filter)
+
+
+def _handle_all_voice_filter(keyword, keyword_trim, langCode, safe_page, safe_size, hash_value, is_hash_query, hash_obj, hash_extra, text_hashes_seen, langs, sourceLangCode, langStr, targetLangStrs, strToLangId, prefix_labels, created_version_filter, updated_version_filter):
+    """
+    处理所有语音过滤
+    """
+    # 计算总数
+    total_textmap = _count_textmap_from_keyword_cached(
+        keyword,
+        langCode,
+        created_version_filter,
+        updated_version_filter,
+    )
+    total_readable = 0
+    if langStr:
+        total_readable = _count_readable_from_keyword_cached(
             keyword,
             langCode,
+            langStr,
             created_version_filter,
             updated_version_filter,
         )
-        total_readable = 0
+    total_subtitle = _count_subtitle_from_keyword_cached(
+        keyword,
+        langCode,
+        created_version_filter,
+        updated_version_filter,
+    )
+    total = total_textmap + total_readable + total_subtitle + (1 if hash_extra else 0)
+
+    ans = []
+    offset = (safe_page - 1) * safe_size
+    remaining = safe_size
+
+    # 处理哈希结果
+    if hash_extra and offset == 0 and hash_obj is not None:
+        ans.append(hash_obj)
+        text_hashes_seen.add(hash_value)
+        remaining -= 1
+
+    offset_after_hash = offset - (1 if hash_extra else 0)
+    if offset_after_hash < 0:
+        offset_after_hash = 0
+
+    # 处理文本映射结果
+    if remaining > 0 and offset_after_hash < total_textmap:
+        rows = databaseHelper.selectTextMapFromKeywordPaged(
+            keyword,
+            langCode,
+            remaining,
+            offset_after_hash,
+            hash_value if is_hash_query else None,
+            None,
+            created_version_filter,
+            updated_version_filter,
+        )
+        for text_hash, _content, _created_raw, _updated_raw in rows:
+            if text_hash in text_hashes_seen:
+                continue
+            text_hashes_seen.add(text_hash)
+            obj = queryTextHashInfo(text_hash, langs, sourceLangCode)
+            ans.append(obj)
+        remaining = safe_size - len(ans)
+        offset_after_hash = 0
+    else:
+        offset_after_hash -= total_textmap
+
+    # 处理可读内容结果
+    if remaining > 0 and langStr and offset_after_hash < total_readable:
+        readableContents = databaseHelper.selectReadableFromKeyword(
+            keyword,
+            langCode,
+            langStr,
+            remaining,
+            offset_after_hash,
+            created_version_filter,
+            updated_version_filter,
+        )
+        for fileName, content, titleTextMapHash, readableId, created_raw, updated_raw in readableContents:
+            ans.append(_build_readable_obj(fileName, content, titleTextMapHash, readableId, created_raw, updated_raw, sourceLangCode, langCode, targetLangStrs, strToLangId, prefix_labels))
+        remaining = safe_size - len(ans)
+        offset_after_hash = 0
+    else:
+        offset_after_hash -= total_readable
+
+    # 处理字幕结果
+    if remaining > 0 and offset_after_hash < total_subtitle:
+        subtitleContents = databaseHelper.selectSubtitleFromKeyword(
+            keyword,
+            langCode,
+            remaining,
+            offset_after_hash,
+            created_version_filter,
+            updated_version_filter,
+        )
+        for fileName, content, startTime, endTime, subtitleId, created_raw, updated_raw in subtitleContents:
+            ans.append(_build_subtitle_obj(fileName, content, startTime, endTime, subtitleId, created_raw, updated_raw, langs))
+
+    return ans, total
+
+
+def _handle_specific_voice_filter(keyword, keyword_trim, langCode, safe_page, safe_size, voice_filter, hash_value, is_hash_query, hash_obj, hash_extra, text_hashes_seen, langs, sourceLangCode, langStr, targetLangStrs, strToLangId, prefix_labels, created_version_filter, updated_version_filter):
+    """
+    处理特定语音过滤
+    """
+    # 处理哈希结果
+    hash_extra_filtered = False
+    if hash_extra and hash_obj is not None:
+        hash_has_voice = databaseHelper.hasVoiceForTextHashDb(hash_value)
+        if (voice_filter == "with" and hash_has_voice) or (
+            voice_filter == "without" and not hash_has_voice
+        ):
+            hash_extra_filtered = True
+
+    # 计算总数
+    total_textmap = _count_textmap_from_keyword_voice_cached(
+        keyword,
+        langCode,
+        voice_filter,
+        created_version_filter,
+        updated_version_filter,
+    )
+    total_readable = 0
+    total_subtitle = 0
+    if voice_filter == "without":
         if langStr:
             total_readable = _count_readable_from_keyword_cached(
                 keyword,
@@ -674,42 +802,47 @@ def getTranslateObj(
             created_version_filter,
             updated_version_filter,
         )
-        total = total_textmap + total_readable + total_subtitle + (1 if hash_extra else 0)
 
-        offset = (safe_page - 1) * safe_size
-        remaining = safe_size
+    total = total_textmap + total_readable + total_subtitle + (1 if hash_extra_filtered else 0)
 
-        if hash_extra and offset == 0 and hash_obj is not None:
-            ans.append(hash_obj)
-            text_hashes_seen.add(hash_value)
-            remaining -= 1
+    ans = []
+    offset = (safe_page - 1) * safe_size
+    remaining = safe_size
 
-        offset_after_hash = offset - (1 if hash_extra else 0)
-        if offset_after_hash < 0:
-            offset_after_hash = 0
+    # 处理哈希结果
+    if hash_extra_filtered and offset == 0 and hash_obj is not None:
+        ans.append(hash_obj)
+        remaining -= 1
 
-        if remaining > 0 and offset_after_hash < total_textmap:
-            rows = databaseHelper.selectTextMapFromKeywordPaged(
-                keyword,
-                langCode,
-                remaining,
-                offset_after_hash,
-                hash_value if is_hash_query else None,
-                None,
-                created_version_filter,
-                updated_version_filter,
-            )
-            for text_hash, _content, _created_raw, _updated_raw in rows:
-                if text_hash in text_hashes_seen:
-                    continue
-                text_hashes_seen.add(text_hash)
-                obj = queryTextHashInfo(text_hash, langs, sourceLangCode)
-                ans.append(obj)
-            remaining = safe_size - len(ans)
-            offset_after_hash = 0
-        else:
-            offset_after_hash -= total_textmap
+    offset_after_hash = offset - (1 if hash_extra_filtered else 0)
+    if offset_after_hash < 0:
+        offset_after_hash = 0
 
+    # 处理文本映射结果
+    if remaining > 0 and offset_after_hash < total_textmap:
+        rows = databaseHelper.selectTextMapFromKeywordPaged(
+            keyword,
+            langCode,
+            remaining,
+            offset_after_hash,
+            hash_value if is_hash_query else None,
+            voice_filter,
+            created_version_filter,
+            updated_version_filter,
+        )
+        for text_hash, _content, _created_raw, _updated_raw in rows:
+            if text_hash in text_hashes_seen:
+                continue
+            text_hashes_seen.add(text_hash)
+            obj = queryTextHashInfo(text_hash, langs, sourceLangCode)
+            ans.append(obj)
+        remaining = safe_size - len(ans)
+        offset_after_hash = 0
+    else:
+        offset_after_hash -= total_textmap
+
+    # 处理无语音的可读内容和字幕
+    if voice_filter == "without":
         if remaining > 0 and langStr and offset_after_hash < total_readable:
             readableContents = databaseHelper.selectReadableFromKeyword(
                 keyword,
@@ -721,36 +854,7 @@ def getTranslateObj(
                 updated_version_filter,
             )
             for fileName, content, titleTextMapHash, readableId, created_raw, updated_raw in readableContents:
-                fileHash = zlib.crc32(fileName.encode('utf-8'))
-                origin_label = "阅读物"
-                for prefix, label in prefix_labels.items():
-                    if fileName.startswith(prefix):
-                        origin_label = label
-                        break
-
-                title = _get_text_map_content_with_fallback(
-                    titleTextMapHash,
-                    sourceLangCode,
-                    [langCode],
-                )
-                origin = f"{origin_label}: {title}" if title else f"{origin_label}: {fileName}"
-
-                obj = {
-                    'translates': {},
-                    'voicePaths': [],
-                    'hash': fileHash,
-                    'isTalk': False,
-                    'origin': origin
-                }
-                obj.update(_build_version_fields(created_raw, updated_raw))
-
-                translations = databaseHelper.selectReadableFromFileName(fileName, targetLangStrs)
-                for transContent, transLangStr in translations:
-                    if transLangStr in strToLangId:
-                        obj['translates'][strToLangId[transLangStr]] = transContent
-
-                ans.append(obj)
-
+                ans.append(_build_readable_obj(fileName, content, titleTextMapHash, readableId, created_raw, updated_raw, sourceLangCode, langCode, targetLangStrs, strToLangId, prefix_labels))
             remaining = safe_size - len(ans)
             offset_after_hash = 0
         else:
@@ -766,286 +870,88 @@ def getTranslateObj(
                 updated_version_filter,
             )
             for fileName, content, startTime, endTime, subtitleId, created_raw, updated_raw in subtitleContents:
-                fileHash = zlib.crc32(f"{fileName}_{startTime}".encode('utf-8'))
-                origin = f"字幕: {fileName}"
-                obj = {
-                    'translates': {},
-                    'voicePaths': [],
-                    'hash': fileHash,
-                    'isTalk': False,
-                    'origin': origin,
-                    'isSubtitle': True,
-                    'fileName': fileName,
-                    'subtitleId': subtitleId
-                }
-                obj.update(_build_version_fields(created_raw, updated_raw))
-                translations = []
-                if subtitleId:
-                    translations = databaseHelper.selectSubtitleTranslationsBySubtitleId(subtitleId, startTime, langs)
-                if not translations:
-                    translations = databaseHelper.selectSubtitleTranslations(fileName, startTime, langs)
-                for transContent, transLangCode in translations:
-                    obj['translates'][transLangCode] = transContent
-                ans.append(obj)
+                ans.append(_build_subtitle_obj(fileName, content, startTime, endTime, subtitleId, created_raw, updated_raw, langs))
 
-        result = (ans, total)
-        # 将结果缓存
-        search_cache.set(cache_key, result)
-        return result
+    return ans, total
 
-    if voice_filter != "all":
-        hash_extra_filtered = False
-        if hash_extra and hash_obj is not None:
-            hash_has_voice = databaseHelper.hasVoiceForTextHashDb(hash_value)
-            if (voice_filter == "with" and hash_has_voice) or (
-                voice_filter == "without" and not hash_has_voice
-            ):
-                hash_extra_filtered = True
 
-        total_textmap = _count_textmap_from_keyword_voice_cached(
-            keyword,
-            langCode,
-            voice_filter,
-            created_version_filter,
-            updated_version_filter,
-        )
-        total_readable = 0
-        total_subtitle = 0
-        if voice_filter == "without":
-            if langStr:
-                total_readable = _count_readable_from_keyword_cached(
-                    keyword,
-                    langCode,
-                    langStr,
-                    created_version_filter,
-                    updated_version_filter,
-                )
-            total_subtitle = _count_subtitle_from_keyword_cached(
-                keyword,
-                langCode,
-                created_version_filter,
-                updated_version_filter,
-            )
+def _build_readable_obj(fileName, content, titleTextMapHash, readableId, created_raw, updated_raw, sourceLangCode, langCode, targetLangStrs, strToLangId, prefix_labels):
+    """
+    构建可读内容对象
+    """
+    import zlib
+    fileHash = zlib.crc32(fileName.encode('utf-8'))
+    origin_label = "阅读物"
+    for prefix, label in prefix_labels.items():
+        if fileName.startswith(prefix):
+            origin_label = label
+            break
 
-        total = total_textmap + total_readable + total_subtitle + (1 if hash_extra_filtered else 0)
-
-        offset = (safe_page - 1) * safe_size
-        remaining = safe_size
-
-        if hash_extra_filtered and offset == 0 and hash_obj is not None:
-            ans.append(hash_obj)
-            remaining -= 1
-
-        offset_after_hash = offset - (1 if hash_extra_filtered else 0)
-        if offset_after_hash < 0:
-            offset_after_hash = 0
-
-        if remaining > 0 and offset_after_hash < total_textmap:
-            rows = databaseHelper.selectTextMapFromKeywordPaged(
-                keyword,
-                langCode,
-                remaining,
-                offset_after_hash,
-                hash_value if is_hash_query else None,
-                voice_filter,
-                created_version_filter,
-                updated_version_filter,
-            )
-            for text_hash, _content, _created_raw, _updated_raw in rows:
-                if text_hash in text_hashes_seen:
-                    continue
-                text_hashes_seen.add(text_hash)
-                obj = queryTextHashInfo(text_hash, langs, sourceLangCode)
-                ans.append(obj)
-            remaining = safe_size - len(ans)
-            offset_after_hash = 0
-        else:
-            offset_after_hash -= total_textmap
-
-        if voice_filter == "without":
-            if remaining > 0 and langStr and offset_after_hash < total_readable:
-                readableContents = databaseHelper.selectReadableFromKeyword(
-                    keyword,
-                    langCode,
-                    langStr,
-                    remaining,
-                    offset_after_hash,
-                    created_version_filter,
-                    updated_version_filter,
-                )
-                for fileName, content, titleTextMapHash, readableId, created_raw, updated_raw in readableContents:
-                    fileHash = zlib.crc32(fileName.encode('utf-8'))
-                    origin_label = "阅读物"
-                    for prefix, label in prefix_labels.items():
-                        if fileName.startswith(prefix):
-                            origin_label = label
-                            break
-
-                    title = _get_text_map_content_with_fallback(
-                        titleTextMapHash,
-                        sourceLangCode,
-                        [langCode],
-                    )
-                    origin = f"{origin_label}: {title}" if title else f"{origin_label}: {fileName}"
-
-                    obj = {
-                        'translates': {},
-                        'voicePaths': [],
-                        'hash': fileHash,
-                        'isTalk': False,
-                        'origin': origin
-                    }
-                    obj.update(_build_version_fields(created_raw, updated_raw))
-
-                    translations = databaseHelper.selectReadableFromFileName(fileName, targetLangStrs)
-                    for transContent, transLangStr in translations:
-                        if transLangStr in strToLangId:
-                            obj['translates'][strToLangId[transLangStr]] = transContent
-
-                    ans.append(obj)
-
-                remaining = safe_size - len(ans)
-                offset_after_hash = 0
-            else:
-                offset_after_hash -= total_readable
-
-            if remaining > 0 and offset_after_hash < total_subtitle:
-                subtitleContents = databaseHelper.selectSubtitleFromKeyword(
-                    keyword,
-                    langCode,
-                    remaining,
-                    offset_after_hash,
-                    created_version_filter,
-                    updated_version_filter,
-                )
-                for fileName, content, startTime, endTime, subtitleId, created_raw, updated_raw in subtitleContents:
-                    fileHash = zlib.crc32(f"{fileName}_{startTime}".encode('utf-8'))
-                    origin = f"字幕: {fileName}"
-                    obj = {
-                        'translates': {},
-                        'voicePaths': [],
-                        'hash': fileHash,
-                        'isTalk': False,
-                        'origin': origin,
-                        'isSubtitle': True,
-                        'fileName': fileName,
-                        'subtitleId': subtitleId
-                    }
-                    obj.update(_build_version_fields(created_raw, updated_raw))
-                    translations = []
-                    if subtitleId:
-                        translations = databaseHelper.selectSubtitleTranslationsBySubtitleId(subtitleId, startTime, langs)
-                    if not translations:
-                        translations = databaseHelper.selectSubtitleTranslations(fileName, startTime, langs)
-                    for transContent, transLangCode in translations:
-                        obj['translates'][transLangCode] = transContent
-                    ans.append(obj)
-
-        result = (ans, total)
-        # 将结果缓存
-        search_cache.set(cache_key, result)
-        return result
-
-    if hash_obj and hash_obj.get('translates'):
-        ans.append(hash_obj)
-        text_hashes_seen.add(hash_value)
-
-    contents = databaseHelper.selectTextMapFromKeywordPaged(
-        keyword,
-        langCode,
-        candidate_limit,
-        0,
-        hash_value if is_hash_query else None,
-        None,
-        created_version_filter,
-        updated_version_filter,
+    title = _get_text_map_content_with_fallback(
+        titleTextMapHash,
+        sourceLangCode,
+        [langCode],
     )
+    origin = f"{origin_label}: {title}" if title else f"{origin_label}: {fileName}"
 
-    for content in contents:
-        text_hash = content[0]
-        if text_hash in text_hashes_seen:
-            continue
-        text_hashes_seen.add(text_hash)
-        obj = queryTextHashInfo(text_hash, langs, sourceLangCode)
-        ans.append(obj)
+    obj = {
+        'translates': {},
+        'voicePaths': [],
+        'hash': fileHash,
+        'isTalk': False,
+        'isReadable': True,
+        'readableId': readableId,
+        'fileName': fileName,
+        'origin': origin
+    }
+    obj.update(_build_version_fields(created_raw, updated_raw))
 
-    if langStr:
-        readableContents = databaseHelper.selectReadableFromKeyword(
-            keyword,
-            langCode,
-            langStr,
-            candidate_limit,
-            None,
-            created_version_filter,
-            updated_version_filter,
-        )
-        for fileName, content, titleTextMapHash, readableId, created_raw, updated_raw in readableContents:
-            fileHash = zlib.crc32(fileName.encode('utf-8'))
-            origin_label = "阅读物"
-            for prefix, label in prefix_labels.items():
-                if fileName.startswith(prefix):
-                    origin_label = label
-                    break
+    translations = databaseHelper.selectReadableFromFileName(fileName, targetLangStrs)
+    for transContent, transLangStr in translations:
+        if transLangStr in strToLangId:
+            obj['translates'][str(strToLangId[transLangStr])] = transContent
 
-            title = _get_text_map_content_with_fallback(
-                titleTextMapHash,
-                sourceLangCode,
-                [langCode],
-            )
-            origin = f"{origin_label}: {title}" if title else f"{origin_label}: {fileName}"
+    return obj
 
-            obj = {
-                'translates': {},
-                'voicePaths': [],
-                'hash': fileHash,
-                'isTalk': False,
-                'origin': origin
-            }
-            obj.update(_build_version_fields(created_raw, updated_raw))
 
-            translations = databaseHelper.selectReadableFromFileName(fileName, targetLangStrs)
-            for transContent, transLangStr in translations:
-                if transLangStr in strToLangId:
-                    obj['translates'][strToLangId[transLangStr]] = transContent
-            ans.append(obj)
+def _build_subtitle_obj(fileName, content, startTime, endTime, subtitleId, created_raw, updated_raw, langs):
+    """
+    构建字幕对象
+    """
+    import zlib
+    fileHash = zlib.crc32(f"{fileName}_{startTime}".encode('utf-8'))
+    origin = f"字幕: {fileName}"
+    obj = {
+        'translates': {},
+        'voicePaths': [],
+        'hash': fileHash,
+        'isTalk': False,
+        'origin': origin,
+        'isSubtitle': True,
+        'fileName': fileName,
+        'subtitleId': subtitleId
+    }
+    obj.update(_build_version_fields(created_raw, updated_raw))
+    translations = []
+    if subtitleId:
+        translations = databaseHelper.selectSubtitleTranslationsBySubtitleId(subtitleId, startTime, langs)
+    if not translations:
+        translations = databaseHelper.selectSubtitleTranslations(fileName, startTime, langs)
+    for transContent, transLangCode in translations:
+        obj['translates'][str(transLangCode)] = transContent
+    return obj
 
-    subtitleContents = databaseHelper.selectSubtitleFromKeyword(
-        keyword,
-        langCode,
-        candidate_limit,
-        None,
-        created_version_filter,
-        updated_version_filter,
-    )
-    for fileName, content, startTime, endTime, subtitleId, created_raw, updated_raw in subtitleContents:
-        fileHash = zlib.crc32(f"{fileName}_{startTime}".encode('utf-8'))
-        origin = f"字幕: {fileName}"
-        obj = {
-            'translates': {},
-            'voicePaths': [],
-            'hash': fileHash,
-            'isTalk': False,
-            'origin': origin,
-            'isSubtitle': True,
-            'fileName': fileName,
-            'subtitleId': subtitleId
-        }
-        obj.update(_build_version_fields(created_raw, updated_raw))
-        translations = []
-        if subtitleId:
-            translations = databaseHelper.selectSubtitleTranslationsBySubtitleId(subtitleId, startTime, langs)
-        if not translations:
-            translations = databaseHelper.selectSubtitleTranslations(fileName, startTime, langs)
-        for transContent, transLangCode in translations:
-            obj['translates'][transLangCode] = transContent
-        ans.append(obj)
 
+def _sort_search_results(ans: list[dict], keyword: str, langCode: int, is_hash_query: bool, hash_value: int | None):
+    """
+    排序搜索结果
+    """
     keyword_lower = keyword.strip().lower()
 
     def is_exact_match(entry: dict) -> bool:
         if not keyword_lower:
             return False
-        target_text = entry.get('translates', {}).get(langCode)
+        target_text = entry.get('translates', {}).get(str(langCode))
         if not isinstance(target_text, str):
             return False
         return keyword_lower in target_text.lower()
@@ -1057,7 +963,7 @@ def getTranslateObj(
         hash_rank = 0 if (is_hash_query and entry.get('hash') == hash_value) else 1
         exact = is_exact_match(entry)
         voice = has_voice(entry)
-        target_len = len(entry.get('translates', {}).get(langCode, "") or "")
+        target_len = len(entry.get('translates', {}).get(str(langCode), "") or "")
         return (
             hash_rank,
             0 if exact else 1,
@@ -1066,32 +972,55 @@ def getTranslateObj(
         )
 
     ans.sort(key=sort_key)
-    ans = apply_voice_filter(ans)
+    return ans
 
-    total = _count_textmap_from_keyword_cached(
-        keyword,
-        langCode,
-        created_version_filter,
-        updated_version_filter,
-    )
-    if langStr:
-        total += _count_readable_from_keyword_cached(
-            keyword,
-            langCode,
-            langStr,
-            created_version_filter,
-            updated_version_filter,
-        )
-    total += _count_subtitle_from_keyword_cached(
-        keyword,
-        langCode,
-        created_version_filter,
-        updated_version_filter,
-    )
-    if hash_extra:
-        total += 1
 
-    result = paginate(ans, total)
+def getTranslateObj(
+    keyword: str,
+    langCode: int,
+    speaker: str | None = None,
+    page: int = 1,
+    page_size: int = 50,
+    voice_filter: str = "all",
+    created_version: str | None = None,
+    updated_version: str | None = None,
+):
+    """
+    获取翻译对象
+    """
+    speaker_keyword = (speaker or "").strip()
+    keyword_trim = keyword.strip()
+    created_version_filter = _normalize_version_filter(created_version)
+    updated_version_filter = _normalize_version_filter(updated_version)
+
+    # 生成缓存键
+    cache_key = (
+        keyword_trim,
+        langCode,
+        speaker_keyword,
+        page,
+        page_size,
+        voice_filter,
+        created_version_filter,
+        updated_version_filter
+    )
+
+    # 尝试从缓存中获取结果
+    cached_result = search_cache.get(cache_key)
+    if cached_result:
+        return cached_result
+
+    # 使用原有的查询逻辑
+    if keyword_trim == "" and speaker_keyword:
+        # 仅说话者查询
+        result = _handle_speaker_only_query(speaker_keyword, langCode, page, page_size, voice_filter, created_version_filter, updated_version_filter)
+    elif keyword_trim != "" and speaker_keyword:
+        # 说话者和关键词查询
+        result = _handle_speaker_and_keyword_query(speaker_keyword, keyword_trim, langCode, page, page_size, voice_filter, created_version_filter, updated_version_filter)
+    else:
+        # 仅关键词查询
+        result = _handle_keyword_only_query(keyword, keyword_trim, langCode, page, page_size, voice_filter, created_version_filter, updated_version_filter)
+
     # 将结果缓存
     search_cache.set(cache_key, result)
     return result
@@ -1396,7 +1325,7 @@ def getAvatarStories(avatarId: int, searchLang: int | None = None):
             if not translates:
                 continue
 
-            source_text = (translates.get(sourceLangCode) or "").strip()
+            source_text = (translates.get(str(sourceLangCode)) or "").strip()
             if source_text:
                 if source_text in per_story_seen:
                     continue
@@ -1446,6 +1375,9 @@ def getAvatarStories(avatarId: int, searchLang: int | None = None):
         "avatarName": avatarName,
         "stories": stories
     }
+
+
+
 
 
 def searchAvatarVoicesByFilters(
@@ -1562,6 +1494,10 @@ def searchAvatarStoriesByFilters(
         if not translates:
             continue
 
+        # 确保只包含当前搜索语言的内容
+        if str(keywordLangCode) not in translates:
+            continue
+
         if avatarId not in avatar_name_cache:
             avatar_name_cache[avatarId] = databaseHelper.getCharterName(avatarId, sourceLangCode)
         avatarName = avatar_name_cache[avatarId]
@@ -1596,7 +1532,7 @@ def searchAvatarStoriesByFilters(
         if contextHash in version_cache:
             created_raw, updated_raw = version_cache[contextHash]
         else:
-            version_info = databaseHelper.getTextMapVersionInfo(contextHash, sourceLangCode)
+            version_info = databaseHelper.getTextMapVersionInfo(contextHash, keywordLangCode)
             if version_info:
                 created_raw, updated_raw = version_info
             else:
@@ -1710,7 +1646,7 @@ def getTalkFromHash(textHash: int, searchLang: int | None = None):
         first_dialogue = dialogues[0]
         created_raw = first_dialogue.get("createdVersionRaw")
         updated_raw = first_dialogue.get("updatedVersionRaw")
-    
+
     ans = {
         "talkQuestName": questCompleteName,
         "talkId": talkId,
@@ -1757,7 +1693,7 @@ def getReadableContent(readableId: int | None, fileName: str | None, searchLang:
     translateMap = {}
     for transContent, transLangStr in translations:
         if transLangStr in strToLangId:
-            translateMap[strToLangId[transLangStr]] = transContent
+            translateMap[str(strToLangId[transLangStr])] = transContent
 
     return {
         "fileName": fileName,
@@ -1803,7 +1739,7 @@ def getSubtitleContext(fileName: str, _subtitleId: int | None = None, searchLang
             if idx >= len(lang_lines):
                 continue
             content, line_start, _line_end = lang_lines[idx]
-            translates[lang] = content
+            translates[str(lang)] = content
             if start_time is None:
                 start_time = line_start
         if not translates:
@@ -1832,40 +1768,53 @@ def getVoiceBinStream(voicePath, langCode):
 
 
 def getLoadedVoicePacks():
+    from utils.helpers import getLanguageName
     ans = {}
     for packId in languagePackReader.langPackages:
-        ans[packId] = languagePackReader.langCodes[packId]
+        ans[packId] = getLanguageName(languagePackReader.langCodes[packId])
 
     return ans
 
 
 def getImportedTextMapLangs():
+    from utils.helpers import getLanguageName
     langs = databaseHelper.getImportedTextMapLangs()
     ans = {}
     for langItem in langs:
-        ans[langItem[0]] = langItem[1]
+        ans[str(langItem[0])] = getLanguageName(langItem[1])
 
     return ans
 
 
+
+
+
 def getAvailableVersions():
-    raw_versions = databaseHelper.getAllVersionValues()
-    tags: set[str] = set()
-    for raw in raw_versions:
-        tag = _extract_version_tag(raw)
+    """
+    获取可用的版本列表
+    """
+    # 生成缓存键
+    cache_key = "available_versions"
+
+    # 尝试从缓存获取结果
+    cached_result = search_cache.get(cache_key)
+    if cached_result:
+        return cached_result
+
+    versions = databaseHelper.getAllVersionValues()
+    # 提取版本标签并去重
+    version_tags = set()
+    for version in versions:
+        tag = _extract_version_tag(version)
         if tag:
-            tags.add(tag)
+            version_tags.add(tag)
+    # 按版本号排序
+    sorted_versions = sorted(version_tags, key=lambda x: [int(part) for part in x.split('.')], reverse=True)
 
-    def _version_sort_key(version_tag: str):
-        parts = version_tag.split(".")
-        try:
-            major = int(parts[0])
-            minor = int(parts[1]) if len(parts) > 1 else 0
-        except Exception:
-            major, minor = -1, -1
-        return major, minor
+    # 缓存结果
+    search_cache.set(cache_key, sorted_versions)
 
-    return sorted(tags, key=_version_sort_key, reverse=True)
+    return sorted_versions
 
 
 def getConfig():
