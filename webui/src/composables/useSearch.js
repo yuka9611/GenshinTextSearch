@@ -1,9 +1,16 @@
 import { ref, computed } from 'vue'
 import api from '@/api/keywordQuery'
-import basicInfoApi from '@/api/basicInfo'
-import global from '@/global/global'
+import useLanguage from '@/composables/useLanguage'
+import useVersion from '@/composables/useVersion'
 
 const useSearch = () => {
+  const { selectedInputLanguage, supportedInputLanguage, loadLanguages } = useLanguage()
+  const { versionOptions, loadVersionOptions } = useVersion()
+
+  // 初始化时加载语言列表和版本选项
+  loadLanguages().catch(console.error)
+  loadVersionOptions().catch(console.error)
+
   const queryResult = ref([])
   const keyword = ref('')
   const keywordLast = ref('')
@@ -16,49 +23,49 @@ const useSearch = () => {
   const updatedVersionFilter = ref('')
   const createdVersionLast = ref('')
   const updatedVersionLast = ref('')
-  const versionOptions = ref([])
   const searchSummary = ref('')
   const pageSize = ref(50)
   const currentPage = ref(1)
   const totalCount = ref(0)
   const isLoading = ref(false)
-  
+
   const totalPages = computed(() => Math.max(1, Math.ceil(totalCount.value / pageSize.value)))
-  const supportedInputLanguage = computed(() => global.languages)
-  
+
   const normalizeText = (value) => {
     if (!value) return ''
     return String(value).trim().toLowerCase()
   }
-  
+
   const normalizeVersion = (value) => normalizeText(value)
-  
+
   const getNormalizedEntryVersion = (entry, kind) => {
     if (kind === 'created') return normalizeVersion(entry.createdVersion || entry.createdVersionRaw || '')
     return normalizeVersion(entry.updatedVersion || entry.updatedVersionRaw || '')
   }
-  
-  const shouldKeepByVersionFilter = (entry, updatedFilterRaw) => {
+
+  const shouldKeepByVersionFilter = (entry, updatedFilterRaw, createdFilterRaw) => {
     const updatedFilter = normalizeVersion(updatedFilterRaw)
-    if (!updatedFilter) return true
+    const createdFilter = normalizeVersion(createdFilterRaw)
 
-    const updatedValue = getNormalizedEntryVersion(entry, 'updated')
-    if (!updatedValue.includes(updatedFilter)) return false
-
-    const createdValue = getNormalizedEntryVersion(entry, 'created')
-    if (!createdValue || !updatedValue) return true
-    return createdValue !== updatedValue
-  }
-  
-  const fetchAvailableVersions = async () => {
-    try {
-      const ans = await basicInfoApi.getAvailableVersions()
-      versionOptions.value = ans.json || []
-    } catch (_) {
-      versionOptions.value = []
+    // 检查创建版本筛选
+    if (createdFilter) {
+      const createdValue = getNormalizedEntryVersion(entry, 'created')
+      if (!createdValue.includes(createdFilter)) return false
     }
+
+    // 检查更新版本筛选
+    if (updatedFilter) {
+      const updatedValue = getNormalizedEntryVersion(entry, 'updated')
+      if (!updatedValue.includes(updatedFilter)) return false
+
+      const createdValue = getNormalizedEntryVersion(entry, 'created')
+      if (!createdValue || !updatedValue) return true
+      return createdValue !== updatedValue
+    }
+
+    return true
   }
-  
+
   const fetchPage = async (page, useLast = false) => {
     isLoading.value = true
     try {
@@ -74,12 +81,13 @@ const useSearch = () => {
         : {
             keyword: keyword.value,
             speaker: speakerKeyword.value,
-            langCode: parseInt(global.config.defaultSearchLanguage),
+            langCode: parseInt(selectedInputLanguage.value),
             voiceFilter: voiceFilter.value,
             createdVersion: createdVersionFilter.value,
             updatedVersion: updatedVersionFilter.value,
           }
 
+      console.log('搜索参数:', params);
       const ans = (await api.queryByKeyword(
         params.keyword,
         params.langCode,
@@ -95,7 +103,11 @@ const useSearch = () => {
       const total = ans.total || 0
 
       queryResult.value = (ans.contents || []).filter((entry) => {
-        return shouldKeepByVersionFilter(entry, params.updatedVersion)
+        // 不过滤掉空文本的结果，因为说话人筛选可能返回没有翻译的结果
+        // if (!entry.translates || Object.values(entry.translates).every(content => !content || content.trim() === '')) {
+        //   return false
+        // }
+        return shouldKeepByVersionFilter(entry, params.updatedVersion, params.createdVersion)
       })
       totalCount.value = total
       currentPage.value = ans.page || page
@@ -124,12 +136,12 @@ const useSearch = () => {
       isLoading.value = false
     }
   }
-  
+
   const onQueryButtonClicked = async () => {
     currentPage.value = 1
     await fetchPage(1, false)
   }
-  
+
   const goToPage = async (page) => {
     if (!keywordLast.value && !speakerLast.value && !createdVersionLast.value && !updatedVersionLast.value) {
       return
@@ -137,7 +149,7 @@ const useSearch = () => {
     const safePage = Math.min(Math.max(1, page), totalPages.value)
     await fetchPage(safePage, true)
   }
-  
+
   return {
     // 状态
     queryResult,
@@ -147,15 +159,16 @@ const useSearch = () => {
     createdVersionFilter,
     updatedVersionFilter,
     versionOptions,
+    selectedInputLanguage,
     supportedInputLanguage,
     searchSummary,
     currentPage,
     totalCount,
     totalPages,
     isLoading,
-    
+
     // 方法
-    fetchAvailableVersions,
+    loadVersionOptions,
     onQueryButtonClicked,
     goToPage
   }

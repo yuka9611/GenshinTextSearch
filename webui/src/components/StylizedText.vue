@@ -89,7 +89,7 @@ const myDomElementIterate = (myDomElement, lineHtmlElements, containerStack, cur
                      * @type {HTMLSpanElement}
                      */
                     let newContainer = undefined
-                    let i = 1
+                    let j = 1
                     for(let curDomElement of currentLabelStack){
                         if(newContainer) {
                             let nowContainer = createElementByMyElement(curDomElement)
@@ -101,8 +101,8 @@ const myDomElementIterate = (myDomElement, lineHtmlElements, containerStack, cur
                             container = newContainer
                             newP.append(newContainer)
                         }
-                        containerStack[i] = newContainer
-                        ++i;
+                        containerStack[j] = newContainer
+                        ++j;
                     }
 
                 }
@@ -118,19 +118,19 @@ const myDomElementIterate = (myDomElement, lineHtmlElements, containerStack, cur
                     if (indices.length === 0){
                         container.append(line)
                     }else{
-                        let i = 0
+                        let j = 0
                         for(let sub of indices){
-                            if(i >= line.length)
+                            if(j >= line.length)
                                 break
-                            container.append(line.substring(i, sub))
+                            container.append(line.substring(j, sub))
                             let keywordContainer = document.createElement('span')
                             keywordContainer.append(line.substring(sub, sub + props.keyword.length))
                             keywordContainer.classList.add("keywordSpan")
                             container.append(keywordContainer)
-                            i = sub + props.keyword.length
+                            j = sub + props.keyword.length
                         }
-                        if(i < line.length){
-                            container.append(line.substring(i))
+                        if(j < line.length){
+                            container.append(line.substring(j))
                         }
                     }
                 } else {
@@ -152,9 +152,17 @@ const myDomElementIterate = (myDomElement, lineHtmlElements, containerStack, cur
 }
 
 const regenerateWrapperDom = (text) => {
-    loweredKeyword.value = props.keyword.toLowerCase()
+    loweredKeyword.value = props.keyword ? props.keyword.toLowerCase() : ""
     while(textWrapper.value.lastChild){
         textWrapper.value.removeChild(textWrapper.value.lastChild)
+    }
+
+    if (!text || text.length === 0) {
+        // 如果文本为空，显示一个空行
+        let p = document.createElement('p')
+        p.textContent = ""
+        textWrapper.value.append(p)
+        return
     }
 
     let result = new textStyleParser.MyDomElement();

@@ -6,25 +6,15 @@
             <p>当关键词留空时，只要填写了版本或说话人也可以查询。</p>
         </div>
 
-        <div class="searchBar">
-            <el-input
-                v-model="keyword"
-                style="max-width: 600px;"
-                placeholder="输入关键词"
-                class="input-with-select"
-                @keyup.enter.native="onQueryButtonClicked"
-                clearable
-            >
-                <template #prepend>
-                    <el-select v-model="global.config.defaultSearchLanguage" placeholder="Select" class="languageSelector">
-                        <el-option v-for="(v, k) in supportedInputLanguage" :label="v" :value="k" :key="k" />
-                    </el-select>
-                </template>
-                <template #append>
-                    <el-button :icon="Search" @click="onQueryButtonClicked" />
-                </template>
-            </el-input>
+        <SearchBar
+            v-model:keyword="keyword"
+            v-model:selectedLanguage="selectedInputLanguage"
+            :supportedLanguages="supportedInputLanguage"
+            :summary="searchSummary"
+            @search="onQueryButtonClicked"
+        />
 
+        <div class="searchBarAdditional">
             <el-input
                 v-model="speakerKeyword"
                 placeholder="说话人（可选）"
@@ -39,32 +29,17 @@
                 placeholder="语音筛选"
                 @change="onQueryButtonClicked"
             >
-                <el-option label="全部" value="all" />
+                <el-option label="全部(语音)" value="all" />
                 <el-option label="有语音" value="with" />
                 <el-option label="无语音" value="without" />
             </el-select>
 
-            <el-select
-                v-model="createdVersionFilter"
-                class="versionFilter"
-                placeholder="创建版本"
-                clearable
-                filterable
-            >
-                <el-option v-for="version in versionOptions" :key="`created-${version}`" :label="version" :value="version" />
-            </el-select>
-
-            <el-select
-                v-model="updatedVersionFilter"
-                class="versionFilter"
-                placeholder="更新版本"
-                clearable
-                filterable
-            >
-                <el-option v-for="version in versionOptions" :key="`updated-${version}`" :label="version" :value="version" />
-            </el-select>
-
-            <span class="searchSummary">{{ searchSummary }}</span>
+            <VersionFilter
+                v-model:createdVersion="createdVersionFilter"
+                v-model:updatedVersion="updatedVersionFilter"
+                :versionOptions="versionOptions"
+                @search="onQueryButtonClicked"
+            />
         </div>
 
         <div class="searchSpacer"></div>
@@ -132,11 +107,14 @@
 <script setup>
 import { onBeforeMount } from 'vue'
 import { Close, Search } from '@element-plus/icons-vue'
-import global from '@/global/global'
 import TranslateDisplay from '@/components/ResultEntry.vue'
 import AudioPlayer from '@liripeng/vue-audio-player'
+import SearchBar from '@/components/SearchBar.vue'
+import VersionFilter from '@/components/VersionFilter.vue'
 import useSearch from '@/composables/useSearch'
 import useAudioPlayer from '@/composables/useAudioPlayer'
+
+
 
 // 使用搜索组合式API
 const {
@@ -147,13 +125,14 @@ const {
   createdVersionFilter,
   updatedVersionFilter,
   versionOptions,
+  selectedInputLanguage,
   supportedInputLanguage,
   searchSummary,
   currentPage,
   totalCount,
   totalPages,
   isLoading,
-  fetchAvailableVersions,
+  loadVersionOptions,
   onQueryButtonClicked,
   goToPage
 } = useSearch()
@@ -170,7 +149,7 @@ const {
 } = useAudioPlayer()
 
 onBeforeMount(async () => {
-    await fetchAvailableVersions()
+    await loadVersionOptions()
 })
 </script>
 
@@ -264,21 +243,27 @@ onBeforeMount(async () => {
     font-size: 14px;
 }
 
+.searchBarAdditional {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
+
 .speakerInput {
-    max-width: 320px;
-    margin-top: 8px;
+    width: 150px;
+    margin-top: 0;
 }
 
 .voiceFilter {
-    max-width: 160px;
-    margin-top: 8px;
-    margin-left: 8px;
+    width: 150px;
+    margin-top: 0;
+    margin-left: 0;
 }
 
-.versionFilter {
-    max-width: 180px;
-    margin-top: 8px;
-    margin-left: 8px;
+:deep(.versionFilter) {
+    width: 150px;
+    margin-top: 0;
+    margin-left: 0;
 }
 
 .searchSpacer {

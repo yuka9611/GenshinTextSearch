@@ -16,10 +16,10 @@ const getImportedVoiceLanguages = withCache(() => {
     return request.get("/api/getImportedVoiceLanguages");
 });
 
-const getAvailableVersions = withCache(() => {
-    // Version aggregation can be heavy on large databases.
+const getAvailableVersions = () => {
+    // Version aggregation can be heavy on large databases, but we need fresh data
     return request.get("/api/getAvailableVersions", { timeout: 30000 });
-});
+};
 
 const saveConfig = (resultLanguages, defaultSearchLanguage, sourceLanguage, isMale) => {
     let tmp = []
@@ -37,9 +37,9 @@ const saveConfig = (resultLanguages, defaultSearchLanguage, sourceLanguage, isMa
     })
 }
 
-const getConfig = withCache(() => {
+const getConfig = () => {
     return request.get("/api/getSettings")
-});
+};
 
 export default {
     getImportedTextLanguages,
