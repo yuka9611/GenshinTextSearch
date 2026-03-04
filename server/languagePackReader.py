@@ -39,15 +39,32 @@ def loadLangPackages():
             langPackPath = os.path.join(pathDir, langName)
             if not os.path.exists(langPackPath):
                 continue
-            files = os.listdir(langPackPath)
+            files = []
+            for fileName in sorted(os.listdir(langPackPath)):
+                filePath = os.path.join(langPackPath, fileName)
+                if not os.path.isfile(filePath):
+                    continue
+                if not fileName.lower().endswith(".pck"):
+                    continue
+                files.append(filePath)
             if len(files) < 10:
                 continue
 
             voicePack = Package()
-            for fileName in files:
-                fobj = open(os.path.join(langPackPath, fileName), "rb")
-                voicePack.addfile(fobj)
-            langPackages[langCode] = voicePack
+            loadedCount = 0
+            for filePath in files:
+                try:
+                    fobj = open(filePath, "rb")
+                except OSError:
+                    continue
+                try:
+                    voicePack.addfile(fobj)
+                except Exception:
+                    fobj.close()
+                    continue
+                loadedCount += 1
+            if loadedCount:
+                langPackages[langCode] = voicePack
 
 
 def getAudioBin(path: str, langCode: int) -> bytes | None:

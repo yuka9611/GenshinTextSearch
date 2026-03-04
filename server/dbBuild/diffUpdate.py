@@ -1,7 +1,6 @@
 import os
 import re
 import json
-import sys
 import subprocess
 from datetime import datetime, timezone
 
@@ -18,9 +17,9 @@ from version_control import (
     ensure_version_schema,
     get_or_create_version_id,
     rebuild_version_catalog,
-    resolve_version_label,
     set_current_version,
 )
+from versioning import resolve_version_label
 
 
 SOURCE_REPO_URL = "https://gitlab.com/Dimbreath/AnimeGameData.git"
@@ -150,9 +149,9 @@ def _pull_remote(repo_path: str, remote_name: str, remote_branch: str | None = N
         nonlocal last_progress
         mapped = max(0, min(100, int(mapped)))
         if mapped > last_progress:
-            pbar.update(mapped - last_progress)
+            pbar.update(mapped - last_progress, postfix=status or None)
             last_progress = mapped
-        if status:
+        elif status:
             pbar.set_postfix_str(status)
 
     def _apply_progress(stage: str, percent: int):
@@ -664,13 +663,12 @@ def _process_textmap_stage(plan, prune_missing, target_version):
         for base_name in sorted(plan["textmap_bases"]):
             files = groups.get(base_name, [])
             if files:
-                textMapImport.importTextMap(
+                textMapImport.importTextMapForDiff(
                     base_name,
                     files,
                     force_reimport=True,
                     prune_missing=prune_missing,
                     current_version=target_version,
-                    write_versions=True,
                 )
 
 
@@ -748,10 +746,9 @@ def _process_quest_stage(plan, target_version, prune_missing):
 
     anomalies = []
     if plan["quest_related"]:
-        quest_stats = DBBuild.importAllQuests(
+        quest_stats = DBBuild.importAllQuestsForDiff(
             current_version=target_version,
             sync_delete=prune_missing,
-            write_versions=True,
         ) or {}
         DBBuild.importQuestBriefs()
         quest_added_count = len(plan["quest_added"])

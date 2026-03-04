@@ -1,11 +1,127 @@
 from collections import Counter, defaultdict
 from collections.abc import Mapping, Sequence
 from DBConfig import conn
+from import_utils import reset_temp_table
+from versioning import (
+    VERSION_DIM_TABLE,
+    ensure_version_schema as _ensure_version_schema_impl,
+    get_current_version as _get_current_version_impl,
+    get_or_create_version_id as _get_or_create_version_id_impl,
+    rebuild_version_catalog as _rebuild_version_catalog_impl,
+    set_current_version as _set_current_version_impl,
+)
 
 
-# 版本控制核心逻辑
+_VERSION_SORT_KEY_MAX = 2147483647
+_VERSION_SORT_KEY_MIN = -1
+_version_sort_key_cache: dict[int, int | None] = {}
+_version_sort_key_cache_primed = False
 
-# 版本比较相关函数
+
+def _clear_version_sort_key_cache():
+    global _version_sort_key_cache_primed
+    _version_sort_key_cache.clear()
+    _version_sort_key_cache_primed = False
+
+
+def _prime_version_sort_key_cache():
+    global _version_sort_key_cache_primed
+    if _version_sort_key_cache_primed:
+        return
+    cur = conn.cursor()
+    try:
+        try:
+            rows = cur.execute(
+                f"SELECT id, version_sort_key FROM {VERSION_DIM_TABLE}"
+            ).fetchall()
+        except Exception:
+            rows = []
+    finally:
+        cur.close()
+    _version_sort_key_cache.update(
+        {int(row[0]): (int(row[1]) if row[1] is not None else None) for row in rows}
+    )
+    _version_sort_key_cache_primed = True
+
+
+def _remember_version_sort_key(version_id: int | None):
+    if version_id is None:
+        return
+    vid = int(version_id)
+    cur = conn.cursor()
+    try:
+        try:
+            row = cur.execute(
+                f"SELECT version_sort_key FROM {VERSION_DIM_TABLE} WHERE id=? LIMIT 1",
+                (vid,),
+            ).fetchone()
+        except Exception:
+            row = None
+    finally:
+        cur.close()
+    _version_sort_key_cache[vid] = int(row[0]) if row and row[0] is not None else None
+
+
+def _get_version_sort_key(version_id: int | None) -> int | None:
+    if version_id is None:
+        return None
+    vid = int(version_id)
+    if vid in _version_sort_key_cache:
+        return _version_sort_key_cache[vid]
+    if not _version_sort_key_cache_primed:
+        _prime_version_sort_key_cache()
+        if vid in _version_sort_key_cache:
+            return _version_sort_key_cache[vid]
+    _remember_version_sort_key(vid)
+    return _version_sort_key_cache.get(vid)
+
+
+def _version_sort_key_sql(id_expr: str, null_sentinel: int) -> str:
+    return (
+        f"COALESCE((SELECT version_sort_key FROM {VERSION_DIM_TABLE} "
+        f"WHERE id = {id_expr}), {null_sentinel})"
+    )
+
+
+def _version_precedes_sql(candidate_expr: str, current_expr: str) -> str:
+    candidate_key = _version_sort_key_sql(candidate_expr, _VERSION_SORT_KEY_MAX)
+    current_key = _version_sort_key_sql(current_expr, _VERSION_SORT_KEY_MAX)
+    return f"({candidate_key} < {current_key})"
+
+
+def _version_succeeds_sql(candidate_expr: str, current_expr: str) -> str:
+    candidate_key = _version_sort_key_sql(candidate_expr, _VERSION_SORT_KEY_MIN)
+    current_key = _version_sort_key_sql(current_expr, _VERSION_SORT_KEY_MIN)
+    return f"({candidate_key} > {current_key})"
+
+
+def _build_version_preference_case_sql(
+    *,
+    existing_expr: str,
+    candidate_expr: str,
+    is_created: bool,
+) -> str:
+    better_sql = (
+        _version_precedes_sql(candidate_expr, existing_expr)
+        if is_created
+        else _version_succeeds_sql(candidate_expr, existing_expr)
+    )
+    return (
+        "CASE "
+        f"WHEN {candidate_expr} IS NULL THEN {existing_expr} "
+        f"WHEN {existing_expr} IS NULL THEN {candidate_expr} "
+        f"WHEN {better_sql} THEN {candidate_expr} "
+        f"ELSE {existing_expr} "
+        "END"
+    )
+
+
+def _build_version_order_by_sql(id_expr: str, is_created: bool) -> str:
+    direction = "ASC" if is_created else "DESC"
+    sentinel = _VERSION_SORT_KEY_MAX if is_created else _VERSION_SORT_KEY_MIN
+    return f"{_version_sort_key_sql(id_expr, sentinel)} {direction}"
+
+
 def _compare_version_ids(existing_id: int | None, fallback_id: int | None, is_created: bool) -> int | None:
     """
     Compare version IDs and return the appropriate version ID based on whether it's a created or updated version.
@@ -16,10 +132,23 @@ def _compare_version_ids(existing_id: int | None, fallback_id: int | None, is_cr
         return fallback_id
     if fallback_id is None:
         return existing_id
+    existing_sort_key = _get_version_sort_key(existing_id)
+    fallback_sort_key = _get_version_sort_key(fallback_id)
+
+    if existing_sort_key is None and fallback_sort_key is not None:
+        return fallback_id
+    if existing_sort_key is not None and fallback_sort_key is None:
+        return existing_id
+
+    if existing_sort_key is None and fallback_sort_key is None:
+        return existing_id
+
+    if fallback_sort_key == existing_sort_key:
+        return existing_id
+
     if is_created:
-        return fallback_id if fallback_id < existing_id else existing_id
-    else:
-        return fallback_id if fallback_id > existing_id else existing_id
+        return fallback_id if fallback_sort_key < existing_sort_key else existing_id  # type: ignore
+    return fallback_id if fallback_sort_key > existing_sort_key else existing_id  # type: ignore
 
 
 def should_update_version(existing_id: int | None, new_id: int | None, is_created: bool) -> bool:
@@ -39,11 +168,34 @@ def should_update_version(existing_id: int | None, new_id: int | None, is_create
     if new_id is None:
         return False
     # 使用_compare_version_ids函数来确定是否需要更新
-    # 如果比较结果与现有版本不同，则需要更新
     return _compare_version_ids(existing_id, new_id, is_created) != existing_id
 
 
-# SQL生成函数
+def merge_history_versions(
+    existing_created_id: int | None,
+    existing_updated_id: int | None,
+    candidate_version_id: int | None,
+    *,
+    content_changed: bool,
+) -> tuple[int | None, int | None]:
+    """
+    Merge one history commit into created/updated version ids.
+    `created` keeps the earliest version; `updated` keeps the latest
+    content-changing version, while also repairing missing updated values.
+    """
+    created_id = existing_created_id
+    updated_id = existing_updated_id
+
+    if should_update_version(existing_created_id, candidate_version_id, is_created=True):
+        created_id = candidate_version_id
+
+    if content_changed or existing_updated_id is None:
+        if should_update_version(existing_updated_id, candidate_version_id, is_created=False):
+            updated_id = candidate_version_id
+
+    return created_id, updated_id
+
+
 def build_versioned_upsert_sql(
     *,
     table: str,
@@ -61,28 +213,29 @@ def build_versioned_upsert_sql(
     placeholders = ",".join(["?"] * len(insert_columns))
     set_parts = [f"{col}=excluded.{col}" for col in update_columns]
     set_parts.append(
-        "created_version_id=CASE "
-        f"WHEN excluded.created_version_id IS NULL THEN {table}.created_version_id "
-        f"WHEN {table}.created_version_id IS NULL THEN excluded.created_version_id "
-        f"WHEN excluded.created_version_id < {table}.created_version_id THEN excluded.created_version_id "
-        f"ELSE {table}.created_version_id "
-        "END"
+        "created_version_id="
+        + _build_version_preference_case_sql(
+            existing_expr=f"{table}.created_version_id",
+            candidate_expr="excluded.created_version_id",
+            is_created=True,
+        )
     )
-    
+
     where_parts = [f"NOT ({table}.{col} IS excluded.{col})" for col in compare_cols]
     where_parts.append(f"{table}.created_version_id IS NULL")
-    
+
     if table != 'quest':
         # For non-quest tables, include updated_version_id handling
         set_parts.append(
             "updated_version_id=CASE "
             f"WHEN COALESCE({table}.{content_column}, '') <> COALESCE(excluded.{content_column}, '') "
-            "THEN CASE "
-            f"WHEN excluded.updated_version_id IS NULL THEN COALESCE({table}.updated_version_id, excluded.updated_version_id) "
-            f"WHEN {table}.updated_version_id IS NULL THEN excluded.updated_version_id "
-            f"WHEN excluded.updated_version_id > {table}.updated_version_id THEN excluded.updated_version_id "
-            f"ELSE {table}.updated_version_id "
-            "END "
+            "THEN "
+            + _build_version_preference_case_sql(
+                existing_expr=f"{table}.updated_version_id",
+                candidate_expr="excluded.updated_version_id",
+                is_created=False,
+            )
+            + " "
             f"ELSE COALESCE({table}.updated_version_id, excluded.updated_version_id) "
             "END"
         )
@@ -99,24 +252,23 @@ def build_versioned_upsert_sql(
     )
 
 
-def build_guarded_created_updated_sql(table_name: str, key_predicate_sql: str) -> str:
+def build_guarded_created_updated_sql(table_name: str, key_columns: Sequence[str]) -> str:
     """
     Build SQL for updating created_version_id and updated_version_id with version tag comparison.
     """
+    if not key_columns:
+        raise ValueError("key_columns must not be empty")
+    key_predicate_sql = " AND ".join(
+        f"{column}=?{index}"
+        for index, column in enumerate(key_columns, start=4 if table_name != "quest" else 3)
+    )
     if table_name == 'quest':
         # For quest table, only update created_version_id since updated_version_id is in quest_version
         return (
             f"UPDATE {table_name} SET "
             "created_version_id=CASE "
             "WHEN created_version_id IS NULL OR "
-            "(SELECT CASE WHEN version_tag IS NULL THEN 0 ELSE "
-            "CAST(SUBSTR(version_tag, 1, INSTR(version_tag, '.') - 1) AS INTEGER) * 1000 + "
-            "CAST(SUBSTR(version_tag, INSTR(version_tag, '.') + 1) AS INTEGER) "
-            "END FROM version_dim WHERE id = created_version_id) > "
-            "(SELECT CASE WHEN version_tag IS NULL THEN 0 ELSE "
-            "CAST(SUBSTR(version_tag, 1, INSTR(version_tag, '.') - 1) AS INTEGER) * 1000 + "
-            "CAST(SUBSTR(version_tag, INSTR(version_tag, '.') + 1) AS INTEGER) "
-            "END FROM version_dim WHERE id = ?) THEN ? "
+            f"{_version_precedes_sql('?1', 'created_version_id')} THEN ?2 "
             "ELSE created_version_id END "
             f"WHERE {key_predicate_sql} "
         )
@@ -124,30 +276,15 @@ def build_guarded_created_updated_sql(table_name: str, key_predicate_sql: str) -
         f"UPDATE {table_name} SET "
         "created_version_id=CASE "
         "WHEN created_version_id IS NULL OR "
-        "(SELECT CASE WHEN version_tag IS NULL THEN 0 ELSE "
-        "CAST(SUBSTR(version_tag, 1, INSTR(version_tag, '.') - 1) AS INTEGER) * 1000 + "
-        "CAST(SUBSTR(version_tag, INSTR(version_tag, '.') + 1) AS INTEGER) "
-        "END FROM version_dim WHERE id = created_version_id) > "
-        "(SELECT CASE WHEN version_tag IS NULL THEN 0 ELSE "
-        "CAST(SUBSTR(version_tag, 1, INSTR(version_tag, '.') - 1) AS INTEGER) * 1000 + "
-        "CAST(SUBSTR(version_tag, INSTR(version_tag, '.') + 1) AS INTEGER) "
-        "END FROM version_dim WHERE id = ?) THEN ? "
+        f"{_version_precedes_sql('?1', 'created_version_id')} THEN ?2 "
         "ELSE created_version_id END, "
-        "updated_version_id=? "
+        "updated_version_id=?3 "
         f"WHERE {key_predicate_sql} "
         "AND (updated_version_id IS NULL OR "
-        "(SELECT CASE WHEN version_tag IS NULL THEN 0 ELSE "
-        "CAST(SUBSTR(version_tag, 1, INSTR(version_tag, '.') - 1) AS INTEGER) * 1000 + "
-        "CAST(SUBSTR(version_tag, INSTR(version_tag, '.') + 1) AS INTEGER) "
-        "END FROM version_dim WHERE id = updated_version_id) <= "
-        "(SELECT CASE WHEN version_tag IS NULL THEN 0 ELSE "
-        "CAST(SUBSTR(version_tag, 1, INSTR(version_tag, '.') - 1) AS INTEGER) * 1000 + "
-        "CAST(SUBSTR(version_tag, INSTR(version_tag, '.') + 1) AS INTEGER) "
-        "END FROM version_dim WHERE id = ?))"
+        f"{_version_succeeds_sql('?1', 'updated_version_id')})"
     )
 
 
-# 文本比较函数
 def readable_text_changed(old_text: str | None, new_text: str | None) -> bool:
     """
     Check if readable text has changed.
@@ -227,7 +364,6 @@ def subtitle_text_changed_keys(old_rows: Mapping[str, str | None], new_rows: Map
     return changed_keys
 
 
-# 版本分配函数
 def assign_readable_versions_by_text(
     existing_row: tuple[str | None, int | None, int | None] | None,
     new_content: str,
@@ -421,7 +557,6 @@ def _build_version_ranking_sql(base_sql: str, version_column: str, is_created: b
     """
     Build SQL for ranking versions based on version tag and version ID.
     """
-    order_direction = "ASC" if is_created else "DESC"
     return f"""
     WITH qh AS (
         {base_sql}
@@ -430,16 +565,7 @@ def _build_version_ranking_sql(base_sql: str, version_column: str, is_created: b
         SELECT
             qh.questId AS questId,
             tm.{version_column} AS {version_column},
-            CASE
-                WHEN vd.version_tag IS NOT NULL AND instr(vd.version_tag, '.') > 0
-                THEN CAST(substr(vd.version_tag, 1, instr(vd.version_tag, '.') - 1) AS INTEGER)
-                ELSE NULL
-            END AS major_v,
-            CASE
-                WHEN vd.version_tag IS NOT NULL AND instr(vd.version_tag, '.') > 0
-                THEN CAST(substr(vd.version_tag, instr(vd.version_tag, '.') + 1) AS INTEGER)
-                ELSE NULL
-            END AS minor_v
+            vd.version_sort_key AS version_sort_key
         FROM qh
         JOIN textMap tm ON tm.hash = qh.hash
         LEFT JOIN version_dim vd ON vd.id = tm.{version_column}
@@ -453,10 +579,7 @@ def _build_version_ranking_sql(base_sql: str, version_column: str, is_created: b
             ROW_NUMBER() OVER (
                 PARTITION BY questId
                 ORDER BY
-                    CASE WHEN major_v IS NULL OR minor_v IS NULL THEN 1 ELSE 0 END ASC,
-                    major_v {order_direction},
-                    minor_v {order_direction},
-                    {version_column} {order_direction}
+                    {_build_version_order_by_sql(version_column, is_created)}
             ) AS rn
         FROM candidates
     )
@@ -470,8 +593,6 @@ def _build_update_sql(table: str, column: str, temp_table: str, overwrite_existi
     if is_created:
         overwrite_filter = "" if overwrite_existing else " AND created_version_id IS NULL"
     else:
-        # 对于updated_version_id，我们不再更新quest表，而是在backfill_quest_created_version_from_textmap函数中处理quest_version表
-        # 这里只处理created_version_id的更新
         overwrite_filter = ""
 
     return f"""
@@ -505,206 +626,195 @@ def backfill_quest_created_version_from_textmap(
 ) -> int | tuple[int, int]:
     """
     Backfill quest created_version_id from textMap.
-    通过CHS的TextMap和git对比确定创建版本，所有语言共用一个创建版本
     """
-    cursor.execute(
-        "CREATE TEMP TABLE IF NOT EXISTS _quest_inferred_created_version("
-        "questId INTEGER PRIMARY KEY, inferred_created_version_id INTEGER)"
-    )
-    cursor.execute("DELETE FROM _quest_inferred_created_version")
-
-    target_filter_q = ""
-    target_filter_qt = ""
-    if quest_ids is not None:
-        normalized_ids = []
-        seen = set()
-        for raw in quest_ids:
-            try:
-                qid = int(raw)
-            except Exception:
-                continue
-            if qid in seen:
-                continue
-            seen.add(qid)
-            normalized_ids.append((qid,))
-        if not normalized_ids:
-            return (0, 0) if with_stats else 0
-        cursor.execute("CREATE TEMP TABLE IF NOT EXISTS _target_quest_id(questId INTEGER PRIMARY KEY)")
-        cursor.execute("DELETE FROM _target_quest_id")
-        cursor.executemany("INSERT OR IGNORE INTO _target_quest_id(questId) VALUES (?)", normalized_ids)
-        target_filter_q = " AND q.questId IN (SELECT questId FROM _target_quest_id)"
-        target_filter_qt = " AND qt.questId IN (SELECT questId FROM _target_quest_id)"
-
-    target_updated_version_id: int | None = None
-    if quest_updated_version:
-        target_updated_version_id = get_or_create_version_id(quest_updated_version)
-        if target_updated_version_id is None:
-            return (0, 0) if with_stats else 0
-
-    # 构建CHS语言的quest hash source SQL（用于确定创建版本）
-    qh_sql, qh_params = _build_qh_source_sql(
+    reset_temp_table(
         cursor,
-        target_filter_q=target_filter_q,
-        target_filter_qt=target_filter_qt,
-        target_updated_version_id=target_updated_version_id,
+        "CREATE TEMP TABLE IF NOT EXISTS _quest_inferred_created_version("
+        "questId INTEGER PRIMARY KEY, inferred_created_version_id INTEGER)",
+        "_quest_inferred_created_version",
+    )
+    using_target_quest_id = quest_ids is not None
+    if using_target_quest_id:
+        reset_temp_table(
+            cursor,
+            "CREATE TEMP TABLE IF NOT EXISTS _target_quest_id(questId INTEGER PRIMARY KEY)",
+            "_target_quest_id",
+        )
+    reset_temp_table(
+        cursor,
+        "CREATE TEMP TABLE IF NOT EXISTS _quest_hash_source("
+        "questId INTEGER NOT NULL, hash INTEGER NOT NULL)",
+        "_quest_hash_source",
     )
 
-    # 构建CHS语言的创建版本查询SQL
-    created_sql = f"""
-    WITH qh AS (
-        {qh_sql}
-    ),
-    candidates AS (
-        SELECT
-            qh.questId AS questId,
-            tm.created_version_id AS created_version_id,
-            CASE
-                WHEN vd.version_tag IS NOT NULL AND instr(vd.version_tag, '.') > 0
-                THEN CAST(substr(vd.version_tag, 1, instr(vd.version_tag, '.') - 1) AS INTEGER)
-                ELSE NULL
-            END AS major_v,
-            CASE
-                WHEN vd.version_tag IS NOT NULL AND instr(vd.version_tag, '.') > 0
-                THEN CAST(substr(vd.version_tag, instr(vd.version_tag, '.') + 1) AS INTEGER)
-                ELSE NULL
-            END AS minor_v
-        FROM qh
-        JOIN textMap tm ON tm.hash = qh.hash
-        LEFT JOIN version_dim vd ON vd.id = tm.created_version_id
-        WHERE tm.created_version_id IS NOT NULL
-          AND qh.hash <> 0
-          AND tm.lang = (SELECT id FROM langCode WHERE codeName = 'TextMapCHS.json' LIMIT 1) -- 只使用CHS语言确定创建版本
-    ),
-    ranked AS (
-        SELECT
-            questId,
-            created_version_id,
-            ROW_NUMBER() OVER (
-                PARTITION BY questId
-                ORDER BY
-                    CASE WHEN major_v IS NULL OR minor_v IS NULL THEN 1 ELSE 0 END ASC,
-                    major_v ASC,
-                    minor_v ASC,
-                    created_version_id ASC
-            ) AS rn
-        FROM candidates
-    )
-    """
+    try:
+        target_filter_q = ""
+        target_filter_qt = ""
+        if quest_ids is not None:
+            normalized_ids = []
+            seen = set()
+            for raw in quest_ids:
+                try:
+                    qid = int(raw)
+                except Exception:
+                    continue
+                if qid in seen:
+                    continue
+                seen.add(qid)
+                normalized_ids.append((qid,))
+            if not normalized_ids:
+                return (0, 0) if with_stats else 0
+            cursor.executemany("INSERT OR IGNORE INTO _target_quest_id(questId) VALUES (?)", normalized_ids)
+            target_filter_q = " AND q.questId IN (SELECT questId FROM _target_quest_id)"
+            target_filter_qt = " AND qt.questId IN (SELECT questId FROM _target_quest_id)"
 
-    # 插入推断的创建版本
-    cursor.execute(
-        f"""
-        {created_sql}
-        INSERT OR REPLACE INTO _quest_inferred_created_version(questId, inferred_created_version_id)
-        SELECT questId, created_version_id
-        FROM ranked
-        WHERE rn = 1
-        """,
-        qh_params,
-    )
+        target_updated_version_id: int | None = None
+        if quest_updated_version:
+            target_updated_version_id = get_or_create_version_id(quest_updated_version)
+            if target_updated_version_id is None:
+                return (0, 0) if with_stats else 0
 
-    # 更新quest表的创建版本（共通版本）
-    update_created_sql = """
-    UPDATE quest
-    SET created_version_id = (
-        SELECT t.inferred_created_version_id
-        FROM _quest_inferred_created_version t
-        WHERE t.questId = quest.questId
-    )
-    WHERE questId IN (SELECT questId FROM _quest_inferred_created_version)
-      AND (created_version_id IS NULL OR created_version_id > (
-          SELECT t.inferred_created_version_id
-          FROM _quest_inferred_created_version t
-          WHERE t.questId = quest.questId
-      ))
-    """
-    cursor.execute(update_created_sql)
-    created_backfilled = cursor.rowcount
+        qh_sql, qh_params = _build_qh_source_sql(
+            cursor,
+            target_filter_q=target_filter_q,
+            target_filter_qt=target_filter_qt,
+            target_updated_version_id=target_updated_version_id,
+        )
+        cursor.execute(
+            f"INSERT INTO _quest_hash_source(questId, hash) {qh_sql}",
+            qh_params,
+        )
+        cursor.execute("CREATE INDEX IF NOT EXISTS _quest_hash_source_hash_idx ON _quest_hash_source(hash)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS _quest_hash_source_quest_idx ON _quest_hash_source(questId)")
 
-    # 获取所有可用的语言
-    lang_rows = cursor.execute("SELECT id FROM langCode WHERE imported=1").fetchall()
-    languages = [row[0] for row in lang_rows]
-
-    # 为每种语言单独计算更新版本并存储在quest_version表中
-    updated_backfilled = 0
-    for lang in languages:
-        # 构建该语言的更新版本查询SQL
-        updated_sql = f"""
-        WITH qh AS (
-            {qh_sql}
-        ),
-        candidates AS (
+        created_sql = f"""
+        WITH candidates AS (
             SELECT
                 qh.questId AS questId,
-                tm.updated_version_id AS updated_version_id,
-                CASE
-                    WHEN vd.version_tag IS NOT NULL AND instr(vd.version_tag, '.') > 0
-                    THEN CAST(substr(vd.version_tag, 1, instr(vd.version_tag, '.') - 1) AS INTEGER)
-                    ELSE NULL
-                END AS major_v,
-                CASE
-                    WHEN vd.version_tag IS NOT NULL AND instr(vd.version_tag, '.') > 0
-                    THEN CAST(substr(vd.version_tag, instr(vd.version_tag, '.') + 1) AS INTEGER)
-                    ELSE NULL
-                END AS minor_v
-            FROM qh
+                tm.created_version_id AS created_version_id,
+                vd.version_sort_key AS version_sort_key
+            FROM _quest_hash_source qh
             JOIN textMap tm ON tm.hash = qh.hash
-            LEFT JOIN version_dim vd ON vd.id = tm.updated_version_id
-            WHERE tm.updated_version_id IS NOT NULL
+            LEFT JOIN version_dim vd ON vd.id = tm.created_version_id
+            WHERE tm.created_version_id IS NOT NULL
               AND qh.hash <> 0
-              AND tm.lang = ? -- 只使用当前语言确定更新版本
+              AND tm.lang = (SELECT id FROM langCode WHERE codeName = 'TextMapCHS.json' LIMIT 1)
         ),
         ranked AS (
             SELECT
                 questId,
-                updated_version_id,
+                created_version_id,
                 ROW_NUMBER() OVER (
                     PARTITION BY questId
                     ORDER BY
-                        CASE WHEN major_v IS NULL OR minor_v IS NULL THEN 1 ELSE 0 END ASC,
-                        major_v DESC,
-                        minor_v DESC,
-                        updated_version_id DESC
+                        {_build_version_order_by_sql("created_version_id", True)}
                 ) AS rn
             FROM candidates
         )
-        INSERT INTO quest_version(questId, lang, updated_version_id)
-        SELECT questId, ?, updated_version_id
-        FROM ranked
-        WHERE rn = 1
-        ON CONFLICT(questId, lang) DO UPDATE SET
-        updated_version_id=CASE
-        WHEN excluded.updated_version_id IS NULL THEN quest_version.updated_version_id
-        WHEN quest_version.updated_version_id IS NULL THEN excluded.updated_version_id
-        WHEN excluded.updated_version_id > quest_version.updated_version_id THEN excluded.updated_version_id
-        ELSE quest_version.updated_version_id
-        END
         """
-        cursor.execute(updated_sql, (lang, lang))
-        updated_backfilled += cursor.rowcount
 
-    return (created_backfilled, updated_backfilled) if with_stats else created_backfilled
+        cursor.execute(
+            f"""
+            {created_sql}
+            INSERT OR REPLACE INTO _quest_inferred_created_version(questId, inferred_created_version_id)
+            SELECT questId, created_version_id
+            FROM ranked
+            WHERE rn = 1
+            """
+        )
+
+        update_created_sql = f"""
+        UPDATE quest
+        SET created_version_id = (
+            SELECT t.inferred_created_version_id
+            FROM _quest_inferred_created_version t
+            WHERE t.questId = quest.questId
+        )
+        WHERE questId IN (SELECT questId FROM _quest_inferred_created_version)
+          AND (created_version_id IS NULL OR {_version_precedes_sql(
+              "(SELECT t.inferred_created_version_id FROM _quest_inferred_created_version t WHERE t.questId = quest.questId)",
+              "created_version_id",
+          )})
+        """
+        cursor.execute(update_created_sql)
+        created_backfilled = cursor.rowcount
+
+        lang_rows = cursor.execute("SELECT id FROM langCode WHERE imported=1").fetchall()
+        languages = [row[0] for row in lang_rows]
+
+        updated_backfilled = 0
+        for lang in languages:
+            updated_sql = f"""
+            WITH candidates AS (
+                SELECT
+                    qh.questId AS questId,
+                    tm.updated_version_id AS updated_version_id,
+                    vd.version_sort_key AS version_sort_key
+                FROM _quest_hash_source qh
+                JOIN textMap tm ON tm.hash = qh.hash
+                LEFT JOIN version_dim vd ON vd.id = tm.updated_version_id
+                WHERE tm.updated_version_id IS NOT NULL
+                  AND qh.hash <> 0
+                  AND tm.lang = ?
+            ),
+            ranked AS (
+                SELECT
+                    questId,
+                    updated_version_id,
+                    ROW_NUMBER() OVER (
+                        PARTITION BY questId
+                        ORDER BY
+                            {_build_version_order_by_sql("updated_version_id", False)}
+                    ) AS rn
+                FROM candidates
+            )
+            INSERT INTO quest_version(questId, lang, updated_version_id)
+            SELECT questId, ?, updated_version_id
+            FROM ranked
+            WHERE rn = 1
+            ON CONFLICT(questId, lang) DO UPDATE SET
+            updated_version_id={_build_version_preference_case_sql(
+                existing_expr="quest_version.updated_version_id",
+                candidate_expr="excluded.updated_version_id",
+                is_created=False,
+            )}
+            """
+            cursor.execute(updated_sql, (lang, lang))
+            updated_backfilled += cursor.rowcount
+
+        return (created_backfilled, updated_backfilled) if with_stats else created_backfilled
+    finally:
+        cursor.execute("DELETE FROM _quest_hash_source")
+        cursor.execute("DELETE FROM _quest_inferred_created_version")
+        if using_target_quest_id:
+            cursor.execute("DELETE FROM _target_quest_id")
 
 
-# 从 versioning.py 导入核心功能
-from versioning import (
-    normalize_version_label,
-    _extract_version_tag,
-    _normalize_version_catalog_tables,
-    _table_columns,
-    _table_exists,
-    _ensure_column,
-    _ensure_index,
-    get_or_create_version_id,
-    _backfill_version_dim_and_ids,
-    _ensure_updated_version_autofill_rules,
-    _ensure_version_catalog_table,
-    _ensure_quest_hash_map_table,
-    rebuild_version_catalog,
-    ensure_version_schema,
-    resolve_version_label,
-    get_current_version,
-    set_current_version,
-    get_meta,
-    set_meta,
-)
+def ensure_version_schema():
+    _ensure_version_schema_impl()
+    _clear_version_sort_key_cache()
+
+
+def get_current_version(default: str = "unknown") -> str:
+    return _get_current_version_impl(default)
+
+
+def rebuild_version_catalog(
+    source_tables: tuple[str, ...] | list[str] | None = None,
+) -> dict[str, int]:
+    return _rebuild_version_catalog_impl(source_tables)
+
+
+def set_current_version(
+    commit: str,
+    remote_ref: str = "origin/master",
+    version_label: str | None = None,
+) -> None:
+    _set_current_version_impl(commit, remote_ref=remote_ref, version_label=version_label)
+
+
+def get_or_create_version_id(raw_version: str | None) -> int | None:
+    version_id = _get_or_create_version_id_impl(raw_version)
+    if version_id is not None:
+        _remember_version_sort_key(version_id)
+    return version_id

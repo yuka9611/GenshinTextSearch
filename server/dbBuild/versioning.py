@@ -39,6 +39,23 @@ def _extract_version_tag(raw_version: str | None) -> str | None:
     return f"{major}.{minor}"
 
 
+def _version_tag_to_sort_key(version_tag: str | None) -> int | None:
+    if version_tag is None:
+        return None
+    text = str(version_tag).strip()
+    if not text:
+        return None
+    parts = text.split(".", 1)
+    if len(parts) != 2:
+        return None
+    try:
+        major = int(parts[0])
+        minor = int(parts[1])
+    except Exception:
+        return None
+    return major * 1000 + minor
+
+
 def _normalize_version_catalog_tables(
     source_tables: tuple[str, ...] | list[str] | None = None,
 ) -> list[str]:
@@ -550,13 +567,15 @@ def _ensure_version_dim_table():
             CREATE TABLE IF NOT EXISTS {VERSION_DIM_TABLE} (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 raw_version TEXT NOT NULL UNIQUE,
-                version_tag TEXT
+                version_tag TEXT,
+                version_sort_key INTEGER
             )
             """
         )
         conn.commit()
     finally:
         cur.close()
+    _ensure_column(VERSION_DIM_TABLE, "version_sort_key", "INTEGER")
     _ensure_index(
         f"CREATE UNIQUE INDEX IF NOT EXISTS {VERSION_DIM_TABLE}_raw_version_uindex "
         f"ON {VERSION_DIM_TABLE}(raw_version)"
@@ -564,6 +583,10 @@ def _ensure_version_dim_table():
     _ensure_index(
         f"CREATE INDEX IF NOT EXISTS {VERSION_DIM_TABLE}_version_tag_index "
         f"ON {VERSION_DIM_TABLE}(version_tag)"
+    )
+    _ensure_index(
+        f"CREATE INDEX IF NOT EXISTS {VERSION_DIM_TABLE}_version_sort_key_index "
+        f"ON {VERSION_DIM_TABLE}(version_sort_key)"
     )
 
 
@@ -589,13 +612,54 @@ def get_or_create_version_id(raw_version: str | None) -> int | None:
         # 插入新版本，使用指定的ID
         cur.execute(
             f"""
-            INSERT INTO {VERSION_DIM_TABLE}(id, raw_version, version_tag)
-            VALUES (?, ?, ?)
+            INSERT INTO {VERSION_DIM_TABLE}(id, raw_version, version_tag, version_sort_key)
+            VALUES (?, ?, ?, ?)
             """,
-            (new_id, text, _extract_version_tag(text)),
+            (
+                new_id,
+                text,
+                _extract_version_tag(text),
+                _version_tag_to_sort_key(_extract_version_tag(text)),
+            ),
         )
         conn.commit()
         return new_id
+    finally:
+        cur.close()
+
+
+def _backfill_version_sort_keys():
+    cur = conn.cursor()
+    try:
+        cur.execute("CREATE TABLE IF NOT EXISTS app_meta (k TEXT PRIMARY KEY, v TEXT)")
+        row = cur.execute(
+            "SELECT v FROM app_meta WHERE k='version_sort_key_backfilled_v1'"
+        ).fetchone()
+        if row and row[0] == "1":
+            return
+
+        rows = cur.execute(
+            f"SELECT id, version_tag FROM {VERSION_DIM_TABLE} WHERE version_sort_key IS NULL"
+        ).fetchall()
+        payload: list[tuple[int, int]] = []
+        for version_id, version_tag in rows:
+            sort_key = _version_tag_to_sort_key(version_tag)
+            if sort_key is None:
+                continue
+            payload.append((sort_key, int(version_id)))
+
+        if payload:
+            cur.executemany(
+                f"UPDATE {VERSION_DIM_TABLE} SET version_sort_key=? WHERE id=?",
+                payload,
+            )
+        cur.execute(
+            "INSERT OR REPLACE INTO app_meta(k, v) VALUES ('version_sort_key_backfilled_v1', '1')"
+        )
+        conn.commit()
+    except BaseException:
+        conn.rollback()
+        raise
     finally:
         cur.close()
 
@@ -847,6 +911,7 @@ def ensure_version_schema():
     conn.commit()
     cur.close()
     _ensure_version_dim_table()
+    _backfill_version_sort_keys()
     _ensure_version_catalog_table()
     _ensure_quest_hash_map_table()
 

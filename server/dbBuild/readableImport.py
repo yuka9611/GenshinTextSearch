@@ -1,5 +1,5 @@
 import os
-import sys
+
 from lightweight_progress import LightweightProgress
 
 from DBConfig import conn, READABLE_PATH, DATA_PATH
@@ -54,6 +54,21 @@ def _build_readable_upsert_sql() -> str:
         ],
         conflict_columns=["fileName", "lang"],
         update_columns=["content", "titleTextMapHash", "readableId"],
+    )
+
+
+def _build_plain_readable_upsert_sql() -> str:
+    return (
+        "INSERT INTO readable(fileName, lang, content, titleTextMapHash, readableId) "
+        "VALUES (?,?,?,?,?) "
+        "ON CONFLICT(fileName, lang) DO UPDATE SET "
+        "content=excluded.content, "
+        "titleTextMapHash=excluded.titleTextMapHash, "
+        "readableId=excluded.readableId "
+        "WHERE "
+        "NOT (readable.content IS excluded.content) "
+        "OR NOT (readable.titleTextMapHash IS excluded.titleTextMapHash) "
+        "OR NOT (readable.readableId IS excluded.readableId)"
     )
 
 
@@ -141,11 +156,18 @@ def importReadableByFiles(
                     content,
                     version_id,
                 )
-                # 只有当版本或内容发生变化时才执行SQL
                 content_changed = existing_row is None or existing_row[0] != content
-                created_version_changed = existing_row is None or should_update_version(existing_row[1], created_id, is_created=True)
-                updated_version_changed = existing_row is None or should_update_version(existing_row[2], updated_id, is_created=False)
-                
+                created_version_changed = existing_row is None or should_update_version(
+                    existing_row[1],
+                    created_id,
+                    is_created=True,
+                )
+                updated_version_changed = existing_row is None or should_update_version(
+                    existing_row[2],
+                    updated_id,
+                    is_created=False,
+                )
+
                 if content_changed or created_version_changed or updated_version_changed:
                     writer.add((file_name, lang, content, title_hash, readable_id, created_id, updated_id))
             except Exception as e:
@@ -207,15 +229,8 @@ def importReadable(
     reset: bool = False,
     prune_missing: bool = True,
     batch_size: int = DEFAULT_BATCH_SIZE,
-    current_version: str | None = None,
-    write_versions: bool = True,
 ):
     ensure_version_schema()
-    version_id: int | None = None
-    if write_versions:
-        version = current_version or get_current_version()
-        version_id = get_or_create_version_id(version)
-
     filename_to_info = _load_readable_filename_map()
 
     cursor = conn.cursor()
@@ -228,7 +243,7 @@ def importReadable(
         "_seen_readable",
     )
 
-    upsert_sql = _build_readable_upsert_sql()
+    upsert_sql = _build_plain_readable_upsert_sql()
     seen_sql = "INSERT OR IGNORE INTO _seen_readable(fileName, lang) VALUES (?,?)"
 
     if not os.path.exists(READABLE_PATH):
@@ -253,7 +268,6 @@ def importReadable(
             for fileName in sorted(files):
                 filePath = os.path.join(root, fileName)
                 if os.path.isfile(filePath):
-                    # 计算相对路径，保持与Subtitle导入逻辑一致
                     rel_path = os.path.relpath(filePath, langPath)
                     clean_file_name = rel_path.replace(os.sep, "/")
                     file_tasks.append((lang, clean_file_name, filePath))
@@ -264,10 +278,13 @@ def importReadable(
     with LightweightProgress(len(file_tasks), desc="Readable files", unit="files") as pbar:
         for lang, clean_file_name, filePath in file_tasks:
             name_without_ext = os.path.splitext(clean_file_name)[0]
-            # 尝试使用不同的键来查找信息
             base_name = os.path.basename(clean_file_name)
             base_name_without_ext = os.path.splitext(base_name)[0]
-            info = filename_to_info.get(name_without_ext) or filename_to_info.get(base_name) or filename_to_info.get(base_name_without_ext)
+            info = (
+                filename_to_info.get(name_without_ext)
+                or filename_to_info.get(base_name)
+                or filename_to_info.get(base_name_without_ext)
+            )
 
             title_hash = info["titleHash"] if info else None
             readable_id = info["readableId"] if info else None
@@ -275,30 +292,22 @@ def importReadable(
             try:
                 with open(filePath, "r", encoding="utf-8") as f:
                     content = f.read().replace("\n", "\\n")
-                # 检查是否已存在该条记录
                 existing_row = cursor.execute(
                     """
-                    SELECT content, created_version_id, updated_version_id
+                    SELECT content, titleTextMapHash, readableId
                     FROM readable
                     WHERE fileName=? AND lang=?
                     LIMIT 1
                     """,
                     (clean_file_name, lang),
                 ).fetchone()
-                # 使用assign_readable_versions_by_text函数正确处理版本
-                created_id, updated_id = assign_readable_versions_by_text(
-                    existing_row,
-                    content,
-                    version_id,
-                )
-                # 只有当版本或内容发生变化时才执行SQL
                 content_changed = existing_row is None or existing_row[0] != content
-                created_version_changed = existing_row is None or should_update_version(existing_row[1], created_id, is_created=True)
-                updated_version_changed = existing_row is None or should_update_version(existing_row[2], updated_id, is_created=False)
-                
-                if content_changed or created_version_changed or updated_version_changed:
+                title_changed = existing_row is None or existing_row[1] != title_hash
+                readable_id_changed = existing_row is None or existing_row[2] != readable_id
+
+                if content_changed or title_changed or readable_id_changed:
                     writer.add(
-                        (clean_file_name, lang, content, title_hash, readable_id, created_id, updated_id),
+                        (clean_file_name, lang, content, title_hash, readable_id),
                         (clean_file_name, lang),
                     )
                 readable_data.append((clean_file_name, lang, content))
@@ -309,15 +318,13 @@ def importReadable(
 
     writer.flush()
 
-    # 分析并报告异常情况
     if readable_data:
         exception_data = analyze_readable_exceptions(readable_data)
         report_exceptions(exception_data, "Readable")
 
-        # 删除源文件和数据库中内容均为空白的条目
-        print("删除空白Readable条目...")
+        print("Deleting empty Readable rows...")
         delete_count = delete_empty_readable_entries(cursor, READABLE_PATH)
-        print(f"已删除 {delete_count} 个空白Readable条目")
+        print(f"Deleted {delete_count} empty Readable rows")
     if prune_missing:
         cursor.execute(
             """

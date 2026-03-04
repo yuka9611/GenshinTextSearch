@@ -17,7 +17,7 @@ This repository uses a multi-layer encoding guard to reduce mojibake risk.
 
 ## Local usage
 
-Install pre-commit once:
+Install `pre-commit` and enable the hook once. This repository expects the hook to be installed:
 
 ```bash
 pip install pre-commit
@@ -27,10 +27,10 @@ pre-commit install
 Run checks manually:
 
 ```bash
-# Check all tracked files for UTF-8 only
-python tools/check_encoding.py --no-mojibake-check
+# Check all tracked files with UTF-8 and mojibake detection
+python tools/check_encoding.py
 
-# Check specific files with mojibake detection
+# Check specific files with the same rules
 python tools/check_encoding.py server/databaseHelper.py
 ```
 
@@ -44,5 +44,5 @@ $OutputEncoding = [System.Text.UTF8Encoding]::UTF8
 
 ## Notes
 
-- The mojibake detector is intentionally strict for changed files.
+- The mojibake detector runs locally and in CI.
 - Existing legacy mojibake should be fixed incrementally.
