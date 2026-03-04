@@ -43,8 +43,27 @@ def to_hash_value(raw_hash):
         return raw_hash
 
 
-# 版本控制相关功能已移至 version_control.py
-from version_control import build_versioned_upsert_sql
+# Version helpers live in version_control.py.
+def build_versioned_upsert_sql(
+    *,
+    table: str,
+    insert_columns: list[str],
+    conflict_columns: list[str],
+    update_columns: list[str],
+    compare_columns: list[str] | None = None,
+    content_column: str = "content",
+) -> str:
+    # Delay the import to avoid an import-time cycle with version_control.
+    from version_control import build_versioned_upsert_sql as _impl
+
+    return _impl(
+        table=table,
+        insert_columns=insert_columns,
+        conflict_columns=conflict_columns,
+        update_columns=update_columns,
+        compare_columns=compare_columns,
+        content_column=content_column,
+    )
 
 
 class BufferedExecutemany:
@@ -84,7 +103,7 @@ class BufferedExecutemany:
 @contextmanager
 def fast_import_pragmas(conn, enabled: bool = True):
     """
-    Temporarily relax sqlite durability settings for faster bulk imports.
+    Temporarily apply balanced sqlite bulk-write settings.
     Values are restored at the end of the context.
     """
     if not enabled:
@@ -93,18 +112,17 @@ def fast_import_pragmas(conn, enabled: bool = True):
 
     cursor = conn.cursor()
     old_settings = {}
-    pragma_names = ("synchronous", "temp_store", "cache_size", "journal_mode", "foreign_keys")
+    pragma_names = ("synchronous", "temp_store", "cache_size", "journal_mode")
 
     try:
         for name in pragma_names:
             row = cursor.execute(f"PRAGMA {name}").fetchone()
             old_settings[name] = row[0] if row else None
 
-        cursor.execute("PRAGMA synchronous = OFF")
+        cursor.execute("PRAGMA synchronous = NORMAL")
         cursor.execute("PRAGMA temp_store = MEMORY")
-        cursor.execute("PRAGMA cache_size = -500000")  # 增加缓存大小
-        cursor.execute("PRAGMA journal_mode = OFF")  # 禁用日志以提高速度
-        cursor.execute("PRAGMA foreign_keys = OFF")  # 禁用外键检查以提高速度
+        cursor.execute("PRAGMA cache_size = -262144")  # Reserve about 256 MiB of page cache.
+        cursor.execute("PRAGMA journal_mode = WAL")  # Keep WAL enabled for safer bulk writes.
         yield
     finally:
         for name in pragma_names:

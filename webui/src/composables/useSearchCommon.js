@@ -1,4 +1,4 @@
-import { ref, computed, watch } from 'vue'
+import { ref, watch } from 'vue'
 
 const useSearchCommon = () => {
   const keyword = ref('')
@@ -49,7 +49,6 @@ const useSearchCommon = () => {
     return displayVersion(entry, 'created') !== displayVersion(entry, 'updated')
   }
 
-  // 监听版本变化的函数
   const setupVersionWatchers = (callback) => {
     watch(createdVersionFilter, () => {
       callback()
@@ -60,15 +59,12 @@ const useSearchCommon = () => {
   }
 
   return {
-    // 状态
     keyword,
     keywordLast,
     searchSummary,
     isLoading,
     createdVersionFilter,
     updatedVersionFilter,
-
-    // 方法
     normalizeText,
     normalizeVersion,
     getNormalizedEntryVersion,

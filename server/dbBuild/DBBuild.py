@@ -15,7 +15,6 @@ import questImport
 from import_utils import DEFAULT_BATCH_SIZE, executemany_batched, fast_import_pragmas
 from version_control import (
     ensure_version_schema,
-    get_current_version,
     rebuild_version_catalog,
     set_current_version,
 )
@@ -82,10 +81,10 @@ def _run_stage(stage_timer: StageTimer | None, stage_name: str, fn, *args, skip_
 
     try:
         if stage_timer is None:
-            result = fn(*args, **kwargs)
+            fn(*args, **kwargs)
         else:
             with stage_timer.track(stage_name):
-                result = fn(*args, **kwargs)
+                fn(*args, **kwargs)
         # 记录完成时间和状态
         end_time = time.strftime('%Y-%m-%d %H:%M:%S')
         update_breakpoint_status(stage_name, 'completed', start_time, end_time)
@@ -263,10 +262,8 @@ def importFetterStories(*, commit: bool = True, batch_size: int = DEFAULT_BATCH_
 
 def importQuest(
     fileName: str,
-    current_version: str | None = None,
     *,
     cursor=None,
-    write_versions: bool = True,
     skip_collector: list[str] | None = None,
     log_skip: bool = True,
     missing_title_collector: list[str] | None = None,
@@ -274,9 +271,7 @@ def importQuest(
 ) -> tuple[int | None, bool]:
     return questImport.importQuest(
         fileName,
-        current_version=current_version,
         cursor=cursor,
-        write_versions=write_versions,
         skip_collector=skip_collector,
         log_skip=log_skip,
         missing_title_collector=missing_title_collector,
@@ -285,15 +280,20 @@ def importQuest(
 
 
 def importAllQuests(
-    current_version: str | None = None,
     sync_delete: bool = False,
-    *,
-    write_versions: bool = True,
 ):
     return questImport.importAllQuests(
+        sync_delete=sync_delete,
+    )
+
+
+def importAllQuestsForDiff(
+    current_version: str,
+    sync_delete: bool = False,
+):
+    return questImport.importAllQuestsForDiff(
         current_version=current_version,
         sync_delete=sync_delete,
-        write_versions=write_versions,
     )
 
 
@@ -400,7 +400,6 @@ def importManualTextMap(*, commit: bool = True, batch_size: int = DEFAULT_BATCH_
         conn.commit()
 
 def main(
-    current_version: str | None = None,
     *,
     prune_missing: bool = True,
     enable_stage_profile: bool = False,
@@ -439,7 +438,6 @@ def main(
     # 一次性询问所有阶段是否跳过
     skip_decisions = ask_all_stages_skip(import_stages)
 
-    version = current_version or get_current_version()
     with fast_import_pragmas(conn, enabled=use_fast_pragmas):
         # 执行各个阶段
         for stage in import_stages:
@@ -464,8 +462,6 @@ def main(
                     stage_timer,
                     stage,
                     importAllQuests,
-                    current_version=version,
-                    write_versions=False,
                     sync_delete=prune_missing,
                     skip_asking=True,
                 )
@@ -482,8 +478,6 @@ def main(
                     stage_timer,
                     stage,
                     readableImport.importReadable,
-                    current_version=version,
-                    write_versions=False,
                     prune_missing=prune_missing,
                     skip_asking=True,
                 )
@@ -492,9 +486,7 @@ def main(
                     stage_timer,
                     stage,
                     subtitleImport.importSubtitles,
-                    current_version=version,
                     prune_missing=prune_missing,
-                    write_versions=False,
                     skip_asking=True,
                 )
             elif stage == "textmap":
@@ -502,8 +494,6 @@ def main(
                     stage_timer,
                     stage,
                     textMapImport.importAllTextMap,
-                    current_version=version,
-                    write_versions=False,
                     prune_missing=prune_missing,
                     skip_asking=True,
                 )
@@ -649,11 +639,6 @@ if __name__ == "__main__":
         help="only import quest/questTalk data (defaults to no version writes)",
     )
     parser.add_argument(
-        "--quest-write-versions",
-        action="store_true",
-        help="when used with --quest-only, also write quest created/updated version ids",
-    )
-    parser.add_argument(
         "--quest-only-skip-quests",
         action="store_true",
         help="when used with --quest-only, skip importing Quest/QuestBrief",
@@ -694,7 +679,7 @@ if __name__ == "__main__":
         "--no-fast-import-pragmas",
         "--no-fast-pragmas",
         action="store_true",
-        help="disable temporary sqlite PRAGMA speedups during full import",
+        help="disable temporary sqlite bulk-write tuning during full import",
     )
     parser.add_argument("--skip-history-backfill", "--skip-history", action="store_true", help="skip history version backfill")
     parser.add_argument("--force", action="store_true", help="force replay all commits for version backfill")
@@ -748,12 +733,6 @@ if __name__ == "__main__":
             file=sys.stderr,
         )
         sys.exit(2)
-    if args.quest_write_versions and not args.quest_only:
-        print(
-            "[ERROR] --quest-write-versions can only be used with --quest-only.",
-            file=sys.stderr,
-        )
-        sys.exit(2)
     if args.quest_only_skip_quests and not args.quest_only:
         print(
             "[ERROR] --quest-only-skip-quests can only be used with --quest-only.",
@@ -798,25 +777,15 @@ if __name__ == "__main__":
                 sys.exit(2)
         elif args.quest_only:
             try:
-                write_versions = bool(args.quest_write_versions)
                 include_quests = not bool(args.quest_only_skip_quests)
                 include_talks = not bool(args.quest_only_skip_talk)
-                if write_versions and not include_quests:
-                    print(
-                        "[WARN] --quest-write-versions ignored in --quest-only mode "
-                        "when quests are skipped."
-                    )
-                current_version = get_current_version() if write_versions else None
                 print(
                     "Quest-only import mode: "
-                    f"write_versions={'yes' if write_versions else 'no'}, "
                     f"prune_missing={'yes' if prune_missing else 'no'}, "
                     f"run_quests={'yes' if include_quests else 'no'}, "
                     f"run_talks={'yes' if include_talks else 'no'}"
                 )
                 quest_stats = questImport.runQuestOnly(
-                    current_version=current_version,
-                    write_versions=write_versions and include_quests,
                     prune_missing=prune_missing,
                     include_quests=include_quests,
                     include_talks=include_talks,
@@ -863,7 +832,6 @@ if __name__ == "__main__":
                     if head_commit:
                         set_current_version(head_commit)
                     main(
-                        current_version=get_current_version(),
                         prune_missing=prune_missing,
                         enable_stage_profile=args.profile,
                         use_fast_pragmas=not args.no_fast_import_pragmas,

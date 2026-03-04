@@ -92,33 +92,16 @@ def _try_load_fts_extension(
             pass
 
 
-def _configure_connection(connection: sqlite3.Connection) -> None:
-    """
-    配置数据库连接，优化搜索速度和平衡数据库体积
-
-    优化措施：
-    1. 增加缓存大小至262144页（约2GB），减少磁盘I/O
-    2. 增加内存映射大小至2GB，提高大数据库的访问速度
-    3. 使用WAL模式，提高并发性能和读写速度
-    4. 禁用外键检查，提高查询速度
-    5. 启用内存临时表，加快临时数据处理
-    6. 自动优化数据库，保持最佳性能状态
-
-    这些设置平衡了搜索速度和数据库体积，在保证查询性能的同时，不会显著增加数据库文件大小
-    """
-    tokenizer, ext_path, ext_entry = _resolve_fts_settings()
-    _register_fts_content_function(connection, tokenizer)
-    _try_load_fts_extension(connection, ext_path, ext_entry)
-
+def _apply_connection_pragmas(connection: sqlite3.Connection) -> None:
     # Favor read-heavy query latency for local desktop usage.
     pragmas = (
-        "PRAGMA temp_store=MEMORY",  # 使用内存临时表，提高临时数据处理速度
-        "PRAGMA cache_size=-262144",  # 增加缓存大小至262144页（约2GB）
-        "PRAGMA mmap_size=2147483648",  # 增加内存映射大小至2GB
-        "PRAGMA synchronous=NORMAL",  # 平衡数据安全性和写入性能
-        "PRAGMA journal_mode=WAL",  # 使用WAL模式，提高并发性能
-        "PRAGMA foreign_keys=OFF",  # 禁用外键检查，提高查询速度
-        "PRAGMA optimize",  # 优化数据库，保持最佳性能状态
+        "PRAGMA temp_store=MEMORY",  # Store temporary tables in memory.
+        "PRAGMA cache_size=-262144",  # Reserve about 256 MiB of page cache.
+        "PRAGMA mmap_size=2147483648",  # Allow up to 2 GiB of memory-mapped I/O.
+        "PRAGMA synchronous=NORMAL",  # Balance durability with write latency.
+        "PRAGMA journal_mode=WAL",  # Keep WAL enabled for safer concurrent reads.
+        "PRAGMA foreign_keys=ON",  # Enforce foreign keys when schemas use them.
+        "PRAGMA optimize",  # Let SQLite refresh planner statistics opportunistically.
     )
     with closing(connection.cursor()) as cursor:
         for pragma in pragmas:
@@ -126,6 +109,14 @@ def _configure_connection(connection: sqlite3.Connection) -> None:
                 cursor.execute(pragma)
             except sqlite3.DatabaseError:
                 continue
+
+
+def _configure_connection(connection: sqlite3.Connection) -> None:
+    """Register FTS helpers and apply default runtime PRAGMAs."""
+    tokenizer, ext_path, ext_entry = _resolve_fts_settings()
+    _register_fts_content_function(connection, tokenizer)
+    _try_load_fts_extension(connection, ext_path, ext_entry)
+    _apply_connection_pragmas(connection)
 
 
 def get_connection() -> sqlite3.Connection:
@@ -927,6 +918,7 @@ def _append_textmap_exists_version_filter(
     text_hash_expr: str,
     created_version: str | None,
     updated_version: str | None,
+    lang_code: int | None = None,
 ) -> str:
     created = _normalize_version_filter(created_version)
     updated = _normalize_version_filter(updated_version)
@@ -938,6 +930,9 @@ def _append_textmap_exists_version_filter(
         return sql
     has_id_mode = _has_version_id_columns("textMap") and _has_version_dim()
     sql += f"and exists (select 1 from textMap tmv where tmv.hash = {text_hash_expr} "
+    if lang_code is not None:
+        sql += "and tmv.lang = ? "
+        params.append(lang_code)
     if created:
         if has_id_mode:
             sql += (
@@ -1224,6 +1219,15 @@ def selectTextMapFromTextHash(textHash: int, langs: list[int] | None = None):
 def getTextMapVersionInfo(textHash: int, preferred_lang: int | None = None):
     if not _has_version_id_columns("textMap"):
         return None, None
+    try:
+        textHash = int(textHash)
+    except (TypeError, ValueError):
+        return None, None
+    if preferred_lang is not None:
+        try:
+            preferred_lang = int(preferred_lang)
+        except (TypeError, ValueError):
+            preferred_lang = None
     created_expr = _version_value_expr("tm", "created", "textMap")
     updated_expr = _version_value_expr("tm", "updated", "textMap")
     with closing(conn.cursor()) as cursor:
@@ -2055,6 +2059,7 @@ def selectAvatarVoiceItemsByFilters(
     limit: int | None = 800,
     created_version: str | None = None,
     updated_version: str | None = None,
+    version_lang_code: int | None = None,
 ):
     with closing(conn.cursor()) as cursor:
         keyword_text = (keyword or "").strip()
@@ -2098,6 +2103,7 @@ def selectAvatarVoiceItemsByFilters(
             "fetters.voiceFileTextTextMapHash",
             created_version,
             updated_version,
+            version_lang_code,
         )
 
         if keyword_text:
@@ -2126,6 +2132,7 @@ def selectAvatarStoryItemsByFilters(
     limit: int | None = 800,
     created_version: str | None = None,
     updated_version: str | None = None,
+    version_lang_code: int | None = None,
 ):
     with closing(conn.cursor()) as cursor:
         keyword_text = (keyword or "").strip()
@@ -2182,6 +2189,7 @@ def selectAvatarStoryItemsByFilters(
             "entries.contextHash",
             created_version,
             updated_version,
+            version_lang_code,
         )
 
         if keyword_text:
@@ -3059,6 +3067,3 @@ def selectSubtitleContextBySubtitleId(subtitleId: int, langs: list[int]):
         params = file_candidates + langs + [anchor_start - 0.5, anchor_start + 0.5]
         cursor.execute(sql, params)
         return cursor.fetchall()
-
-
-

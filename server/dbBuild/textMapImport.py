@@ -1,6 +1,5 @@
 import os
 import json
-import sys
 from lightweight_progress import LightweightProgress
 
 from DBConfig import conn, LANG_PATH
@@ -13,7 +12,7 @@ from import_utils import (
     reset_temp_table,
     to_hash_value,
 )
-from version_control import ensure_version_schema, get_current_version, get_or_create_version_id, should_update_version
+from version_control import ensure_version_schema, get_current_version, get_or_create_version_id
 from textmap_name_utils import parse_textmap_file_name, textmap_file_sort_key
 
 
@@ -60,7 +59,16 @@ def _load_existing_textmap_content_by_hash(
     return existing
 
 
-def importTextMap(
+def _build_plain_textmap_upsert_sql() -> str:
+    return (
+        "INSERT INTO textMap(hash, content, lang) VALUES (?,?,?) "
+        "ON CONFLICT(lang, hash) DO UPDATE SET "
+        "content=excluded.content "
+        "WHERE NOT (textMap.content IS excluded.content)"
+    )
+
+
+def _import_textmap(
     baseMapName: str,
     fileList: list[str],
     *,
@@ -68,19 +76,13 @@ def importTextMap(
     batch_size: int = DEFAULT_BATCH_SIZE,
     force_reimport: bool = False,
     prune_missing: bool = True,
-    current_version: str | None = None,
-    write_versions: bool = True,
+    version_id: int | None = None,
 ):
     """
     :param baseMapName: Base language config entry name, e.g. TextMapRU.json
     :param fileList: Split files for that base map, e.g. [TextMapRU_0.json, TextMapRU_1.json]
     """
     ensure_version_schema()
-    version_id: int | None = None
-    if write_versions:
-        version = current_version or get_current_version()
-        version_id = get_or_create_version_id(version)
-
     cursor = conn.cursor()
     sql_lang = "select id, imported from langCode where codeName = ?"
     cursor.execute(sql_lang, (baseMapName,))
@@ -109,13 +111,16 @@ def importTextMap(
     )
 
     sql_seen = "INSERT OR IGNORE INTO _seen_textmap_hash(hash) VALUES (?)"
-    sql_upsert = build_versioned_upsert_sql(
-        table="textMap",
-        insert_columns=["hash", "content", "lang", "created_version_id", "updated_version_id"],
-        conflict_columns=["lang", "hash"],
-        update_columns=["content"],
-        compare_columns=["content"],
-    )
+    if version_id is None:
+        sql_upsert = _build_plain_textmap_upsert_sql()
+    else:
+        sql_upsert = build_versioned_upsert_sql(
+            table="textMap",
+            insert_columns=["hash", "content", "lang", "created_version_id", "updated_version_id"],
+            conflict_columns=["lang", "hash"],
+            update_columns=["content"],
+            compare_columns=["content"],
+        )
     missing_files: list[str] = []
     import_errors: list[str] = []
     compared_hash_count = 0
@@ -154,7 +159,10 @@ def importTextMap(
                     if old_content != content:
                         # 检查版本是否需要更新
                         # 由于 textMap 使用 SQL 层面的版本控制，这里只需要检查内容变化
-                        changed_rows.append((row_hash, content, langId, version_id, version_id))
+                        if version_id is None:
+                            changed_rows.append((row_hash, content, langId))
+                        else:
+                            changed_rows.append((row_hash, content, langId, version_id, version_id))
 
                 changed_hash_count += executemany_batched(
                     cursor,
@@ -191,13 +199,53 @@ def importTextMap(
     print(f"Done importing {baseMapName}.")
 
 
+def importTextMap(
+    baseMapName: str,
+    fileList: list[str],
+    *,
+    commit: bool = True,
+    batch_size: int = DEFAULT_BATCH_SIZE,
+    force_reimport: bool = False,
+    prune_missing: bool = True,
+):
+    _import_textmap(
+        baseMapName,
+        fileList,
+        commit=commit,
+        batch_size=batch_size,
+        force_reimport=force_reimport,
+        prune_missing=prune_missing,
+    )
+
+
+def importTextMapForDiff(
+    baseMapName: str,
+    fileList: list[str],
+    *,
+    commit: bool = True,
+    batch_size: int = DEFAULT_BATCH_SIZE,
+    force_reimport: bool = False,
+    prune_missing: bool = True,
+    current_version: str,
+):
+    version = current_version or get_current_version()
+    version_id = get_or_create_version_id(version)
+    _import_textmap(
+        baseMapName,
+        fileList,
+        commit=commit,
+        batch_size=batch_size,
+        force_reimport=force_reimport,
+        prune_missing=prune_missing,
+        version_id=version_id,
+    )
+
+
 def importAllTextMap(
     *,
     commit: bool = True,
     batch_size: int = DEFAULT_BATCH_SIZE,
     prune_missing: bool = True,
-    current_version: str | None = None,
-    write_versions: bool = True,
 ):
     if not os.path.exists(LANG_PATH):
         print(f"TextMap directory not found: {LANG_PATH}")
@@ -228,8 +276,49 @@ def importAllTextMap(
             commit=False,
             batch_size=batch_size,
             prune_missing=prune_missing,
+        )
+
+    if commit:
+        conn.commit()
+
+
+def importAllTextMapForDiff(
+    *,
+    commit: bool = True,
+    batch_size: int = DEFAULT_BATCH_SIZE,
+    prune_missing: bool = True,
+    current_version: str,
+):
+    if not os.path.exists(LANG_PATH):
+        print(f"TextMap directory not found: {LANG_PATH}")
+        return
+
+    files = os.listdir(LANG_PATH)
+    file_groups: dict[str, list[str]] = {}
+    unsupported_files: list[str] = []
+
+    for fileName in files:
+        if not fileName.endswith(".json"):
+            continue
+
+        parsed = parse_textmap_file_name(fileName)
+        if parsed is not None:
+            base_name, _split_part = parsed
+            file_groups.setdefault(base_name, []).append(fileName)
+        else:
+            unsupported_files.append(fileName)
+
+    _print_skip_summary("textmap unsupported filename", unsupported_files)
+
+    for baseMapName, fileList in file_groups.items():
+        fileList.sort(key=textmap_file_sort_key)
+        importTextMapForDiff(
+            baseMapName,
+            fileList,
+            commit=False,
+            batch_size=batch_size,
+            prune_missing=prune_missing,
             current_version=current_version,
-            write_versions=write_versions,
         )
 
     if commit:
@@ -237,4 +326,4 @@ def importAllTextMap(
 
 
 if __name__ == "__main__":
-    importAllTextMap(write_versions=False)
+    importAllTextMap()

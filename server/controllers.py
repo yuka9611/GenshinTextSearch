@@ -2,7 +2,6 @@ import io
 import re
 import zlib
 from functools import lru_cache
-from datetime import datetime, timedelta
 
 import databaseHelper
 import languagePackReader
@@ -617,7 +616,6 @@ def _handle_keyword_only_query(keyword: str, keyword_trim: str, langCode: int, p
     """
     处理仅关键词查询
     """
-    ans = []
     langs = config.getResultLanguages().copy()
     if langCode not in langs:
         langs.append(langCode)
@@ -644,9 +642,9 @@ def _handle_keyword_only_query(keyword: str, keyword_trim: str, langCode: int, p
     langMap = databaseHelper.getLangCodeMap()
     langStr = langMap.get(langCode)
     targetLangStrs = []
-    for l in langs:
-        if l in langMap:
-            targetLangStrs.append(langMap[l])
+    for result_lang in langs:
+        if result_lang in langMap:
+            targetLangStrs.append(langMap[result_lang])
     strToLangId = _build_lang_str_to_id_map()
     prefix_labels = {
         "Book": "书籍",
@@ -879,7 +877,6 @@ def _build_readable_obj(fileName, content, titleTextMapHash, readableId, created
     """
     构建可读内容对象
     """
-    import zlib
     fileHash = zlib.crc32(fileName.encode('utf-8'))
     origin_label = "阅读物"
     for prefix, label in prefix_labels.items():
@@ -918,7 +915,6 @@ def _build_subtitle_obj(fileName, content, startTime, endTime, subtitleId, creat
     """
     构建字幕对象
     """
-    import zlib
     fileHash = zlib.crc32(f"{fileName}_{startTime}".encode('utf-8'))
     origin = f"字幕: {fileName}"
     obj = {
@@ -1395,6 +1391,7 @@ def searchAvatarVoicesByFilters(
         limit=limit,
         created_version=created_version,
         updated_version=updated_version,
+        version_lang_code=sourceLangCode,
     )
 
     voices = []
@@ -1474,6 +1471,7 @@ def searchAvatarStoriesByFilters(
         limit=limit,
         created_version=created_version,
         updated_version=updated_version,
+        version_lang_code=sourceLangCode,
     )
 
     stories = []
@@ -1495,9 +1493,6 @@ def searchAvatarStoriesByFilters(
             continue
 
         # 确保只包含当前搜索语言的内容
-        if str(keywordLangCode) not in translates:
-            continue
-
         if avatarId not in avatar_name_cache:
             avatar_name_cache[avatarId] = databaseHelper.getCharterName(avatarId, sourceLangCode)
         avatarName = avatar_name_cache[avatarId]
@@ -1532,7 +1527,7 @@ def searchAvatarStoriesByFilters(
         if contextHash in version_cache:
             created_raw, updated_raw = version_cache[contextHash]
         else:
-            version_info = databaseHelper.getTextMapVersionInfo(contextHash, keywordLangCode)
+            version_info = databaseHelper.getTextMapVersionInfo(contextHash, sourceLangCode)
             if version_info:
                 created_raw, updated_raw = version_info
             else:
@@ -1665,9 +1660,9 @@ def getReadableContent(readableId: int | None, fileName: str | None, searchLang:
 
     langMap = databaseHelper.getLangCodeMap()
     targetLangStrs = []
-    for l in langs:
-        if l in langMap:
-            targetLangStrs.append(langMap[l])
+    for result_lang in langs:
+        if result_lang in langMap:
+            targetLangStrs.append(langMap[result_lang])
 
     if readableId:
         readableInfo = databaseHelper.getReadableInfo(readableId, None)

@@ -1,28 +1,22 @@
 import json
 import os
-import sqlite3
+import logging
 import subprocess
 import sys
 import time
-import logging
 
-# 配置日志
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(levelname)s - %(message)s',
-    handlers=[
-        logging.FileHandler('history_backfill.log'),
-        logging.StreamHandler()
-    ]
-)
-logger = logging.getLogger(__name__)
+# 日志配置
 
 # Git 命令缓存
-_git_cache = {}
 
 
 from DBConfig import conn, DATA_PATH
-from import_utils import DEFAULT_BATCH_SIZE, executemany_batched, to_hash_value as _to_hash_value
+from import_utils import (
+    DEFAULT_BATCH_SIZE,
+    executemany_batched,
+    fast_import_pragmas,
+    to_hash_value as _to_hash_value,
+)
 from lang_constants import LANG_CODE_MAP
 from quest_hash_map_utils import (
     count_unresolved_quest_versions as _count_unresolved_quest_versions,
@@ -31,24 +25,51 @@ from quest_hash_map_utils import (
 )
 from quest_utils import extract_quest_row as _extract_quest_row
 from version_control import backfill_quest_created_version_from_textmap as _backfill_quest_created_version_from_textmap
-from version_control import readable_text_changed as _readable_text_changed
 from subtitle_utils import parse_srt_rows as _parse_srt_rows
 from version_control import subtitle_text_changed_keys as _subtitle_text_changed_keys
 from textmap_name_utils import parse_textmap_file_name, analyze_readable_version_exceptions, analyze_subtitle_version_exceptions, analyze_textmap_version_exceptions, report_version_exceptions
 from version_control import (
+    _build_version_preference_case_sql,
+    _version_precedes_sql,
     ensure_version_schema,
-    get_meta,
     get_or_create_version_id,
+    should_update_version,
+)
+from versioning import (
+    _table_exists,
+    get_meta,
     normalize_version_label,
     rebuild_version_catalog,
     set_meta,
-    build_guarded_created_updated_sql,
-    should_update_version,
 )
 from lightweight_progress import LightweightProgress
 
+try:
+    if hasattr(sys.stderr, "reconfigure"):
+        sys.stderr.reconfigure(encoding="utf-8", errors="backslashreplace")
+except Exception:
+    pass
 
-# 公共路径常量
+# 譌･蠢鈴・鄂ｮ
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.FileHandler('history_backfill.log', encoding="utf-8"),
+        logging.StreamHandler(sys.stderr)
+    ]
+)
+logger = logging.getLogger(__name__)
+_first_commit_version_cache: dict[tuple[str, str], tuple[str | None, int | None]] = {}
+DEFAULT_HISTORY_COMMIT_BATCH_SIZE = 50
+DEFAULT_GIT_BACKFILL_CHECKPOINT_EVERY = 100
+DEFAULT_FIX_COMMIT_BATCH_SIZE = 1000
+_git_cache = {}
+
+# Git 蜻ｽ莉､郛灘ｭ・_git_cache = {}
+
+
+# 历史回放涉及的路径
 RELEVANT_PATHS = [
     "TextMap",
     "Readable",
@@ -62,10 +83,9 @@ READABLE_ONLY_PATHS = ["Readable"]
 SUBTITLE_ONLY_PATHS = ["Subtitle"]
 
 
-# ==================== 断点管理 ====================
 
 def ensure_breakpoint_schema():
-    """创建断点表结构"""
+    """确保断点表存在。"""
     cur = conn.cursor()
     cur.execute('''
     CREATE TABLE IF NOT EXISTS breakpoint (
@@ -81,7 +101,7 @@ def ensure_breakpoint_schema():
 
 
 def get_breakpoint_status(stage_name):
-    """获取指定阶段的断点状态"""
+    """读取阶段断点状态。"""
     cur = conn.cursor()
     cur.execute("SELECT status FROM breakpoint WHERE stage_name = ?", (stage_name,))
     result = cur.fetchone()
@@ -89,7 +109,7 @@ def get_breakpoint_status(stage_name):
 
 
 def update_breakpoint_status(stage_name, status, start_time=None, end_time=None):
-    """更新断点状态"""
+    """更新阶段断点状态。"""
     cur = conn.cursor()
     if status == 'in_progress':
         cur.execute('''
@@ -106,160 +126,75 @@ def update_breakpoint_status(stage_name, status, start_time=None, end_time=None)
 
 
 def _run_history_stage(stage_name, fn, *args, skip_asking=False, **kwargs):
-    """运行历史回填阶段，支持跳过询问和断点缓存"""
-    # 确保断点表结构存在
-    try:
-        ensure_breakpoint_schema()
-    except Exception as e:
-        logger.error(f"Error ensuring breakpoint schema: {e}")
-        raise
-
-    # 检查断点记录
+    """执行单个历史回填阶段并处理断点。"""
+    ensure_breakpoint_schema()
     try:
         status = get_breakpoint_status(stage_name)
     except Exception as e:
-        logger.error(f"Error getting breakpoint status for {stage_name}: {e}")
-        # 继续执行，使用默认状态
+        logger.error(f"读取阶段断点状态失败 {stage_name}: {e}")
         status = 'pending'
 
-    # 如果已经选择不跳过某个阶段，则不询问
     if not skip_asking:
-        if status == 'completed':
-            # 如果阶段已完成，询问是否重新执行
-            try:
-                ans = input(f"{stage_name} already completed. Re-execute? (y/n): ")
+        try:
+            if status == 'completed':
+                ans = input(f"{stage_name} 已完成，是否重新执行？(y/n): ")
                 if ans != 'y':
-                    logger.info(f"Skipping {stage_name} (already completed)...")
-                    return True  # 返回 True 表示跳过了该阶段
-            except KeyboardInterrupt:
-                logger.info(f"User interrupted, skipping {stage_name}")
-                return True
-            except Exception as e:
-                logger.error(f"Error during user input: {e}")
-                # 继续执行
-        elif status == 'in_progress':
-            # 如果阶段正在进行中，询问是否继续执行
-            try:
-                ans = input(f"{stage_name} is in progress. Continue? (y/n): ")
+                    logger.info(f"跳过 {stage_name}（已完成）...")
+                    return True
+            elif status == 'in_progress':
+                ans = input(f"{stage_name} 正在执行，是否继续？(y/n): ")
                 if ans != 'y':
-                    logger.info(f"Skipping {stage_name} (in progress)...")
-                    return True  # 返回 True 表示跳过了该阶段
-            except KeyboardInterrupt:
-                logger.info(f"User interrupted, skipping {stage_name}")
-                return True
-            except Exception as e:
-                logger.error(f"Error during user input: {e}")
-                # 继续执行
-        else:
-            # 如果没有断点记录，询问是否跳过
-            try:
-                ans = input(f"Skip {stage_name}? (y/n): ")
+                    logger.info(f"跳过 {stage_name}（执行中）...")
+                    return True
+            else:
+                ans = input(f"是否跳过 {stage_name}？(y/n): ")
                 if ans == 'y':
-                    logger.info(f"Skipping {stage_name}...")
-                    return True  # 返回 True 表示跳过了该阶段
-            except KeyboardInterrupt:
-                logger.info(f"User interrupted, skipping {stage_name}")
-                return True
-            except Exception as e:
-                logger.error(f"Error during user input: {e}")
-                # 继续执行
+                    logger.info(f"跳过 {stage_name}...")
+                    return True
+        except KeyboardInterrupt:
+            logger.info(f"用户中断，跳过 {stage_name}")
+            return True
+        except Exception as e:
+            logger.error(f"读取用户输入失败: {e}")
 
-    logger.info(f"Running {stage_name}...")
-    # 记录开始时间和状态
+    logger.info(f"开始执行 {stage_name}...")
     start_time = time.strftime('%Y-%m-%d %H:%M:%S')
     try:
         update_breakpoint_status(stage_name, 'in_progress', start_time)
     except Exception as e:
-        logger.error(f"Error updating breakpoint status for {stage_name}: {e}")
+        logger.error(f"更新阶段断点状态失败 {stage_name}: {e}")
 
     try:
-        result = fn(*args, **kwargs)
-        # 记录完成时间和状态
+        fn(*args, **kwargs)
         end_time = time.strftime('%Y-%m-%d %H:%M:%S')
         try:
             update_breakpoint_status(stage_name, 'completed', start_time, end_time)
         except Exception as e:
-            logger.error(f"Error updating breakpoint status to completed: {e}")
-        logger.info(f"Completed {stage_name}")
-        return False  # 返回 False 表示没有跳过该阶段
+            logger.error(f"将阶段断点状态更新为完成失败: {e}")
+        logger.info(f"{stage_name} 执行完成")
+        return False
     except KeyboardInterrupt:
-        logger.error(f"User interrupted {stage_name}")
-        # 不更新断点状态，保持为 in_progress
+        logger.error(f"用户中断 {stage_name}")
         raise
     except Exception as e:
-        logger.error(f"Error in {stage_name}: {e}", exc_info=True)
-        # 不更新断点状态，保持为 in_progress
+        logger.error(f"{stage_name} 执行出错: {e}", exc_info=True)
         raise
 
-
-# ==================== 数据库工具函数 ====================
-
-def _table_columns(table_name: str) -> set[str]:
-    """获取表的列名集合"""
-    cur = conn.cursor()
-    try:
-        rows = cur.execute(f"PRAGMA table_info({table_name})").fetchall()
-    finally:
-        cur.close()
-    return {row[1] for row in rows}
-
-
-def _table_exists(table_name: str) -> bool:
-    """检查表是否存在"""
-    cur = conn.cursor()
-    try:
-        row = cur.execute(
-            "SELECT 1 FROM sqlite_master WHERE type='table' AND name=? LIMIT 1",
-            (table_name,),
-        ).fetchone()
-        return row is not None
-    finally:
-        cur.close()
-
-
-def _has_any_version_data(table_name: str) -> bool:
-    """检查表是否有版本数据"""
-    cols = _table_columns(table_name)
-    predicates: list[str] = []
-    if "created_version_id" in cols:
-        predicates.append("created_version_id IS NOT NULL")
-    if "updated_version_id" in cols:
-        predicates.append("updated_version_id IS NOT NULL")
-    if not predicates:
-        return False
-    cur = conn.cursor()
-    try:
-        row = cur.execute(
-            f"SELECT 1 FROM {table_name} WHERE {' OR '.join(predicates)} LIMIT 1"
-        ).fetchone()
-        return row is not None
-    finally:
-        cur.close()
-
-
-# ==================== Git 工具函数 ====================
-
 def _run_git(repo_path: str, args: list[str], check: bool = True) -> str:
-    """执行Git命令并缓存结果"""
-    # 生成缓存键
+    """执行 Git 命令并缓存结果。"""
     cache_key = (repo_path, tuple(args))
 
-    # 检查缓存
     if cache_key in _git_cache:
         return _git_cache[cache_key]
 
-    # 执行 Git 命令
     try:
-        logger.debug(f"Running git command: git -C {repo_path} {' '.join(args)}")
-        # 优化：使用低优先级进程，减少对系统资源的占用
+        logger.debug(f"执行 Git 命令: git -C {repo_path} {' '.join(args)}")
         creationflags = 0
         if sys.platform == "win32":
             try:
-                # 尝试获取 CREATE_LOW_PRIORITY_CLASS，如果不可用则使用默认值
                 CREATE_LOW_PRIORITY_CLASS = getattr(subprocess, 'CREATE_LOW_PRIORITY_CLASS', 0)
                 creationflags = CREATE_LOW_PRIORITY_CLASS
             except Exception:
-                # 如果获取失败，使用默认值
                 pass
         proc = subprocess.run(
             ["git", "-C", repo_path] + args,
@@ -271,27 +206,26 @@ def _run_git(repo_path: str, args: list[str], check: bool = True) -> str:
         )
 
         if check and proc.returncode != 0:
-            error_msg = proc.stderr.strip() or "git command failed"
-            logger.error(f"Git command failed: {error_msg}")
+            error_msg = proc.stderr.strip() or "git 命令执行失败"
+            logger.error(f"Git 命令执行失败: {error_msg}")
             raise RuntimeError(error_msg)
 
         result = (proc.stdout or "").strip()
 
-        # 缓存结果
         _git_cache[cache_key] = result
         return result
     except Exception as e:
-        logger.error(f"Error running git command: {e}", exc_info=True)
+        logger.error(f"执行 Git 命令失败: {e}", exc_info=True)
         raise
 
 
 def _resolve_commit(repo_path: str, rev: str) -> str:
-    """解析提交哈希"""
+    """解析提交引用。"""
     return _run_git(repo_path, ["rev-parse", rev], check=True)
 
 
 def _resolve_commit_title(repo_path: str, commit_sha: str) -> str:
-    """获取提交标题"""
+    """读取提交标题。"""
     title = _run_git(repo_path, ["show", "-s", "--format=%s", commit_sha], check=False).strip()
     return title or commit_sha
 
@@ -302,22 +236,17 @@ def _list_commits(
     *,
     from_commit: str | None = None,
 ) -> list[tuple[str, str]]:
-    """列出提交历史"""
-    # 构建 Git 命令参数
+    """按顺序列出提交及标题。"""
     cmd_args = ["log", "--reverse", "--format=%H%x1f%s"]
 
-    # 如果指定了 from_commit，使用范围查询以减少返回的数据量
     if from_commit:
         cmd_args.extend([f"{from_commit}..{target_commit}"])
     else:
         cmd_args.append(target_commit)
 
-    # 执行 Git 命令
     out = _run_git(repo_path, cmd_args, check=True)
 
-    # 流式处理结果，减少内存使用
     commits = []
-    # 逐行处理，避免一次性加载所有内容到内存
     for line in out.splitlines():
         if not line:
             continue
@@ -327,14 +256,11 @@ def _list_commits(
             sha, title = line, ""
         commits.append((sha.strip(), title.strip()))
 
-    # 如果 from_commit 不在结果中，说明它不在目标历史中
     if from_commit and commits and commits[0][0] != from_commit:
-        # 检查 from_commit 是否存在于结果中
         found = False
         for idx, (sha, _title) in enumerate(commits):
             if sha == from_commit:
                 found = True
-                # 只保留 from_commit 之后的提交
                 commits = commits[idx:]
                 break
         if not found:
@@ -346,7 +272,7 @@ def _list_commits(
 
 
 def _resolve_parent_commit(repo_path: str, commit_sha: str) -> str | None:
-    """获取父提交"""
+    """获取提交的父提交。"""
     out = _run_git(
         repo_path,
         ["rev-list", "--parents", "-n", "1", commit_sha],
@@ -363,16 +289,15 @@ def _resolve_first_parent_sha(
     commits: list[tuple[str, str]],
     resolved_from: str | None,
 ) -> str | None:
-    """获取第一个父提交的哈希"""
+    """获取回放起点的父提交。"""
     if not resolved_from or not commits:
         return None
     return _resolve_parent_commit(repo_path, commits[0][0])
 
 
 def _resolve_commit_version(repo_path: str, commit_sha: str, commit_title: str) -> tuple[str, int | None]:
-    """解析提交的版本信息"""
+    """解析提交的版本信息。"""
     try:
-        # 首先尝试使用提交标题
         if commit_title:
             version_label = normalize_version_label(commit_title)
             if version_label:
@@ -380,20 +305,45 @@ def _resolve_commit_version(repo_path: str, commit_sha: str, commit_title: str) 
                 if version_id:
                     return version_label, version_id
 
-        # 如果提交标题中没有有效的版本信息，尝试使用提交哈希
         version_label = normalize_version_label(commit_sha)
         if version_label:
             version_id = _resolve_version_id(version_label)
             if version_id:
                 return version_label, version_id
 
-        # 作为最后的尝试，直接使用提交哈希
         version_id = _resolve_version_id(commit_sha)
         return commit_sha, version_id
     except Exception as e:
-        logger.error(f"Error resolving commit version for {commit_sha[:8]}: {e}")
-        # 出错时返回提交哈希和None
+        logger.error(f"解析提交版本失败 {commit_sha[:8]}: {e}")
         return commit_sha, None
+
+def _resolve_first_version_for_path(repo_path: str, file_path: str) -> tuple[str | None, int | None]:
+    """解析文件首个提交及版本。"""
+    cache_key = (repo_path, file_path)
+    cached = _first_commit_version_cache.get(cache_key)
+    if cached is not None:
+        return cached
+
+    out = _run_git(
+        repo_path,
+        ["log", "--reverse", "--format=%H", "-n", "1", "--", file_path],
+        check=False,
+    )
+    first_commit = out.strip() if out.strip() else None
+    version_id: int | None = None
+    if first_commit:
+        first_commit_title = _resolve_commit_title(repo_path, first_commit)
+        _version_label, version_id = _resolve_commit_version(repo_path, first_commit, first_commit_title)
+    result = (first_commit, version_id)
+    _first_commit_version_cache[cache_key] = result
+    return result
+
+
+def _commit_and_checkpoint(db_conn, resume_key: str | None = None, resume_value: str | None = None):
+    """提交事务并写入断点。"""
+    db_conn.commit()
+    if resume_key is not None and resume_value is not None:
+        set_meta(resume_key, resume_value)
 
 
 def _backfill_git_versions(
@@ -403,38 +353,22 @@ def _backfill_git_versions(
     build_file_path_fn,
     update_sql: str,
     desc: str,
-    unit: str = "records"
+    unit: str = "records",
+    checkpoint_every: int = DEFAULT_GIT_BACKFILL_CHECKPOINT_EVERY,
 ) -> int:
-    """
-    通用Git版本回溯函数
-
-    Args:
-        cursor: 数据库游标
-        table_name: 表名
-        select_sql: 查询没有版本数据的记录的SQL
-        build_file_path_fn: 构建文件路径的函数
-        update_sql: 更新版本信息的SQL
-        desc: 进度条描述
-        unit: 进度条单位
-
-    Returns:
-        回填的记录数量
-    """
+    """通用 Git 回溯回填辅助函数。"""
     backfilled_count = 0
+    checkpoint_every = max(1, int(checkpoint_every))
     try:
-        # 查找没有创建版本的记录
         cursor.execute(select_sql)
         no_version_records = cursor.fetchall()
 
         if no_version_records:
-            print(f"需要Git回溯的{table_name}记录数量: {len(no_version_records)}")
+            print(f"{table_name} 需要 Git 回溯回填：{len(no_version_records)} 条")
             total_records = len(no_version_records)
-
-            # 缓存点管理
             resume_key = f"git_backfill_{table_name}_resume"
             start_idx = 0
 
-            # 尝试从缓存点恢复
             try:
                 resume_value = get_meta(resume_key, "")
                 if resume_value:
@@ -443,113 +377,86 @@ def _backfill_git_versions(
                         if start_idx < 0 or start_idx >= total_records:
                             start_idx = 0
                         else:
-                            print(f"从缓存点继续: 从第 {start_idx + 1} 条记录开始")
+                            print(f"{table_name} Git 回溯从第 {start_idx + 1} 条继续")
                     except ValueError:
                         start_idx = 0
             except Exception as e:
-                logger.error(f"Error getting resume point: {e}")
+                logger.error(f"读取断点失败: {e}")
                 start_idx = 0
 
-            with LightweightProgress(total_records, desc=desc, unit=unit) as pbar:
-                # 跳过已经处理的记录
-                for i in range(start_idx):
-                    pbar.update()
+            record_groups: dict[str, list[tuple[int, tuple]]] = {}
+            skipped_records = 0
+            for i, record in enumerate(no_version_records[start_idx:], start=start_idx):
+                file_path = build_file_path_fn(record)
+                if not file_path:
+                    skipped_records += 1
+                    continue
+                record_groups.setdefault(file_path, []).append((i, record))
 
-                for i, record in enumerate(no_version_records[start_idx:], start=start_idx):
-                    # 设置进度条信息
-                    pbar.set_postfix_str(f"Processing {record}")
+            pbar = LightweightProgress(total_records, desc=desc, unit=unit, initial_print=False)
+            pbar.current = start_idx + skipped_records
+            pbar.update(0)
+            processed_records = skipped_records
+            last_resume_value = str(start_idx)
+            with pbar:
+                for file_path, records_for_path in record_groups.items():
                     try:
-                        # 构建文件路径
-                        file_path = build_file_path_fn(record)
-                        if not file_path:
-                            pbar.update()
-                            continue
-
-                        # 使用Git命令获取该文件的第一个提交
-                        out = _run_git(
-                            DATA_PATH,
-                            ["log", "--reverse", "--format=%H", "-n", "1", "--", file_path],
-                            check=False
-                        )
-                        first_commit = out.strip() if out.strip() else None
-
-                        if first_commit:
-                            # 获取第一个提交的版本信息
-                            first_commit_title = _run_git(
-                                DATA_PATH,
-                                ["show", "-s", "--format=%s", first_commit],
-                                check=False
-                            ).strip()
-                            first_version_label, first_version_id = _resolve_commit_version(DATA_PATH, first_commit, first_commit_title)
-
-                            if first_version_id:
-                                # 构建更新参数
-                                update_params = (first_version_id, first_version_id) + record
-                                # 更新版本信息
-                                cursor.execute(update_sql, update_params)
-                                backfilled_count += 1
+                        _first_commit, first_version_id = _resolve_first_version_for_path(DATA_PATH, file_path)
+                        if first_version_id:
+                            rows = (
+                                (first_version_id, first_version_id) + record
+                                for _idx, record in records_for_path
+                            )
+                            backfilled_count += executemany_batched(cursor, update_sql, rows)
                     except Exception as e:
-                        print(f"[ERROR] Git回溯失败 for {table_name} {record}: {e}")
-                        pass
+                        print(f"[ERROR] {table_name} 的 Git 回溯失败 {file_path}: {e}")
                     finally:
-                        pbar.update()
-                        # 每处理10条记录更新一次缓存点
-                        if (i + 1) % 10 == 0:
-                            try:
-                                set_meta(resume_key, str(i + 1))
-                                conn.commit()
-                            except Exception as e:
-                                logger.error(f"Error saving resume point: {e}")
+                        for record_idx, record in records_for_path:
+                            processed_records += 1
+                            last_resume_value = str(record_idx + 1)
+                            pbar.update(postfix=f"处理 {record}")
+                            if processed_records % checkpoint_every == 0:
+                                try:
+                                    _commit_and_checkpoint(conn, resume_key, last_resume_value)
+                                except Exception as e:
+                                    logger.error(f"保存断点失败: {e}")
 
-            conn.commit()
-            # 完成后清除缓存点
+            _commit_and_checkpoint(conn)
             try:
                 set_meta(resume_key, "")
             except Exception as e:
-                logger.error(f"Error clearing resume point: {e}")
-            print(f"{table_name} Git回溯完成: 回填了 {backfilled_count} 条记录")
-        else:
-            print(f"所有{table_name}记录都已有版本数据，跳过Git回溯")
+                logger.error(f"清理断点失败: {e}")
+            print(f"{table_name} Git 回溯完成：更新 {backfilled_count} 条")
+            return backfilled_count
+
+        print(f"{table_name} 没有需要 Git 回溯的记录")
     except Exception as e:
-        print(f"[ERROR] {table_name} Git回溯过程中发生错误: {e}")
+        print(f"[ERROR] {table_name} Git 回溯失败: {e}")
         backfilled_count = 0
 
     return backfilled_count
 
-
 def _backfill_textmap_git_versions(
     cursor,
     textmap_lang_map: dict[str, int],
-    desc: str = "TextMap Git backfill",
+    desc: str = "TextMap Git 回溯",
     unit: str = "records"
 ) -> int:
     """
-    TextMap专用Git版本回溯函数
-
-    Args:
-        cursor: 数据库游标
-        textmap_lang_map: TextMap语言ID映射
-        desc: 进度条描述
-        unit: 进度条单位
-
-    Returns:
-        回填的记录数量
+    Git-based TextMap backfill helper.
     """
     backfilled_count = 0
+    checkpoint_every = max(1, int(DEFAULT_GIT_BACKFILL_CHECKPOINT_EVERY))
     try:
-        # 查找没有创建版本的TextMap记录
         cursor.execute("SELECT lang, hash FROM textMap WHERE created_version_id IS NULL")
         no_version_records = cursor.fetchall()
 
         if no_version_records:
-            print(f"需要Git回溯的TextMap记录数量: {len(no_version_records)}")
+            print(f"TextMap 需要 Git 回溯回填：{len(no_version_records)} 条")
             total_records = len(no_version_records)
-
-            # 缓存点管理
             resume_key = "git_backfill_textmap_resume"
             start_idx = 0
 
-            # 尝试从缓存点恢复
             try:
                 resume_value = get_meta(resume_key, "")
                 if resume_value:
@@ -558,107 +465,123 @@ def _backfill_textmap_git_versions(
                         if start_idx < 0 or start_idx >= total_records:
                             start_idx = 0
                         else:
-                            print(f"从缓存点继续: 从第 {start_idx + 1} 条记录开始")
+                            print(f"TextMap Git 回溯从第 {start_idx + 1} 个文件继续")
                     except ValueError:
                         start_idx = 0
             except Exception as e:
-                logger.error(f"Error getting resume point: {e}")
+                logger.error(f"读取断点失败: {e}")
                 start_idx = 0
 
-            with LightweightProgress(total_records, desc=desc, unit=unit) as pbar:
-                # 跳过已经处理的记录
-                for i in range(start_idx):
-                    pbar.update()
+            pbar = LightweightProgress(total_records, desc=desc, unit=unit, initial_print=False)
+            pbar.current = start_idx
+            pbar.update(0)
+            with pbar:
+                textmap_files = [f"TextMap/{textmap_file}.json" for textmap_file in textmap_lang_map.keys()]
+                total_files = len(textmap_files)
+                file_start_idx = start_idx if 0 <= start_idx < total_files else 0
+                pending_by_hash: dict[str, list[tuple[int, int]]] = {}
+                for pending_lang, pending_hash_value in no_version_records:
+                    pending_by_hash.setdefault(str(pending_hash_value), []).append((pending_lang, pending_hash_value))
 
-                for i, (lang, hash_value) in enumerate(no_version_records[start_idx:], start=start_idx):
-                    pbar.set_postfix_str(f"Lang {lang}, Hash {hash_value}")
-                    try:
-                        # 查找包含该hash的TextMap文件
-                        textmap_files = []
-                        # 遍历可能的TextMap文件
-                        for textmap_file in textmap_lang_map.keys():
-                            textmap_files.append(f"TextMap/{textmap_file}.json")
+                update_textmap_sql = (
+                    "UPDATE textMap SET "
+                    "created_version_id=CASE "
+                    "WHEN created_version_id IS NULL OR "
+                    f"{_version_precedes_sql('?1', 'created_version_id')} THEN ?1 "
+                    "ELSE created_version_id END, "
+                    "updated_version_id=CASE "
+                    "WHEN updated_version_id IS NULL "
+                    "AND (created_version_id IS NULL OR "
+                    f"{_version_precedes_sql('?1', 'created_version_id')}) THEN ?1 "
+                    "WHEN updated_version_id = created_version_id "
+                    "AND "
+                    f"{_version_precedes_sql('?1', 'created_version_id')} THEN ?1 "
+                    "ELSE updated_version_id END "
+                    "WHERE lang = ?2 AND hash = ?3 "
+                    "AND (created_version_id IS NULL OR "
+                    f"{_version_precedes_sql('?1', 'created_version_id')})"
+                )
 
-                        # 使用Git命令查找包含该hash的提交
-                        for textmap_file in textmap_files:
-                            # 构建文件路径
-                            file_path = textmap_file
-
-                            # 使用Git命令获取该文件的所有提交
+                resolved_hashes: set[str] = set()
+                with LightweightProgress(total_files, desc=desc, unit="files", initial_print=False) as file_pbar:
+                    file_pbar.current = file_start_idx
+                    file_pbar.update(0)
+                    for file_idx in range(file_start_idx, total_files):
+                        file_path = textmap_files[file_idx]
+                        remaining_hashes = set(pending_by_hash.keys())
+                        try:
                             out = _run_git(
                                 DATA_PATH,
                                 ["log", "--reverse", "--format=%H", "--", file_path],
                                 check=False
                             )
-                            commits = out.strip().split('\n') if out.strip() else []
-
+                            commits = out.splitlines() if out else []
                             for commit_sha in commits:
-                                if not commit_sha:
-                                    continue
-
-                                # 获取该提交中的文件内容
+                                if not remaining_hashes:
+                                    break
                                 content = _git_show_json(DATA_PATH, commit_sha, file_path)
                                 if not isinstance(content, dict):
                                     continue
+                                content_keys = {str(key) for key in content.keys()}
+                                matched_hashes = remaining_hashes.intersection(content_keys)
+                                if not matched_hashes:
+                                    continue
 
-                                # 检查是否包含该hash
-                                if str(hash_value) in content:
-                                    # 获取该提交的版本信息
-                                    commit_title = _run_git(
-                                        DATA_PATH,
-                                        ["show", "-s", "--format=%s", commit_sha],
-                                        check=False
-                                    ).strip()
-                                    version_label, version_id = _resolve_commit_version(DATA_PATH, commit_sha, commit_title)
+                                commit_title = _resolve_commit_title(DATA_PATH, commit_sha)
+                                _version_label, version_id = _resolve_commit_version(DATA_PATH, commit_sha, commit_title)
+                                if not version_id:
+                                    continue
 
-                                    if version_id:
-                                        # 更新版本信息
-                                        cursor.execute(
-                                            "UPDATE textMap SET created_version_id = ?, updated_version_id = ? WHERE lang = ? AND hash = ?",
-                                            (version_id, version_id, lang, hash_value)
+                                update_rows = []
+                                for matched_hash in matched_hashes:
+                                    if matched_hash not in resolved_hashes:
+                                        backfilled_count += len(pending_by_hash[matched_hash])
+                                        resolved_hashes.add(matched_hash)
+                                    for matched_lang, matched_hash_value in pending_by_hash[matched_hash]:
+                                        update_rows.append(
+                                            (
+                                                version_id,
+                                                matched_lang,
+                                                matched_hash_value,
+                                            )
                                         )
-                                        backfilled_count += 1
-                                        break
-                            if backfilled_count > i:
-                                break
-                    except Exception as e:
-                        print(f"[ERROR] Git回溯失败 for textmap {lang}:{hash_value}: {e}")
-                        pass
-                    finally:
-                        pbar.update()
-                        # 每处理10条记录更新一次缓存点
-                        if (i + 1) % 10 == 0:
-                            try:
-                                set_meta(resume_key, str(i + 1))
-                                conn.commit()
-                            except Exception as e:
-                                logger.error(f"Error saving resume point: {e}")
+                                if update_rows:
+                                    executemany_batched(cursor, update_textmap_sql, update_rows)
+                                remaining_hashes.difference_update(matched_hashes)
+                        except Exception as e:
+                            print(f"[ERROR] TextMap 的 Git 回溯失败 {file_path}: {e}")
+                        finally:
+                            file_pbar.update(postfix=file_path)
+                            if (file_idx + 1) % checkpoint_every == 0:
+                                try:
+                                    _commit_and_checkpoint(conn, resume_key, str(file_idx + 1))
+                                except Exception as e:
+                                    logger.error(f"保存断点失败: {e}")
 
-            conn.commit()
-            # 完成后清除缓存点
+            _commit_and_checkpoint(conn)
             try:
                 set_meta(resume_key, "")
             except Exception as e:
-                logger.error(f"Error clearing resume point: {e}")
-            print(f"TextMap Git回溯完成: 回填了 {backfilled_count} 条记录")
-        else:
-            print("所有TextMap记录都已有版本数据，跳过Git回溯")
+                logger.error(f"清理断点失败: {e}")
+            print(f"TextMap Git 回溯完成：更新 {backfilled_count} 条")
+            return backfilled_count
+
+        print("TextMap 没有需要 Git 回溯的记录")
     except Exception as e:
-        print(f"[ERROR] TextMap Git回溯过程中发生错误: {e}")
+        print(f"[ERROR] TextMap Git 回溯失败: {e}")
         backfilled_count = 0
 
     return backfilled_count
 
-
 def _latest_commit_meta_title(commits: list[tuple[str, str]]) -> str | None:
-    """获取最新提交的元数据标题"""
+    """提取最新提交对应的版本标题。"""
     if not commits:
         return None
     return normalize_version_label(commits[-1][1]) or normalize_version_label(commits[-1][0]) or commits[-1][0]
 
 
 def _initial_entries(repo_path: str, commit: str, include_paths: list[str] | None = None) -> list[dict]:
-    """获取初始提交的文件条目"""
+    """列出初始提交的文件条目。"""
     pathspec = include_paths or RELEVANT_PATHS
     out = _run_git(
         repo_path,
@@ -678,7 +601,7 @@ def _diff_entries(
     commit: str,
     include_paths: list[str] | None = None,
 ) -> list[dict]:
-    """获取两个提交之间的差异文件条目"""
+    """列出两个提交之间的变更条目。"""
     pathspec = include_paths or RELEVANT_PATHS
     out = _run_git(
         repo_path,
@@ -701,7 +624,7 @@ def _diff_entries(
 
 
 def _git_show_text(repo_path: str, commit: str, rel_path: str) -> str | None:
-    """获取指定提交中文件的文本内容"""
+    """读取指定提交中的文本文件。"""
     try:
         logger.debug(f"Getting text from git: {commit}:{rel_path}")
         proc = subprocess.run(
@@ -716,12 +639,66 @@ def _git_show_text(repo_path: str, commit: str, rel_path: str) -> str | None:
             return None
         return proc.stdout
     except Exception as e:
-        logger.error(f"Error getting text from git: {e}")
+        logger.error(f"读取 Git 文本失败: {e}")
         return None
 
 
+def _read_worktree_text(repo_path: str, rel_path: str) -> str | None:
+    """Read the current working-tree file under AnimeGameData."""
+    try:
+        file_path = os.path.join(repo_path, rel_path.replace("/", os.sep))
+        if not os.path.isfile(file_path):
+            return None
+        with open(file_path, "r", encoding="utf-8", errors="replace") as handle:
+            return handle.read()
+    except Exception as e:
+        logger.error(f"Read local file failed {rel_path}: {e}")
+        return None
+
+
+def _normalize_text_for_compare(text: str | None) -> str:
+    if text is None:
+        return ""
+    return text.replace("\r\n", "\n").replace("\r", "\n")
+
+
+def _load_worktree_textmap_group(repo_path: str, base_name: str) -> dict[str, object] | None:
+    """Load current AnimeGameData TextMap files related to one canonical base name."""
+    textmap_dir = os.path.join(repo_path, "TextMap")
+    if not os.path.isdir(textmap_dir):
+        return None
+
+    merged: dict[str, object] = {}
+    matched = False
+    try:
+        for entry in os.listdir(textmap_dir):
+            parsed = parse_textmap_file_name(entry)
+            if parsed is None:
+                continue
+            canonical_name, _split_part = parsed
+            if canonical_name != base_name:
+                continue
+
+            file_path = os.path.join(textmap_dir, entry)
+            if not os.path.isfile(file_path):
+                continue
+
+            with open(file_path, "r", encoding="utf-8", errors="replace") as handle:
+                payload = json.load(handle)
+            if not isinstance(payload, dict):
+                continue
+
+            merged.update(payload)
+            matched = True
+    except Exception as e:
+        logger.error(f"Load local TextMap failed {base_name}: {e}")
+        return None
+
+    return merged if matched else None
+
+
 def _git_show_json(repo_path: str, commit: str, rel_path: str):
-    """获取指定提交中文件的JSON内容"""
+    """读取并解析指定提交中的 JSON。"""
     try:
         raw = _git_show_text(repo_path, commit, rel_path)
         if raw is None:
@@ -729,17 +706,17 @@ def _git_show_json(repo_path: str, commit: str, rel_path: str):
         try:
             return json.loads(raw)
         except Exception as e:
-            logger.debug(f"Error parsing JSON from {commit}:{rel_path}: {e}")
+            logger.debug(f"解析 JSON 失败 {commit}:{rel_path}: {e}")
             return None
     except Exception as e:
-        logger.error(f"Error getting JSON from git: {e}")
+        logger.error(f"读取 Git JSON 失败: {e}")
+        return None
         return None
 
 
-# ==================== 版本处理工具函数 ====================
 
 def _resolve_version_id(version_label: str) -> int | None:
-    """解析版本ID"""
+    """解析并获取版本 ID。"""
     return get_or_create_version_id(normalize_version_label(version_label) or version_label)
 
 
@@ -752,12 +729,11 @@ def _prepare_resume_for_commits(
     force: bool,
     label: str,
 ) -> int:
-    """准备提交恢复点"""
+    """根据断点计算提交起点。"""
     total_commits = len(commits)
     commit_index = {sha: idx for idx, (sha, _title) in enumerate(commits)}
 
     if force:
-        # 强制更新仅清除缓存点，不影响版本数据
         set_meta(resume_target_key, "")
         set_meta(resume_done_key, "")
 
@@ -770,19 +746,19 @@ def _prepare_resume_for_commits(
             start_idx = done_idx + 1
             if start_idx < total_commits:
                 print(
-                    f"{label} resume: continue from commit {start_idx + 1}/{total_commits} "
-                    f"(last done: {resume_done[:8]})"
+                    f"{label} 断点续跑：从第 {start_idx + 1}/{total_commits} 个提交继续 "
+                    f"(上次完成: {resume_done[:8]})"
                 )
             else:
-                print(f"{label} resume: all commits already processed; finalizing metadata only.")
+                print(f"{label} 断点续跑：提交已全部处理，仅执行元数据收尾。")
         else:
-            print(f"{label} resume checkpoint not found in current history; restart from scratch.")
+            print(f"{label} 的断点不在当前历史中，已从头开始。")
             start_idx = 0
     return start_idx
 
 
 def _extract_quest_backfill_stats(backfill_result) -> tuple[int, int]:
-    """提取任务回填统计信息"""
+    """标准化任务回填统计结果。"""
     if isinstance(backfill_result, dict):
         return (
             int(backfill_result.get("created_rows", 0)),
@@ -793,10 +769,25 @@ def _extract_quest_backfill_stats(backfill_result) -> tuple[int, int]:
     return 0, 0
 
 
-# ==================== 任务相关工具函数 ====================
+
+def _sync_created_version_from_git(cursor) -> int:
+    """Use git_created_version_id as the floor for created_version_id."""
+    cursor.execute(
+        f"""
+        UPDATE quest
+        SET created_version_id = git_created_version_id
+        WHERE git_created_version_id IS NOT NULL
+          AND (
+              created_version_id IS NULL
+              OR {_version_precedes_sql('git_created_version_id', 'created_version_id')}
+          )
+        """
+    )
+    return int(cursor.rowcount or 0)
+
 
 def _quest_text_signature(row):
-    """获取任务文本签名"""
+    """提取任务文本签名。"""
     if row is None:
         return None
     # Quest versioning should only follow title text changes, not chapter remapping.
@@ -812,21 +803,7 @@ def find_quest_first_commit(
     parent_sha: str | None,
     version_id: int,
 ) -> tuple[str | None, int | None]:
-    """
-    使用当前commit作为任务的git创建版本
-
-    Args:
-        cursor: 数据库游标
-        repo_path: Git仓库路径
-        quest_id: 任务ID
-        commit_sha: 当前提交哈希
-        parent_sha: 父提交哈希
-        version_id: 当前版本ID
-
-    Returns:
-        (commit_sha, version_id): 提交哈希和对应的版本ID
-    """
-    # 优先查询缓存结果
+    """解析任务在指定提交中的创建版本信息。"""
     cursor.execute(
         "SELECT git_created_version_id FROM quest WHERE questId = ?",
         (quest_id,)
@@ -834,12 +811,9 @@ def find_quest_first_commit(
     cached_version = cursor.fetchone()
     existing_git_created_version = cached_version[0] if cached_version else None
 
-    # 只有当git创建版本为空或小于当前版本时才更新
-    if existing_git_created_version is None or version_id < existing_git_created_version:
-        # 构建任务文件路径
+    if should_update_version(existing_git_created_version, version_id, is_created=True):
         quest_file_path = f"BinOutput/Quest/{quest_id}.json"
 
-        # 获取当前提交的任务内容
         new_obj = _git_show_json(repo_path, commit_sha, quest_file_path)
         if not isinstance(new_obj, dict):
             return None, None
@@ -847,17 +821,8 @@ def find_quest_first_commit(
         if new_row is None:
             return None, None
 
-        # 获取父提交的任务内容
-        old_obj = _git_show_json(repo_path, parent_sha, quest_file_path) if parent_sha else None
-        old_row = _extract_quest_row(old_obj) if isinstance(old_obj, dict) else None
-
-        # 检查内容是否相同
-        content_same = (_quest_text_signature(old_row) == _quest_text_signature(new_row))
-
-        # 返回当前提交作为git创建版本
         return commit_sha, version_id
     else:
-        # 如果已有git创建版本且不小于当前版本，返回None
         return None, None
 
 
@@ -871,7 +836,7 @@ def _backfill_quest_version_by_commit_entry(
     version_id: int,
     target_quest_ids: set[int] | None = None,
 ) -> int:
-    """通过提交条目回填任务版本"""
+    """按提交条目回填单个任务版本。"""
     action = entry["action"]
     if action == "D":
         return 0
@@ -901,35 +866,23 @@ def _backfill_quest_version_by_commit_entry(
         except Exception:
             return 0
 
-    old_path_for_compare = old_path if action.startswith("R") and old_path else rel_path
-    old_obj = _git_show_json(repo_path, parent_sha, old_path_for_compare) if parent_sha else None
-    old_row = _extract_quest_row(old_obj) if isinstance(old_obj, dict) else None
-
-    # 检查内容是否相同
-    content_same = (_quest_text_signature(old_row) == _quest_text_signature(new_row))
-
-    # 检查是否已经有创建版本
     cursor.execute("SELECT created_version_id, git_created_version_id FROM quest WHERE questId = ?", (new_row[0],))
     version_info = cursor.fetchone()
     existing_created_version = version_info[0] if version_info else None
     existing_git_created_version = version_info[1] if version_info else None
 
-    # 版本验证：确保版本号有效
     if version_id <= 0:
         logger.warning(f"Invalid version ID {version_id} for quest {new_row[0]}, skipping")
         return 0
 
-    # 只有当创建版本为空或小于当前版本时才更新
-    if existing_created_version is None or version_id < existing_created_version:
-        # 更新created_version_id
+    if should_update_version(existing_created_version, version_id, is_created=True):
         cursor.execute(
             """
             UPDATE quest
             SET created_version_id=?
             WHERE questId=?
-              AND (created_version_id IS NULL OR created_version_id > ?)
             """,
-            (version_id, new_row[0], version_id),
+            (version_id, new_row[0]),
         )
         created_updated = cursor.rowcount > 0
         if created_updated:
@@ -937,17 +890,14 @@ def _backfill_quest_version_by_commit_entry(
     else:
         created_updated = False
 
-    # 只有当git创建版本为空或小于当前版本时才更新
-    if existing_git_created_version is None or version_id < existing_git_created_version:
-        # 更新git_created_version_id
+    if should_update_version(existing_git_created_version, version_id, is_created=True):
         cursor.execute(
             """
             UPDATE quest
             SET git_created_version_id=?
             WHERE questId=?
-              AND (git_created_version_id IS NULL OR git_created_version_id > ?)
             """,
-            (version_id, new_row[0], version_id),
+            (version_id, new_row[0]),
         )
         git_updated = cursor.rowcount > 0
         if git_updated:
@@ -970,23 +920,7 @@ def apply_quest_version_delta_from_textmap(
     show_progress: bool = False,
     progress_position: int = 1,
 ) -> dict[str, int]:
-    """
-    从TextMap应用任务版本增量
-
-    Args:
-        cursor: 数据库游标
-        version_id: 版本ID
-        changed_hashes: 变更的哈希集合
-        version_label: 版本标签
-        quest_scope: 任务范围
-        batch_size: 批处理大小
-        fetch_size: 获取大小
-        show_progress: 是否显示进度
-        progress_position: 进度位置
-
-    Returns:
-        统计信息
-    """
+    """按批次回放任务历史记录并返回统计信息。"""
     stats = {
         "looked_up_hashes": 0,
         "quest_updated_by_textmap": 0,
@@ -1046,7 +980,6 @@ def apply_quest_version_delta_from_textmap(
                 stats["looked_up_hashes"] = len(normalized_hashes)
                 if not normalized_hashes:
                     return stats
-                # 使用 executemany_batched 函数处理批处理插入
                 executemany_batched(
                     cursor,
                     "INSERT OR IGNORE INTO _changed_textmap_hash(hash) VALUES (?)",
@@ -1070,7 +1003,6 @@ def apply_quest_version_delta_from_textmap(
                     "SELECT DISTINCT hash FROM textMap WHERE updated_version_id=?",
                     (version_id,),
                 )
-                # 使用生成器函数来逐批获取数据，避免一次性加载所有数据到内存
                 def fetch_hashes():
                     while True:
                         rows = select_cur.fetchmany(fetch_size)
@@ -1078,7 +1010,6 @@ def apply_quest_version_delta_from_textmap(
                             break
                         for row in rows:
                             yield row
-                # 使用 executemany_batched 函数处理批处理插入
                 executemany_batched(
                     cursor,
                     "INSERT OR IGNORE INTO _changed_textmap_hash(hash) VALUES (?)",
@@ -1098,7 +1029,6 @@ def apply_quest_version_delta_from_textmap(
             logger.error(f"Error checking quest_hash_map table: {e}")
             has_quest_hash_map_rows = False
 
-        # 获取所有可用的语言
         try:
             lang_rows = cursor.execute("SELECT id FROM langCode WHERE imported=1").fetchall()
             languages = [row[0] for row in lang_rows]
@@ -1107,10 +1037,8 @@ def apply_quest_version_delta_from_textmap(
             languages = []
 
         for lang in languages:
-            # 为每种语言单独计算更新版本
             try:
                 if has_quest_hash_map_rows:
-                    # 使用quest_hash_map表
                     cursor.execute(
                         f"""
                         INSERT INTO quest_version(questId, lang, updated_version_id)
@@ -1120,15 +1048,15 @@ def apply_quest_version_delta_from_textmap(
                         JOIN quest q ON q.questId = qhm.questId
                         WHERE {quest_scope_filter}
                         ON CONFLICT(questId, lang) DO UPDATE SET
-                        updated_version_id=CASE
-                        WHEN excluded.updated_version_id > quest_version.updated_version_id THEN excluded.updated_version_id
-                        ELSE quest_version.updated_version_id
-                        END
+                        updated_version_id={_build_version_preference_case_sql(
+                            existing_expr="quest_version.updated_version_id",
+                            candidate_expr="excluded.updated_version_id",
+                            is_created=False,
+                        )}
                         """,
                         (lang, version_id),
                     )
                 else:
-                    # 不使用quest_hash_map表
                     cursor.execute(
                         f"""
                         INSERT INTO quest_version(questId, lang, updated_version_id)
@@ -1145,18 +1073,17 @@ def apply_quest_version_delta_from_textmap(
                             )
                         )
                         ON CONFLICT(questId, lang) DO UPDATE SET
-                        updated_version_id=CASE
-                        WHEN excluded.updated_version_id > quest_version.updated_version_id THEN excluded.updated_version_id
-                        ELSE quest_version.updated_version_id
-                        END
+                        updated_version_id={_build_version_preference_case_sql(
+                            existing_expr="quest_version.updated_version_id",
+                            candidate_expr="excluded.updated_version_id",
+                            is_created=False,
+                        )}
                         """,
                         (lang, version_id),
                     )
                 stats["quest_updated_by_textmap"] += int(cursor.rowcount or 0)
             except Exception as e:
                 logger.error(f"Error updating quest versions for language {lang}: {e}")
-                # 继续处理下一种语言，不中断整个过程
-
         if version_label:
             try:
                 backfill_result = _backfill_quest_created_version_from_textmap(
@@ -1182,7 +1109,7 @@ def _backfill_quest_phase1_with_progress(
     *,
     chunk_size: int = 2000,
 ) -> tuple[int, int]:
-    """执行任务第一阶段回填并显示进度"""
+    """带进度执行任务首轮回填。"""
     total_row = cursor.execute("SELECT COUNT(*) FROM quest").fetchone()
     total_quests = int(total_row[0] or 0) if total_row else 0
     if total_quests <= 0:
@@ -1192,8 +1119,8 @@ def _backfill_quest_phase1_with_progress(
     updated_total = 0
     quest_cursor = cursor.execute("SELECT questId FROM quest ORDER BY questId")
 
-    with LightweightProgress(total_quests, desc="Phase-1 backfill", unit="quests") as pbar:
-        print(f"Processing {total_quests} quests for phase-1 backfill...")
+    with LightweightProgress(total_quests, desc="阶段 1 回填", unit="quests") as pbar:
+        print(f"正在处理 {total_quests} 个任务的阶段 1 回填...")
 
         while True:
             rows = quest_cursor.fetchmany(max(1, int(chunk_size)))
@@ -1212,12 +1139,12 @@ def _backfill_quest_phase1_with_progress(
             updated_total += updated_rows
             pbar.update(len(quest_ids))
 
-    print(f"Phase-1 backfill completed: {created_total} created, {updated_total} updated")
+    print(f"阶段 1 回填完成：新增 {created_total}，更新 {updated_total}")
     return created_total, updated_total
 
 
 def _get_textmap_lang_id_map() -> dict[str, int]:
-    """获取TextMap语言ID映射"""
+    """构建 TextMap 语言映射。"""
     cur = conn.cursor()
     rows = cur.execute("SELECT id, codeName FROM langCode").fetchall()
     cur.close()
@@ -1235,7 +1162,7 @@ def _get_textmap_lang_id_map() -> dict[str, int]:
         except Exception:
             continue
 
-    # Fallback for old/malformed langCode rows: keep canonical TextMap->lang id map usable.
+    # 为旧数据或异常 langCode 记录补齐默认映射。
     for lang_code, lang_id in LANG_CODE_MAP.items():
         base_name = f"TextMap{lang_code}.json"
         if base_name not in mapping:
@@ -1244,13 +1171,58 @@ def _get_textmap_lang_id_map() -> dict[str, int]:
 
     if fallback_hits:
         print(
-            "[WARN] history backfill: langCode mapping incomplete, "
-            f"using fallback ids for {len(fallback_hits)} entries."
+            "[WARN] 历史回填: langCode 映射不完整，"
+            f"已为 {len(fallback_hits)} 项使用兜底 ID。"
         )
     return mapping
 
 
-# ==================== 历史回填核心函数 ====================
+
+def _has_any_version_data(table_name: str) -> bool:
+    if not _table_exists(table_name):
+        return False
+
+    cursor = conn.cursor()
+    try:
+        cols = {
+            row[1]
+            for row in cursor.execute(f"PRAGMA table_info({table_name})").fetchall()
+            if len(row) > 1
+        }
+        if table_name == "quest":
+            if "created_version_id" not in cols or not _table_exists("quest_version"):
+                return False
+            quest_version_cols = {
+                row[1]
+                for row in cursor.execute("PRAGMA table_info(quest_version)").fetchall()
+                if len(row) > 1
+            }
+            if "updated_version_id" not in quest_version_cols:
+                return False
+            quest_row = cursor.execute(
+                "SELECT 1 FROM quest WHERE created_version_id IS NOT NULL LIMIT 1"
+            ).fetchone()
+            if quest_row is None:
+                return False
+            quest_version_row = cursor.execute(
+                "SELECT 1 FROM quest_version WHERE updated_version_id IS NOT NULL LIMIT 1"
+            ).fetchone()
+            return quest_version_row is not None
+
+        if not {"created_version_id", "updated_version_id"}.issubset(cols):
+            return False
+        row = cursor.execute(
+            f"SELECT 1 FROM {table_name} "
+            "WHERE created_version_id IS NOT NULL "
+            "AND updated_version_id IS NOT NULL "
+            "LIMIT 1"
+        ).fetchone()
+        return row is not None
+    except Exception:
+        return False
+    finally:
+        cursor.close()
+
 
 def _backfill_versions_from_history(
     *,
@@ -1267,27 +1239,11 @@ def _backfill_versions_from_history(
     resume_done_key: str,
     process_entry_fn,
     pbar_desc: str,
-    commit_batch_size: int = 10,
+    commit_batch_size: int = DEFAULT_HISTORY_COMMIT_BATCH_SIZE,
 ):
-    """
-    通用历史回填函数
+    """通用历史回放入口，按提交批次处理指定资源。"""
+    commit_batch_size = max(1, int(commit_batch_size))
 
-    Args:
-        target_commit: 目标提交
-        from_commit: 起始提交
-        force: 是否强制重新执行
-        batch_size: 批处理大小
-        verbose: 是否详细输出
-        include_paths: 包含的路径
-        table_name: 表名
-        meta_commit_key: 元数据提交键
-        meta_title_key: 元数据标题键
-        resume_target_key: 恢复目标键
-        resume_done_key: 恢复完成键
-        process_entry_fn: 处理条目的函数
-        pbar_desc: 进度条描述
-        commit_batch_size: 提交批次大小，每处理多少个提交后进行一次数据库提交
-    """
     try:
         ensure_version_schema()
     except Exception as e:
@@ -1303,24 +1259,21 @@ def _backfill_versions_from_history(
         logger.error(f"Error resolving commits: {e}")
         raise
 
-    # 检查是否已经执行过历史回填
     try:
         if not force and resolved_from is None and get_meta(meta_commit_key) == resolved_target:
             if _has_any_version_data(table_name):
-                logger.info(f"{table_name} history backfill already done for {resolved_target}, skipping.")
+                logger.info(f"{table_name} 历史回填已完成于 {resolved_target}，跳过。")
                 return
             logger.info(
-                f"{table_name} history backfill meta indicates {resolved_target}, "
-                f"but {table_name} versions are empty/incomplete; rerunning."
+                f"{table_name} 历史回填元数据指向 {resolved_target}，"
+                f"但 {table_name} 版本列为空或不完整；将重新执行。"
             )
     except Exception as e:
         logger.error(f"Error checking backfill status: {e}")
-        # 继续执行，不影响主流程
-
     try:
         commits = _list_commits(repo_path, resolved_target, from_commit=resolved_from)
         if not commits:
-            logger.info(f"{table_name} history backfill: no commits to process.")
+            logger.info(f"{table_name} 历史回填：没有需要处理的提交。")
             return
         first_parent_sha = _resolve_first_parent_sha(repo_path, commits, resolved_from)
         total_commits = len(commits)
@@ -1331,7 +1284,7 @@ def _backfill_versions_from_history(
                 resolved_target=resume_scope,
                 commits=commits,
                 force=force,
-                label=f"{table_name} history backfill",
+                label=f"{table_name} 历史回填",
             )
         except Exception as e:
             logger.error(f"Error preparing resume for commits: {e}")
@@ -1340,44 +1293,46 @@ def _backfill_versions_from_history(
         if start_idx == 0:
             if resolved_from:
                 logger.info(
-                    f"{table_name} history backfill start: "
-                    f"{total_commits} commits (from: {resolved_from[:8]}, target: {resolved_target})"
+                    f"{table_name} 历史回填开始："
+                    f"{total_commits} 个提交 (起点: {resolved_from[:8]}, 目标: {resolved_target})"
                 )
             else:
-                logger.info(f"{table_name} history backfill start: {total_commits} commits (target: {resolved_target})")
+                logger.info(f"{table_name} 历史回填开始：{total_commits} 个提交 (目标: {resolved_target})")
         else:
             logger.info(
-                f"{table_name} history backfill continue: "
-                f"{total_commits - start_idx} remaining / {total_commits} total commits "
-                f"(target: {resolved_target})"
+                f"{table_name} 历史回填继续："
+                f"剩余 {total_commits - start_idx} / 总计 {total_commits} 个提交 "
+                f"(目标: {resolved_target})"
             )
 
         cursor = conn.cursor()
-        # 简化进度显示，只显示主要进度
-        logger.info(f"Processing {total_commits} {table_name} commits...")
+        logger.info(f"正在处理 {total_commits} 个 {table_name} 提交...")
         last_commit_sha = None
         processed_commits = 0
         try:
-            with LightweightProgress(total_commits, desc=pbar_desc, unit="commits") as pbar:
+            pbar = LightweightProgress(total_commits, desc=pbar_desc, unit="commits", initial_print=False)
+            pbar.current = start_idx
+            pbar.update(0)
+            with pbar:
                 for idx in range(start_idx, total_commits):
+                    postfix = f"Commit {idx}"
                     try:
                         commit_sha, commit_title = commits[idx]
                         last_commit_sha = commit_sha
                         parent_sha = commits[idx - 1][0] if idx > 0 else first_parent_sha
 
-                        # 版本解析错误处理
+                        postfix = f"Commit {commit_sha[:8]}"
+
                         try:
                             version_label, version_id = _resolve_commit_version(repo_path, commit_sha, commit_title)
                             if version_id is None:
-                                logger.warning(f"Failed to resolve version for commit {commit_sha[:8]}, skipping")
-                                pbar.update()
+                                logger.warning(f"无法解析提交版本 {commit_sha[:8]}，已跳过")
+                                pbar.update(postfix=postfix)
                                 continue
                         except Exception as e:
                             logger.error(f"Error resolving version for commit {commit_sha}: {e}")
-                            pbar.update()
+                            pbar.update(postfix=postfix)
                             continue
-
-                        pbar.set_postfix_str(f"Commit {commit_sha[:8]}")
 
                         try:
                             entries = (
@@ -1387,10 +1342,9 @@ def _backfill_versions_from_history(
                             )
                         except Exception as e:
                             logger.error(f"Error getting entries for commit {commit_sha}: {e}")
-                            pbar.update()
+                            pbar.update(postfix=postfix)
                             continue
 
-                        # 处理条目时的错误处理
                         entry_errors = 0
                         for entry in entries:
                             try:
@@ -1398,53 +1352,43 @@ def _backfill_versions_from_history(
                             except Exception as e:
                                 logger.error(f"Error processing {table_name} entry: {e}")
                                 entry_errors += 1
-                                # 继续处理下一个条目，不中断整个过程
-
                         if entry_errors > 0:
-                            logger.warning(f"Encountered {entry_errors} errors while processing entries for commit {commit_sha[:8]}")
+                                logger.warning(f"处理提交 {commit_sha[:8]} 的条目时出现 {entry_errors} 个错误")
 
-                        pbar.update()
+                        pbar.update(postfix=postfix)
                         processed_commits += 1
 
-                        # 每处理一定数量的提交后进行一次数据库提交，减少提交次数
                         if processed_commits % commit_batch_size == 0:
-                            # 批量提交并更新缓存点
                             try:
                                 conn.commit()
                                 set_meta(resume_target_key, resume_scope)
                                 set_meta(resume_done_key, commit_sha)
-                                logger.debug(f"Committed batch up to commit {commit_sha[:8]}")
+                                logger.debug(f"已批量提交到 {commit_sha[:8]}")
                             except Exception as e:
                                 logger.error(f"Error committing changes for batch: {e}")
-                                # 继续执行，不中断整个过程
-
                     except Exception as e:
                         logger.error(f"Error processing commit {idx}: {e}")
-                        pbar.update()
-                        # 继续处理下一个提交，不中断整个过程
-
-                # 处理完所有提交后，确保进行最后一次提交
+                        pbar.update(postfix=postfix)
                 if processed_commits > 0 and last_commit_sha:
                     try:
                         conn.commit()
                         set_meta(resume_target_key, resume_scope)
                         set_meta(resume_done_key, last_commit_sha)
-                        logger.info(f"Final commit completed up to {last_commit_sha[:8]}")
+                        logger.info(f"最终提交已完成到 {last_commit_sha[:8]}")
                     except Exception as e:
                         logger.error(f"Error finalizing commit: {e}")
 
-        except BaseException as e:
+        except BaseException:
             conn.rollback()
             logger.error(
-                f"{table_name} history backfill interrupted; checkpoint saved, rerun to continue.",
+                f"{table_name} 历史回填被中断；已保存断点，重新运行可继续。",
                 exc_info=True
             )
-            # 保存当前进度，以便下次可以继续
             if last_commit_sha:
                 try:
                     set_meta(resume_target_key, resume_scope)
                     set_meta(resume_done_key, last_commit_sha)
-                    logger.info(f"Checkpoint saved at commit {last_commit_sha[:8]}")
+                    logger.info(f"已在提交 {last_commit_sha[:8]} 保存断点")
                 except Exception as save_error:
                     logger.error(f"Error saving checkpoint: {save_error}")
             raise
@@ -1460,17 +1404,14 @@ def _backfill_versions_from_history(
                 if commits:
                     title = _latest_commit_meta_title(commits) or commits[-1][0]
                     set_meta(meta_title_key, title if title is not None else "")
-            # 只有在完全处理完所有提交后才清空缓存点
-            # 这样在处理过程中中断时，下次运行可以从上次的位置继续
             if start_idx >= total_commits:
                 set_meta(resume_target_key, "")
                 set_meta(resume_done_key, "")
             rebuild_version_catalog([table_name])
         except Exception as e:
             logger.error(f"Error finalizing metadata: {e}")
-            # 继续执行，不影响主流程
     except Exception as e:
-        logger.error(f"Error in {table_name} history backfill: {e}", exc_info=True)
+        logger.error(f"{table_name} 历史回填失败: {e}", exc_info=True)
         raise
 
 
@@ -1480,9 +1421,10 @@ def backfill_versions_from_history(
     from_commit: str | None = None,
     force: bool = False,
     batch_size: int = DEFAULT_BATCH_SIZE,
+    fast_db_write: bool = False,
     verbose: bool = False,
 ):
-    """执行所有类型的历史回填"""
+    """执行全量历史版本回填。"""
     try:
         ensure_version_schema()
     except Exception as e:
@@ -1493,33 +1435,27 @@ def backfill_versions_from_history(
     try:
         resolved_target = _resolve_commit(repo_path, target_commit)
         resolved_from = _resolve_commit(repo_path, from_commit) if from_commit else None
-        resume_scope = f"{resolved_from or ''}..{resolved_target}"
         resume_target_key = "db_history_versions_commit_resume_target"
         resume_done_key = "db_history_versions_commit_resume_done"
     except Exception as e:
         logger.error(f"Error resolving commits: {e}")
         raise
 
-    # 检查是否已经执行过历史回填
     try:
         if not force and resolved_from is None and get_meta("db_history_versions_commit") == resolved_target:
             version_tables = ("textMap", "readable", "subtitle", "quest")
             try:
                 if all(_has_any_version_data(t) for t in version_tables):
-                    logger.info(f"History backfill already done for {resolved_target}, skipping.")
+                    logger.info(f"历史回填已完成于 {resolved_target}，跳过。")
                     return
             except Exception as e:
                 logger.error(f"Error checking version data: {e}")
-                # 继续执行，不影响主流程
             logger.info(
-                f"History backfill meta indicates {resolved_target}, "
-                "but version columns are empty/incomplete; rerunning."
+                f"历史回填元数据指向 {resolved_target}，"
+                "但版本列为空或不完整；将重新执行。"
             )
     except Exception as e:
         logger.error(f"Error checking backfill status: {e}")
-        # 继续执行，不影响主流程
-
-    # 依次执行各个类型的历史回填
     backfill_functions = [
         ("TextMap", backfill_textmap_versions_from_history),
         ("Readable", backfill_readable_versions_from_history),
@@ -1527,46 +1463,40 @@ def backfill_versions_from_history(
         ("Quest", backfill_quest_versions_from_history),
     ]
 
-    for name, func in backfill_functions:
-        try:
-            logger.info(f"Starting {name} history backfill...")
-            func(
-                target_commit=target_commit,
-                from_commit=from_commit,
-                force=force,
-                batch_size=batch_size,
-                verbose=verbose,
-            )
-            logger.info(f"Completed {name} history backfill")
-        except Exception as e:
-            logger.error(f"Error in {name} history backfill: {e}", exc_info=True)
-            # 继续执行下一个类型的回填，不中断整个流程
-
+    # 预留顶层批量写入开关，供后续调优使用。
+    if fast_db_write:
+        logger.info("历史回填：启用快速 SQLite pragma 以加速批量写入")
+    with fast_import_pragmas(conn, enabled=fast_db_write):
+        for name, func in backfill_functions:
+            try:
+                logger.info(f"开始执行 {name} 历史回填...")
+                func(
+                    target_commit=target_commit,
+                    from_commit=from_commit,
+                    force=force,
+                    batch_size=batch_size,
+                    verbose=verbose,
+                )
+                logger.info(f"{name} 历史回填完成")
+            except Exception as e:
+                logger.error(f"{name} 历史回填失败: {e}", exc_info=True)
     try:
         if resolved_from is None:
             set_meta("db_history_versions_commit", resolved_target)
-            # 不需要设置标题，因为各个子函数已经设置了各自的标题
-        # 只有在完全处理完所有提交后才清空缓存点
-        # 这样在处理过程中中断时，下次运行可以从上次的位置继续
         set_meta(resume_target_key, "")
         set_meta(resume_done_key, "")
         rebuild_version_catalog(["textMap", "quest", "subtitle", "readable"])
     except Exception as e:
         logger.error(f"Error finalizing metadata: {e}")
-        # 继续执行，不影响主流程
-
-    # 使用现有的异常验证函数分析版本异常
-    logger.info("\n=== 版本异常验证 ===")
+    logger.info("历史回填元数据已刷新，版本目录已重建")
     cursor = conn.cursor()
     try:
-        # 分析Readable版本异常
         try:
             readable_exceptions = analyze_readable_version_exceptions(cursor)
             report_version_exceptions(readable_exceptions, "Readable")
         except Exception as e:
             logger.error(f"Error analyzing Readable version exceptions: {e}")
 
-        # 分析Subtitle版本异常
         try:
             subtitle_exceptions = analyze_subtitle_version_exceptions(cursor)
             report_version_exceptions(subtitle_exceptions, "Subtitle")
@@ -1578,7 +1508,7 @@ def backfill_versions_from_history(
         except Exception as e:
             logger.error(f"Error closing cursor: {e}")
 
-    logger.info(f"History backfill finished at commit {resolved_target}")
+    logger.info(f"历史回填完成于提交 {resolved_target}")
 
 
 def backfill_textmap_versions_from_history(
@@ -1589,12 +1519,13 @@ def backfill_textmap_versions_from_history(
     batch_size: int = DEFAULT_BATCH_SIZE,
     verbose: bool = False,
 ):
-    """执行TextMap历史回填"""
+    """回填 TextMap 历史版本。"""
     textmap_lang_map = _get_textmap_lang_id_map()
-    sql_textmap = build_guarded_created_updated_sql("textMap", "lang=? AND hash=?")
+    local_textmap_cache: dict[str, dict[str, object] | None] = {}
+    confirmed_updated_hashes: set[tuple[int, int]] = set()
 
     def process_textmap_entry(cursor, repo_path, commit_sha, parent_sha, entry, version_id, version_label, batch_size):
-        """处理TextMap条目"""
+        """处理单个 TextMap 变更条目。"""
         action = entry["action"]
         if action == "D":
             return
@@ -1619,19 +1550,72 @@ def backfill_textmap_versions_from_history(
         if not isinstance(new_obj, dict):
             return
 
-        old_path_for_compare = old_path if action.startswith("R") and old_path else rel_path
-        old_obj = _git_show_json(repo_path, parent_sha, old_path_for_compare) if parent_sha else None
-        if not isinstance(old_obj, dict):
-            old_obj = {}
+        if base_name not in local_textmap_cache:
+            local_textmap_cache[base_name] = _load_worktree_textmap_group(repo_path, base_name)
+        current_obj = local_textmap_cache[base_name]
+        if not isinstance(current_obj, dict):
+            return
 
-        changed_rows = []
+        candidate_items: list[tuple[int, object, object]] = []
         for raw_hash, content in new_obj.items():
-            old_content = old_obj.get(raw_hash, None)
-            if old_content == content:
+            if raw_hash not in current_obj:
                 continue
-            changed_rows.append((version_id, version_id, version_id, lang_id, _to_hash_value(raw_hash), version_id))
-        if changed_rows:
-            executemany_batched(cursor, sql_textmap, changed_rows, batch_size=batch_size)
+            candidate_items.append((_to_hash_value(raw_hash), content, current_obj[raw_hash]))
+        if not candidate_items:
+            return
+
+        existing_map: dict[int, tuple[int | None, int | None]] = {}
+        chunk_size = max(1, int(batch_size))
+        for idx in range(0, len(candidate_items), chunk_size):
+            chunk = candidate_items[idx : idx + chunk_size]
+            placeholders = ",".join(["?"] * len(chunk))
+            params = [lang_id, *[hash_value for hash_value, _history_content, _current_content in chunk]]
+            rows = cursor.execute(
+                f"SELECT hash, created_version_id, updated_version_id "
+                f"FROM textMap WHERE lang=? AND hash IN ({placeholders})",
+                params,
+            ).fetchall()
+            for row_hash, created_version_id, updated_version_id in rows:
+                existing_map[int(row_hash)] = (created_version_id, updated_version_id)
+
+        update_rows = []
+        for hash_value, history_content, current_content in candidate_items:
+            version_info = existing_map.get(hash_value)
+            if version_info is None:
+                continue
+            existing_created_version, existing_updated_version = version_info
+            created_version = existing_created_version
+            updated_version = existing_updated_version
+            key = (lang_id, hash_value)
+
+            if should_update_version(existing_created_version, version_id, is_created=True):
+                created_version = version_id
+
+            updated_confirmed = (
+                key in confirmed_updated_hashes
+                or (
+                    existing_updated_version is not None
+                    and existing_updated_version != existing_created_version
+                )
+            )
+            if history_content == current_content and not updated_confirmed:
+                updated_version = version_id
+                confirmed_updated_hashes.add(key)
+
+            if (
+                created_version != existing_created_version
+                or updated_version != existing_updated_version
+            ):
+                update_rows.append((created_version, updated_version, lang_id, hash_value))
+
+        if update_rows:
+            executemany_batched(
+                cursor,
+                "UPDATE textMap SET created_version_id = ?, updated_version_id = ? "
+                "WHERE lang = ? AND hash = ?",
+                update_rows,
+                batch_size=batch_size,
+            )
 
     _backfill_versions_from_history(
         target_commit=target_commit,
@@ -1647,10 +1631,9 @@ def backfill_textmap_versions_from_history(
         resume_done_key="db_history_versions_commit_textmap_resume_done",
         process_entry_fn=process_textmap_entry,
         pbar_desc="TextMap backfill",
-        commit_batch_size=10,
+        commit_batch_size=DEFAULT_HISTORY_COMMIT_BATCH_SIZE,
     )
 
-    # 新增步骤：为没有版本数据的TextMap记录执行Git回溯，获取真实的版本信息
     print("TextMap history phase-1.5: Git history backfill for textmap without version data")
     cursor = conn.cursor()
     try:
@@ -1658,18 +1641,16 @@ def backfill_textmap_versions_from_history(
     finally:
         cursor.close()
 
-    # 执行版本异常检验
     check_cursor = conn.cursor()
     try:
         exception_data = analyze_textmap_version_exceptions(check_cursor)
         report_version_exceptions(exception_data, "TextMap")
 
-        # 修复创建版本晚于更新版本的记录
         if exception_data['created_after_updated'] > 0:
-            print(f"修复 TextMap 中创建版本晚于更新版本的 {exception_data['created_after_updated']} 条记录...")
+            print(f"Fixing {exception_data['created_after_updated']} TextMap rows where created_version_id is later than updated_version_id...")
             fixed = fix_created_after_updated_versions(check_cursor, "textMap", ["lang", "hash"])
             conn.commit()
-            print(f"修复完成，共修复 {fixed} 条记录")
+            print(f"TextMap exception fix complete: {fixed} row(s) updated.")
     finally:
         check_cursor.close()
 
@@ -1682,11 +1663,13 @@ def backfill_readable_versions_from_history(
     batch_size: int = DEFAULT_BATCH_SIZE,
     verbose: bool = False,
 ):
-    """执行Readable历史回填"""
-    sql_readable = build_guarded_created_updated_sql("readable", "fileName=? AND lang=?")
+    """回填 Readable 历史版本。"""
+
+    local_text_cache: dict[str, str | None] = {}
+    confirmed_updated_readables: set[tuple[str, str]] = set()
 
     def process_readable_entry(cursor, repo_path, commit_sha, parent_sha, entry, version_id, version_label, batch_size):
-        """处理Readable条目"""
+        """处理单个 Readable 历史条目。"""
         action = entry["action"]
         if action == "D":
             return
@@ -1701,35 +1684,61 @@ def backfill_readable_versions_from_history(
         if len(parts) < 3:
             return
         lang = parts[1]
-        # 计算相对路径，保持与importReadable函数一致
-        rel_under_lang = parts[2]
-        # 构建完整路径以计算相对路径
         full_path = os.path.join(repo_path, rel_path)
         lang_path = os.path.join(repo_path, "Readable", lang)
-        # 计算相对路径
         rel_path_file = os.path.relpath(full_path, lang_path)
-        # 将路径分隔符替换为"/"
         clean_file_name = rel_path_file.replace(os.sep, "/")
 
         new_text = _git_show_text(repo_path, commit_sha, rel_path)
         if new_text is None:
             return
 
-        # 检查是否已经有创建版本
-        cursor.execute("SELECT created_version_id, updated_version_id FROM readable WHERE fileName=? AND lang=?", (clean_file_name, lang))
+        current_rel_path = f"Readable/{lang}/{clean_file_name}"
+        if current_rel_path not in local_text_cache:
+            current_text = _read_worktree_text(repo_path, current_rel_path)
+            local_text_cache[current_rel_path] = (
+                _normalize_text_for_compare(current_text)
+                if current_text is not None
+                else None
+            )
+        local_text = local_text_cache[current_rel_path]
+        if local_text is None:
+            return
+
+        cursor.execute(
+            "SELECT created_version_id, updated_version_id FROM readable WHERE fileName=? AND lang=?",
+            (clean_file_name, lang),
+        )
         version_info = cursor.fetchone()
-        existing_created_version = version_info[0] if version_info else None
-        existing_updated_version = version_info[1] if version_info else None
+        if version_info is None:
+            return
+        existing_created_version, existing_updated_version = version_info
 
-        # 只有当创建版本为空或小于当前版本时才更新
-        if existing_created_version is None or version_id < existing_created_version:
-            # 检查内容是否相同
-            old_path_for_compare = old_path if action.startswith("R") and old_path else rel_path
-            old_text = _git_show_text(repo_path, parent_sha, old_path_for_compare) if parent_sha else None
-            # 确定更新版本：内容相同则写入当前版本，不同则为空
-            updated_version = version_id if not _readable_text_changed(old_text, new_text) else None
+        created_version = existing_created_version
+        updated_version = existing_updated_version
 
-            cursor.execute(sql_readable, (version_id, version_id, updated_version, clean_file_name, lang, version_id))
+        if should_update_version(existing_created_version, version_id, is_created=True):
+            created_version = version_id
+
+        row_key = (clean_file_name, lang)
+        updated_confirmed = (
+            row_key in confirmed_updated_readables
+            or (
+                existing_updated_version is not None
+                and existing_updated_version != existing_created_version
+            )
+        )
+        if _normalize_text_for_compare(new_text) == local_text and not updated_confirmed:
+            updated_version = version_id
+            confirmed_updated_readables.add(row_key)
+        if (
+            created_version != existing_created_version
+            or updated_version != existing_updated_version
+        ):
+            cursor.execute(
+                "UPDATE readable SET created_version_id = ?, updated_version_id = ? WHERE fileName = ? AND lang = ?",
+                (created_version, updated_version, clean_file_name, lang),
+            )
 
     _backfill_versions_from_history(
         target_commit=target_commit,
@@ -1748,39 +1757,34 @@ def backfill_readable_versions_from_history(
         commit_batch_size=10,
     )
 
-    # 新增步骤：为没有版本数据的Readable记录执行Git回溯，获取真实的版本信息
-    print("Readable history phase-1.5: Git history backfill for readable without version data")
+    print("Readable 历史阶段 1.5：为缺少版本数据的 Readable 执行 Git 回溯")
     cursor = conn.cursor()
     try:
-        # 定义构建文件路径的函数
         def build_readable_file_path(record):
             file_name, lang = record
             return f"Readable/{lang}/{file_name}"
 
-        # 使用通用Git版本回溯函数
         _backfill_git_versions(
             cursor,
             "Readable",
             "SELECT fileName, lang FROM readable WHERE created_version_id IS NULL",
             build_readable_file_path,
             "UPDATE readable SET created_version_id = ?, updated_version_id = ? WHERE fileName = ? AND lang = ?",
-            "Readable Git backfill"
+            "Readable Git 回溯",
         )
     finally:
         cursor.close()
 
-    # 执行版本异常检验
     check_cursor = conn.cursor()
     try:
         exception_data = analyze_readable_version_exceptions(check_cursor)
         report_version_exceptions(exception_data, "Readable")
 
-        # 修复创建版本晚于更新版本的记录
         if exception_data['created_after_updated'] > 0:
-            print(f"修复 Readable 中创建版本晚于更新版本的 {exception_data['created_after_updated']} 条记录...")
+            print(f"正在修复 {exception_data['created_after_updated']} 条 created_version_id 晚于 updated_version_id 的 Readable 记录...")
             fixed = fix_created_after_updated_versions(check_cursor, "readable", ["fileName", "lang"])
             conn.commit()
-            print(f"修复完成，共修复 {fixed} 条记录")
+            print(f"Readable 异常修复完成：更新 {fixed} 条。")
     finally:
         check_cursor.close()
 
@@ -1793,11 +1797,12 @@ def backfill_subtitle_versions_from_history(
     batch_size: int = DEFAULT_BATCH_SIZE,
     verbose: bool = False,
 ):
-    """执行Subtitle历史回填"""
-    sql_subtitle = build_guarded_created_updated_sql("subtitle", "subtitleKey=?")
+    """回填 Subtitle 历史版本。"""
+    local_rows_cache: dict[str, dict[str, str] | None] = {}
+    confirmed_updated_subtitles: set[str] = set()
 
     def process_subtitle_entry(cursor, repo_path, commit_sha, parent_sha, entry, version_id, version_label, batch_size):
-        """处理Subtitle条目"""
+        """处理单个 Subtitle 历史条目。"""
         action = entry["action"]
         if action == "D":
             return
@@ -1820,42 +1825,65 @@ def backfill_subtitle_versions_from_history(
         new_text = _git_show_text(repo_path, commit_sha, rel_path)
         if new_text is None:
             return
-        new_rows = _parse_srt_rows(new_text, lang_id, rel_under_lang)
+        history_rows = _parse_srt_rows(new_text, lang_id, rel_under_lang)
+        current_rel_path = f"Subtitle/{lang_name}/{rel_under_lang}"
+        if current_rel_path not in local_rows_cache:
+            current_text = _read_worktree_text(repo_path, current_rel_path)
+            local_rows_cache[current_rel_path] = (
+                _parse_srt_rows(current_text, lang_id, rel_under_lang)
+                if current_text is not None
+                else None
+            )
+        current_rows = local_rows_cache[current_rel_path]
+        if current_rows is None:
+            return
 
-        old_path_for_compare = old_path if action.startswith("R") and old_path else rel_path
-        old_text = _git_show_text(repo_path, parent_sha, old_path_for_compare) if parent_sha else None
-        old_rows = _parse_srt_rows(old_text, lang_id, rel_under_lang) if old_text else {}
+        matching_current_keys = set(current_rows.keys())
+        for changed_key in _subtitle_text_changed_keys(history_rows, current_rows):
+            matching_current_keys.discard(changed_key)
 
-        changed_keys = _subtitle_text_changed_keys(old_rows, new_rows)
-        if changed_keys:
-            valid_keys = []
-            updated_versions = []
-            for key in changed_keys:
-                # 检查是否已经有创建版本
-                cursor.execute("SELECT created_version_id, updated_version_id FROM subtitle WHERE subtitleKey=?", (key,))
-                version_info = cursor.fetchone()
-                existing_created_version = version_info[0] if version_info else None
+        clean_file_name = os.path.splitext(rel_under_lang)[0].replace("\\", "/")
+        cursor.execute(
+            "SELECT subtitleKey, created_version_id, updated_version_id "
+            "FROM subtitle WHERE fileName=? AND lang=?",
+            (clean_file_name, lang_id),
+        )
+        version_rows = cursor.fetchall()
+        if not version_rows:
+            return
 
-                # 只有当创建版本为空或小于当前版本时才更新
-                if existing_created_version is None or version_id < existing_created_version:
-                    # 检查内容是否相同
-                    old_content = old_rows.get(key, None)
-                    new_content = new_rows.get(key, None)
-                    # 确定更新版本：内容相同则写入当前版本，不同则为空
-                    updated_version = version_id if old_content == new_content else None
-                    valid_keys.append(key)
-                    updated_versions.append(updated_version)
+        update_rows = []
+        for subtitle_key, existing_created_version, existing_updated_version in version_rows:
+            created_version = existing_created_version
+            updated_version = existing_updated_version
 
-            if valid_keys:
-                executemany_batched(
-                    cursor,
-                    sql_subtitle,
-                    (
-                        (version_id, version_id, updated_version, key, version_id)
-                        for key, updated_version in zip(valid_keys, updated_versions)
-                    ),
-                    batch_size=batch_size,
+            if should_update_version(existing_created_version, version_id, is_created=True):
+                created_version = version_id
+
+            updated_confirmed = (
+                subtitle_key in confirmed_updated_subtitles
+                or (
+                    existing_updated_version is not None
+                    and existing_updated_version != existing_created_version
                 )
+            )
+            if subtitle_key in matching_current_keys and not updated_confirmed:
+                updated_version = version_id
+                confirmed_updated_subtitles.add(subtitle_key)
+
+            if (
+                created_version != existing_created_version
+                or updated_version != existing_updated_version
+            ):
+                update_rows.append((created_version, updated_version, subtitle_key))
+
+        if update_rows:
+            executemany_batched(
+                cursor,
+                "UPDATE subtitle SET created_version_id = ?, updated_version_id = ? WHERE subtitleKey = ?",
+                update_rows,
+                batch_size=batch_size,
+            )
 
     _backfill_versions_from_history(
         target_commit=target_commit,
@@ -1874,23 +1902,17 @@ def backfill_subtitle_versions_from_history(
         commit_batch_size=10,
     )
 
-    # 新增步骤：为没有版本数据的Subtitle记录执行Git回溯，获取真实的版本信息
-    print("Subtitle history phase-1.5: Git history backfill for subtitle without version data")
+    print("Subtitle 历史阶段 1.5：为缺少版本数据的 Subtitle 执行 Git 回溯")
     cursor = conn.cursor()
     try:
-        # 定义构建文件路径的函数
         def build_subtitle_file_path(record):
             subtitle_key, = record
-            # 解析subtitleKey获取文件路径信息
-            # subtitleKey格式通常为：文件名_语言_开始时间_结束时间
             parts = subtitle_key.split('_')
             if len(parts) < 4:
                 return None
 
-            # 重建文件路径
             file_name = '_'.join(parts[:-3])
             lang_part = parts[-3]
-            # 查找对应的语言目录
             lang_dir = None
             for lang_name, lang_id in LANG_CODE_MAP.items():
                 if str(lang_id) == lang_part:
@@ -1901,30 +1923,27 @@ def backfill_subtitle_versions_from_history(
 
             return f"Subtitle/{lang_dir}/{file_name}.srt"
 
-        # 使用通用Git版本回溯函数
         _backfill_git_versions(
             cursor,
             "Subtitle",
             "SELECT subtitleKey FROM subtitle WHERE created_version_id IS NULL",
             build_subtitle_file_path,
             "UPDATE subtitle SET created_version_id = ?, updated_version_id = ? WHERE subtitleKey = ?",
-            "Subtitle Git backfill"
+            "Subtitle Git 回溯",
         )
     finally:
         cursor.close()
 
-    # 执行版本异常检验
     check_cursor = conn.cursor()
     try:
         exception_data = analyze_subtitle_version_exceptions(check_cursor)
         report_version_exceptions(exception_data, "Subtitle")
 
-        # 修复创建版本晚于更新版本的记录
         if exception_data['created_after_updated'] > 0:
-            print(f"修复 Subtitle 中创建版本晚于更新版本的 {exception_data['created_after_updated']} 条记录...")
+            print(f"正在修复 {exception_data['created_after_updated']} 条 created_version_id 晚于 updated_version_id 的 Subtitle 记录...")
             fixed = fix_created_after_updated_versions(check_cursor, "subtitle", ["subtitleKey"])
             conn.commit()
-            print(f"修复完成，共修复 {fixed} 条记录")
+            print(f"Subtitle 异常修复完成：更新 {fixed} 条。")
     finally:
         check_cursor.close()
 
@@ -1935,29 +1954,45 @@ def fix_created_after_updated_versions(
     id_columns: list[str],
     max_fixes: int = 100000
 ) -> int:
-    """
-    修复创建版本晚于更新版本的记录
-
-    Args:
-        cursor: 数据库游标
-        table_name: 表名
-        id_columns: 主键列名列表
-        max_fixes: 最大修复数量
-
-    Returns:
-        修复的记录数量
-    """
-    # 构建WHERE子句
+    """Fix rows where created_version_id is later than updated_version_id."""
     where_clause = " AND ".join([f"{col} = ?" for col in id_columns])
 
-    # 构建UPDATE语句
-    update_sql = f"UPDATE {table_name} SET created_version_id = updated_version_id WHERE created_version_id > updated_version_id"
+    mismatch_predicate = (
+        "created_version_id IS NOT NULL "
+        "AND updated_version_id IS NOT NULL "
+        f"AND {_version_precedes_sql('updated_version_id', 'created_version_id')}"
+    )
+    update_sql = (
+        f"UPDATE {table_name} "
+        f"SET created_version_id = updated_version_id "
+        f"WHERE {where_clause} "
+        f"AND {mismatch_predicate}"
+    )
 
-    # 构建SELECT语句
-    select_sql = f"SELECT {', '.join(id_columns)}, created_version_id, updated_version_id FROM {table_name} WHERE created_version_id > updated_version_id"
+    select_sql = (
+        f"SELECT {', '.join(id_columns)} "
+        f"FROM {table_name} "
+        f"WHERE {mismatch_predicate}"
+    )
 
-    # 执行查询
-    cursor.execute(select_sql)
+    if max_fixes <= 0:
+        return 0
+
+    count_row = cursor.execute(
+        f"SELECT COUNT(*) FROM {table_name} WHERE {mismatch_predicate}"
+    ).fetchone()
+    mismatch_count = int(count_row[0]) if count_row and count_row[0] is not None else 0
+    if mismatch_count == 0:
+        return 0
+    if mismatch_count <= max_fixes:
+        cursor.execute(
+            f"UPDATE {table_name} "
+            f"SET created_version_id = updated_version_id "
+            f"WHERE {mismatch_predicate}"
+        )
+        return mismatch_count
+
+    cursor.execute(f"{select_sql} LIMIT ?", (max_fixes,))
     records = cursor.fetchall()
 
     fixed_count = 0
@@ -1965,9 +2000,9 @@ def fix_created_after_updated_versions(
         if fixed_count >= max_fixes:
             break
 
-        # 执行更新
-        cursor.execute(update_sql)
-        fixed_count += 1
+        cursor.execute(update_sql, tuple(record[: len(id_columns)]))
+        if cursor.rowcount > 0:
+            fixed_count += 1
 
     return fixed_count
 
@@ -1976,168 +2011,141 @@ def validate_quest_versions(
     *,
     repo_path: str | None = None,
     fix: bool = False,
-    max_fixes: int = 100000,  # 增加默认值，确保能处理所有任务
+    max_fixes: int = 100000,
+    fix_commit_batch_size: int = DEFAULT_FIX_COMMIT_BATCH_SIZE,
     db_conn=None,
 ) -> dict[str, int]:
-    """
-    验证任务版本的合理性，检测并修复版本异常的任务
-
-    Args:
-        repo_path: Git仓库路径
-        fix: 是否自动修复异常版本
-        max_fixes: 最大修复数量，避免一次性处理过多任务导致数据库锁定
-        db_conn: 数据库连接，默认使用全局的 conn
-
-    Returns:
-        验证结果统计
-    """
+    """Validate quest version anomalies and optionally repair them."""
     ensure_version_schema()
     if repo_path is None:
         repo_path = DATA_PATH
 
-    # 使用提供的数据库连接，否则使用全局的 conn
     use_conn = db_conn if db_conn else conn
     cursor = use_conn.cursor()
     try:
-        # 检测版本异常的任务
-        # 1. 没有创建版本的任务
         cursor.execute(
             "SELECT questId, created_version_id, git_created_version_id FROM quest WHERE created_version_id IS NULL"
         )
         no_created_version = cursor.fetchall()
 
-        # 2. 没有Git版本的任务
         cursor.execute(
             "SELECT questId, created_version_id, git_created_version_id FROM quest WHERE git_created_version_id IS NULL"
         )
         no_git_version = cursor.fetchall()
 
-        # 3. 版本号无效的任务（负数或零）
         cursor.execute(
             "SELECT questId, created_version_id, git_created_version_id FROM quest WHERE created_version_id <= 0 OR git_created_version_id <= 0"
         )
         invalid_version = cursor.fetchall()
 
-        # 4. 版本号差异过大的任务
-        cursor.execute(
-            "SELECT questId, created_version_id, git_created_version_id FROM quest WHERE created_version_id IS NOT NULL AND git_created_version_id IS NOT NULL AND ABS(created_version_id - git_created_version_id) > 20"
-        )
-        large_version_diff = cursor.fetchall()
-
-        # 5. 检测quest_version表中的异常
-        # 5.1 没有对应quest的记录
         cursor.execute(
             "SELECT qv.questId, qv.lang, qv.updated_version_id FROM quest_version qv LEFT JOIN quest q ON qv.questId = q.questId WHERE q.questId IS NULL"
         )
         quest_version_no_quest = cursor.fetchall()
 
-        # 5.2 没有更新版本的记录
         cursor.execute(
             "SELECT questId, lang, updated_version_id FROM quest_version WHERE updated_version_id IS NULL"
         )
         quest_version_no_updated = cursor.fetchall()
 
-        # 5.3 quest_version表中版本号无效的记录
         cursor.execute(
             "SELECT questId, lang, updated_version_id FROM quest_version WHERE updated_version_id <= 0"
         )
         quest_version_invalid = cursor.fetchall()
 
-        # 5.4 quest_version表中更新版本早于创建版本的记录
-        # 首先找出每个任务的最小updated_version_id
         cursor.execute(
             "SELECT questId, MIN(updated_version_id) as min_updated_version FROM quest_version GROUP BY questId"
         )
         min_updated_versions = {row[0]: row[1] for row in cursor.fetchall()}
 
-        # 然后找出创建版本大于最小更新版本的任务
+        quest_created_versions = {
+            row[0]: row[1]
+            for row in cursor.execute(
+                "SELECT questId, created_version_id FROM quest WHERE created_version_id IS NOT NULL"
+            ).fetchall()
+        }
         quest_version_older = []
         for quest_id, min_updated in min_updated_versions.items():
-            cursor.execute(
-                "SELECT created_version_id FROM quest WHERE questId = ? AND created_version_id > ?",
-                (quest_id, min_updated)
-            )
-            result = cursor.fetchone()
-            if result:
-                # 添加到异常列表，格式为(questId, lang, updated_version_id, created_version_id)
-                # 这里lang设为None，因为我们是按任务ID分组的
-                quest_version_older.append((quest_id, None, min_updated, result[0]))
+            current_created_version = quest_created_versions.get(quest_id)
+            if current_created_version is not None and should_update_version(min_updated, current_created_version, is_created=False):
+                quest_version_older.append((quest_id, None, min_updated, current_created_version))
 
-        # 统计异常任务数量
-        total_abnormal = len(no_created_version) + len(no_git_version) + len(invalid_version) + len(large_version_diff) + len(quest_version_no_quest) + len(quest_version_no_updated) + len(quest_version_invalid) + len(quest_version_older)
+        total_abnormal = (
+            len(no_created_version)
+            + len(no_git_version)
+            + len(invalid_version)
+            + len(quest_version_no_quest)
+            + len(quest_version_no_updated)
+            + len(quest_version_invalid)
+            + len(quest_version_older)
+        )
 
-        print(f"版本验证结果:")
-        print(f"- 没有创建版本的任务: {len(no_created_version)}")
-        print(f"- 没有Git版本的任务: {len(no_git_version)}")
-        print(f"- 版本号无效的任务: {len(invalid_version)}")
-        print(f"- 版本号差异过大的任务: {len(large_version_diff)}")
-        print(f"- quest_version表中没有对应quest的记录: {len(quest_version_no_quest)}")
-        print(f"- quest_version表中没有更新版本的记录: {len(quest_version_no_updated)}")
-        print(f"- quest_version表中版本号无效的记录: {len(quest_version_invalid)}")
-        print(f"- quest_version表中更新版本早于创建版本的记录: {len(quest_version_older)}")
-        print(f"- 总异常任务数: {total_abnormal}")
+        print("Quest version validation summary:")
+        print(f"- Missing created version: {len(no_created_version)}")
+        print(f"- Missing Git version: {len(no_git_version)}")
+        print(f"- Invalid version values: {len(invalid_version)}")
+        print(f"- quest_version rows without quest: {len(quest_version_no_quest)}")
+        print(f"- quest_version rows without updated_version_id: {len(quest_version_no_updated)}")
+        print(f"- quest_version rows with invalid updated_version_id: {len(quest_version_invalid)}")
+        print(f"- quest rows older than quest_version minimum update: {len(quest_version_older)}")
+        print(f"- Total anomalies: {total_abnormal}")
 
-        # 自动修复异常版本
         fixed_count = 0
         if fix:
-            print("开始修复异常版本...")
+            print("开始修复任务版本异常...")
             processed = 0
+            fix_commit_batch_size = max(1, int(fix_commit_batch_size))
 
-            # 合并所有需要处理的任务
             all_tasks = []
             all_tasks.extend([("no_created_version", quest) for quest in no_created_version])
             all_tasks.extend([("no_git_version", quest) for quest in no_git_version])
             all_tasks.extend([("invalid_version", quest) for quest in invalid_version])
-            all_tasks.extend([("large_version_diff", quest) for quest in large_version_diff])
             all_tasks.extend([("quest_version_no_quest", quest) for quest in quest_version_no_quest])
             all_tasks.extend([("quest_version_no_updated", quest) for quest in quest_version_no_updated])
             all_tasks.extend([("quest_version_invalid", quest) for quest in quest_version_invalid])
             all_tasks.extend([("quest_version_older", quest) for quest in quest_version_older])
 
             total_tasks = len(all_tasks)
-            print(f"总任务数: {total_tasks}")
+            pending_writes = 0
 
-            # 使用LightweightProgress添加进度条
-            with LightweightProgress(min(total_tasks, max_fixes), desc="修复异常版本", unit="task") as pbar:
+            def _flush_fix_batch():
+                nonlocal pending_writes
+                if pending_writes > 0:
+                    use_conn.commit()
+                    pending_writes = 0
+
+            def _mark_fix_write():
+                nonlocal pending_writes
+                pending_writes += 1
+                if pending_writes >= fix_commit_batch_size:
+                    _flush_fix_batch()
+
+            def _resolve_quest_first_version_id(quest_id: int) -> int | None:
+                _first_commit, version_id = _resolve_first_version_for_path(
+                    repo_path,
+                    f"BinOutput/Quest/{quest_id}.json",
+                )
+                return version_id
+
+            print(f"Tasks queued for fixes: {total_tasks}")
+            with LightweightProgress(min(total_tasks, max_fixes), desc="Quest version fix", unit="task") as pbar:
                 for task_type, quest in all_tasks:
                     if processed >= max_fixes:
                         break
 
                     if task_type == "no_created_version":
-                        quest_id, created_version, git_version = quest
+                        quest_id, _created_version, git_version = quest
                         if git_version:
-                            # 使用Git版本作为创建版本参考
                             cursor.execute(
                                 "UPDATE quest SET created_version_id = ? WHERE questId = ?",
                                 (git_version, quest_id)
                             )
                             fixed_count += 1
                             processed += 1
-                            # 每次修复后立即提交
-                            use_conn.commit()
+                            _mark_fix_write()
                             pbar.update(1)
                         else:
-                            # 尝试Git回溯获取版本参考
-                            # 构建任务文件路径
-                            quest_file_path = f"BinOutput/Quest/{quest_id}.json"
-
-                            # 使用Git命令获取该文件的第一个提交
-                            out = _run_git(
-                                repo_path,
-                                ["log", "--reverse", "--format=%H", "-n", "1", "--", quest_file_path],
-                                check=False
-                            )
-                            first_commit = out.strip() if out.strip() else None
-
-                            version_id = None
-                            if first_commit:
-                                # 获取第一个提交的版本信息
-                                first_commit_title = _run_git(
-                                    repo_path,
-                                    ["show", "-s", "--format=%s", first_commit],
-                                    check=False
-                                ).strip()
-                                _, version_id = _resolve_commit_version(repo_path, first_commit, first_commit_title)
+                            version_id = _resolve_quest_first_version_id(quest_id)
                             if version_id:
                                 cursor.execute(
                                     "UPDATE quest SET created_version_id = ? WHERE questId = ?",
@@ -2145,33 +2153,12 @@ def validate_quest_versions(
                                 )
                                 fixed_count += 1
                                 processed += 1
-                                # 每次修复后立即提交
-                                use_conn.commit()
+                                _mark_fix_write()
                                 pbar.update(1)
 
                     elif task_type == "no_git_version":
-                        quest_id, created_version, git_version = quest
-                        # 构建任务文件路径
-                        quest_file_path = f"BinOutput/Quest/{quest_id}.json"
-
-                        # 使用Git命令获取该文件的第一个提交
-                        out = _run_git(
-                            repo_path,
-                            ["log", "--reverse", "--format=%H", "-n", "1", "--", quest_file_path],
-                            check=False
-                        )
-                        first_commit = out.strip() if out.strip() else None
-
-                        version_id = None
-                        if first_commit:
-                            # 获取第一个提交的版本信息
-                            first_commit_title = _run_git(
-                                repo_path,
-                                ["show", "-s", "--format=%s", first_commit],
-                                check=False
-                            ).strip()
-                            _, version_id = _resolve_commit_version(repo_path, first_commit, first_commit_title)
-                        # 只更新git_created_version_id字段，不修改created_version_id
+                        quest_id, _created_version, _git_version = quest
+                        version_id = _resolve_quest_first_version_id(quest_id)
                         if version_id:
                             cursor.execute(
                                 "UPDATE quest SET git_created_version_id = ? WHERE questId = ?",
@@ -2179,59 +2166,35 @@ def validate_quest_versions(
                             )
                             fixed_count += 1
                             processed += 1
-                            # 每次修复后立即提交
-                            use_conn.commit()
+                            _mark_fix_write()
                             pbar.update(1)
 
                     elif task_type == "quest_version_no_quest":
-                        # 删除没有对应quest的quest_version记录
-                        quest_id, lang, _ = quest
+                        quest_id, lang, _updated_version = quest
                         cursor.execute(
                             "DELETE FROM quest_version WHERE questId = ? AND lang = ?",
                             (quest_id, lang)
                         )
                         fixed_count += 1
                         processed += 1
-                        # 每次修复后立即提交
-                        use_conn.commit()
+                        _mark_fix_write()
                         pbar.update(1)
 
                     elif task_type == "quest_version_no_updated":
-                        # 删除没有更新版本的quest_version记录
-                        quest_id, lang, _ = quest
+                        quest_id, lang, _updated_version = quest
                         cursor.execute(
                             "DELETE FROM quest_version WHERE questId = ? AND lang = ?",
                             (quest_id, lang)
                         )
                         fixed_count += 1
                         processed += 1
-                        # 每次修复后立即提交
-                        use_conn.commit()
+                        _mark_fix_write()
                         pbar.update(1)
 
                     elif task_type == "invalid_version":
-                        # 修复版本号无效的任务
                         quest_id, created_version, git_version = quest
-                        # 尝试使用Git回溯获取正确的版本
-                        quest_file_path = f"BinOutput/Quest/{quest_id}.json"
-                        out = _run_git(
-                            repo_path,
-                            ["log", "--reverse", "--format=%H", "-n", "1", "--", quest_file_path],
-                            check=False
-                        )
-                        first_commit = out.strip() if out.strip() else None
-
-                        version_id = None
-                        if first_commit:
-                            first_commit_title = _run_git(
-                                repo_path,
-                                ["show", "-s", "--format=%s", first_commit],
-                                check=False
-                            ).strip()
-                            _, version_id = _resolve_commit_version(repo_path, first_commit, first_commit_title)
-
+                        version_id = _resolve_quest_first_version_id(quest_id)
                         if version_id and version_id > 0:
-                            # 更新无效的版本号
                             if created_version <= 0:
                                 cursor.execute(
                                     "UPDATE quest SET created_version_id = ? WHERE questId = ?",
@@ -2244,78 +2207,68 @@ def validate_quest_versions(
                                 )
                             fixed_count += 1
                             processed += 1
-                            use_conn.commit()
+                            _mark_fix_write()
                             pbar.update(1)
 
-                    elif task_type == "large_version_diff":
-                        # 处理版本号差异过大的任务
-                        quest_id, textmap_version, git_version = quest
-                        # 使用较小的版本作为创建版本
-                        final_version = min(textmap_version, git_version)
-                        cursor.execute(
-                            "UPDATE quest SET created_version_id = ? WHERE questId = ?",
-                            (final_version, quest_id)
-                        )
-                        fixed_count += 1
-                        processed += 1
-                        use_conn.commit()
-                        pbar.update(1)
-
                     elif task_type == "quest_version_invalid":
-                        # 删除quest_version表中版本号无效的记录
-                        quest_id, lang, _ = quest
+                        quest_id, lang, _updated_version = quest
                         cursor.execute(
                             "DELETE FROM quest_version WHERE questId = ? AND lang = ?",
                             (quest_id, lang)
                         )
                         fixed_count += 1
                         processed += 1
-                        use_conn.commit()
+                        _mark_fix_write()
                         pbar.update(1)
 
                     elif task_type == "quest_version_older":
-                        # 将创建版本改成最小的updated version id
-                        quest_id, lang, min_updated_version, current_created_version = quest
+                        quest_id, _lang, min_updated_version, _current_created_version = quest
                         cursor.execute(
                             "UPDATE quest SET created_version_id = ? WHERE questId = ?",
                             (min_updated_version, quest_id)
                         )
                         fixed_count += 1
                         processed += 1
-                        # 每次修复后立即提交
-                        use_conn.commit()
+                        _mark_fix_write()
                         pbar.update(1)
 
-            print(f"修复完成，共修复 {fixed_count} 个任务的版本")
+            print(f"Processed {processed} anomaly task(s); fixed {fixed_count} row(s).")
+            _flush_fix_batch()
+            synced_created_from_git = _sync_created_version_from_git(cursor)
+            if synced_created_from_git > 0:
+                use_conn.commit()
+                fixed_count += synced_created_from_git
+                print(
+                    "Synchronized created_version_id from git_created_version_id "
+                    f"for {synced_created_from_git} quest row(s)."
+                )
             if processed >= max_fixes:
-                print(f"已达到最大修复数量 {max_fixes}，请多次运行以完成所有修复")
+                print(f"Reached max_fixes limit: {max_fixes}")
 
         return {
             "total_abnormal": total_abnormal,
             "no_created_version": len(no_created_version),
             "no_git_version": len(no_git_version),
             "invalid_version": len(invalid_version),
-            "large_version_diff": len(large_version_diff),
             "quest_version_no_quest": len(quest_version_no_quest),
             "quest_version_no_updated": len(quest_version_no_updated),
             "quest_version_invalid": len(quest_version_invalid),
             "quest_version_older": len(quest_version_older),
-            "fixed_count": fixed_count if fix else 0
+            "fixed_count": fixed_count if fix else 0,
         }
     except Exception as e:
-        print(f"[ERROR] 验证任务版本时出错: {e}")
+        logger.error(f"校验任务版本失败: {e}")
         use_conn.rollback()
         return {
             "total_abnormal": 0,
             "no_created_version": 0,
             "no_git_version": 0,
             "invalid_version": 0,
-            "large_version_diff": 0,
             "quest_version_no_quest": 0,
             "quest_version_no_updated": 0,
             "quest_version_invalid": 0,
             "quest_version_older": 0,
-            "fixed_count": 0
+            "fixed_count": 0,
         }
     finally:
         cursor.close()
@@ -2330,19 +2283,18 @@ def backfill_quest_versions_from_history(
     batch_size: int = DEFAULT_BATCH_SIZE,
     verbose: bool = False,
 ) -> dict[str, int | str]:
-    """
-    执行任务历史回填
+    """执行任务历史回填。
 
     Args:
-        target_commit: 目标提交
-        from_commit: 起始提交
-        force: 是否强制重新执行
-        unresolved_ratio_threshold: 未解决任务比例阈值
-        batch_size: 批处理大小
-        verbose: 是否详细输出
+        target_commit: 目标提交。
+        from_commit: 可选起始提交。
+        force: 是否强制全量重跑。
+        unresolved_ratio_threshold: 定向回放阈值。
+        batch_size: 数据库批量大小。
+        verbose: 是否输出详细日志。
 
     Returns:
-        回填结果统计
+        回填结果摘要。
     """
     ensure_version_schema()
     repo_path = DATA_PATH
@@ -2355,7 +2307,7 @@ def backfill_quest_versions_from_history(
     resume_done_key = "db_history_versions_commit_quest_resume_done"
     if not force and resolved_from is None and get_meta(meta_commit_key) == resolved_target:
         if _has_any_version_data("quest"):
-            print(f"Quest history backfill already done for {resolved_target}, skipping.")
+            print(f"任务历史回填已完成于 {resolved_target}，跳过。")
             return {
                 "replay_mode": "skip",
                 "total_quests": 0,
@@ -2365,13 +2317,13 @@ def backfill_quest_versions_from_history(
                 "phase2_commit_created_backfilled": 0,
             }
         print(
-            f"Quest history backfill meta indicates {resolved_target}, "
-            "but quest versions are empty/incomplete; rerunning."
+            f"任务历史回填元数据指向 {resolved_target}，"
+            "但任务版本数据为空或不完整；将重新执行。"
         )
 
     commits = _list_commits(repo_path, resolved_target, from_commit=resolved_from)
     if not commits:
-        print("Quest history backfill: no commits to process.")
+        print("任务历史回填：没有需要处理的提交。")
         return {
             "replay_mode": "none",
             "total_quests": 0,
@@ -2388,22 +2340,22 @@ def backfill_quest_versions_from_history(
         resolved_target=resume_scope,
         commits=commits,
         force=force,
-        label="Quest history backfill",
+        label="任务历史回填",
     )
 
     if start_idx == 0:
         if resolved_from:
             print(
-                "Quest history backfill start: "
-                f"{total_commits} commits (from: {resolved_from[:8]}, target: {resolved_target})"
+                "任务历史回填开始："
+                f"{total_commits} 个提交 (起点: {resolved_from[:8]}, 目标: {resolved_target})"
             )
         else:
-            print(f"Quest history backfill start: {total_commits} commits (target: {resolved_target})")
+            print(f"任务历史回填开始：{total_commits} 个提交 (目标: {resolved_target})")
     else:
         print(
-            "Quest history backfill continue: "
-            f"{total_commits - start_idx} remaining / {total_commits} total commits "
-            f"(target: {resolved_target})"
+            "任务历史回填继续："
+            f"剩余 {total_commits - start_idx} / 总计 {total_commits} 个提交 "
+            f"(目标: {resolved_target})"
         )
 
     cursor = conn.cursor()
@@ -2416,51 +2368,48 @@ def backfill_quest_versions_from_history(
 
     try:
         refreshed_qhm = _refresh_all_quest_hash_map(cursor, batch_size=batch_size)
-        print(f"Quest hash map refresh before phase-1: quests={refreshed_qhm}")
+        print(f"阶段 1 前刷新任务哈希映射：quests={refreshed_qhm}")
         # Resume from phase-2 checkpoint: skip expensive phase-1 rerun.
         if start_idx > 0:
             print(
-                "Quest history phase-1 skipped on resume: "
-                f"continue phase-2 from commit {start_idx + 1}/{total_commits}"
+                "任务历史阶段 1 在断点续跑时跳过："
+                f"从第 {start_idx + 1}/{total_commits} 个提交继续阶段 2"
             )
         else:
-            # Phase 1: infer created_version_id from local textMap DB first.
-            # Commit replay below only fills unresolved rows.
-            print("Quest history phase-1: local textMap DB infer (create+update)")
+            # 阶段 1 先基于本地 textMap 数据推断版本。
+            # 下面的提交回放只补未解决的记录。
+            print("任务历史阶段 1：基于本地 textMap 推断（创建+更新）")
             prefilled_created_rows, prefilled_updated_rows = _backfill_quest_phase1_with_progress(
                 cursor
             )
             print(
-                "Quest history phase-1 done: "
-                f"created_version rows backfilled={prefilled_created_rows}, "
-                f"updated_version rows backfilled={prefilled_updated_rows}"
+                "任务历史阶段 1 完成："
+                f"回填 created_version 行数={prefilled_created_rows}, "
+                f"回填 updated_version 行数={prefilled_updated_rows}"
             )
 
         total_quests, unresolved_quests = _count_unresolved_quest_versions(cursor)
 
-        # 新增步骤：为没有Git版本的任务执行Git回溯，获取真实的创建版本
-        # 在force模式下，处理所有任务
-        print("Quest history phase-1.5: Git history backfill for quests")
+        print("任务历史阶段 1.5：为任务执行 Git 回溯")
         if force:
-            print("Force mode: backfilling git versions for all quests...")
+            print("强制模式：为所有任务回填 Git 版本...")
             cursor.execute("SELECT questId FROM quest")
         else:
-            print("Standard mode: backfilling git versions for quests without git version...")
+            print("标准模式：为缺少 Git 版本的任务执行回填...")
             cursor.execute("SELECT questId FROM quest WHERE git_created_version_id IS NULL")
         quest_ids_to_backfill = [row[0] for row in cursor.fetchall()]
         git_backfilled_count = 0
 
         if quest_ids_to_backfill:
-            print(f"需要Git回溯的任务数量: {len(quest_ids_to_backfill)}")
+            print(f"需要 Git 回溯的任务数量：{len(quest_ids_to_backfill)}")
             total_quests = len(quest_ids_to_backfill)
-            with LightweightProgress(total_quests, desc="Git backfill", unit="quests") as pbar:
+            pbar = LightweightProgress(total_quests, desc="Git 回溯", unit="quests")
+            with pbar:
                 for i, quest_id in enumerate(quest_ids_to_backfill):
-                    pbar.set_postfix_str(f"Quest {quest_id}")
+                    postfix = f"Quest {quest_id}"
                     try:
-                        # 构建任务文件路径
                         quest_file_path = f"BinOutput/Quest/{quest_id}.json"
 
-                        # 使用Git命令获取该文件的第一个提交
                         out = _run_git(
                             repo_path,
                             ["log", "--reverse", "--format=%H", "-n", "1", "--", quest_file_path],
@@ -2469,7 +2418,6 @@ def backfill_quest_versions_from_history(
                         first_commit = out.strip() if out.strip() else None
 
                         if first_commit:
-                            # 获取第一个提交的版本信息
                             first_commit_title = _run_git(
                                 repo_path,
                                 ["show", "-s", "--format=%s", first_commit],
@@ -2478,7 +2426,6 @@ def backfill_quest_versions_from_history(
                             first_version_label, first_version_id = _resolve_commit_version(repo_path, first_commit, first_commit_title)
 
                             if first_version_id:
-                                # 检查是否已经有git创建版本
                                 cursor.execute(
                                     "SELECT git_created_version_id FROM quest WHERE questId = ?",
                                     (quest_id,)
@@ -2486,47 +2433,71 @@ def backfill_quest_versions_from_history(
                                 existing_version = cursor.fetchone()
                                 existing_git_created_version = existing_version[0] if existing_version else None
 
-                                # 获取当前数据库中的任务内容和版本信息
                                 cursor.execute(
                                     "SELECT questId, titleTextMapHash, created_version_id FROM quest WHERE questId = ?",
                                     (quest_id,)
                                 )
                                 db_row = cursor.fetchone()
                                 if not db_row:
+                                    pbar.update(postfix=postfix)
                                     continue
 
                                 existing_created_version = db_row[2] if len(db_row) >= 3 else None
 
-                                # 只有当git创建版本为空或小于当前版本，或者创建版本为空或git版本小于当前创建版本时才更新
-                                if (existing_git_created_version is None or first_version_id < existing_git_created_version) or \
-                                   (existing_created_version is None or first_version_id < existing_created_version):
-                                    # 获取第一个提交的任务内容
+                                update_git_created = should_update_version(
+                                    existing_git_created_version,
+                                    first_version_id,
+                                    is_created=True,
+                                )
+                                update_created = should_update_version(
+                                    existing_created_version,
+                                    first_version_id,
+                                    is_created=True,
+                                )
+
+                                if update_git_created or update_created:
                                     first_obj = _git_show_json(repo_path, first_commit, quest_file_path)
                                     if not isinstance(first_obj, dict):
+                                        pbar.update(postfix=postfix)
                                         continue
                                     first_row = _extract_quest_row(first_obj)
                                     if first_row is None:
+                                        pbar.update(postfix=postfix)
                                         continue
 
-                                    # 检查内容是否相同
-                                    content_same = (_quest_text_signature(db_row) == _quest_text_signature(first_row))
-
-                                    # 更新Git版本和创建版本到数据库
-                                    cursor.execute(
-                                        "UPDATE quest SET git_created_version_id = ?, created_version_id = ? WHERE questId = ?",
-                                        (first_version_id, first_version_id, quest_id)
-                                    )
-                                    git_backfilled_count += 1
+                                    update_fields = []
+                                    update_params = []
+                                    if update_git_created:
+                                        update_fields.append("git_created_version_id = ?")
+                                        update_params.append(first_version_id)
+                                    if update_created:
+                                        update_fields.append("created_version_id = ?")
+                                        update_params.append(first_version_id)
+                                    if update_fields:
+                                        update_params.append(quest_id)
+                                        cursor.execute(
+                                            f"UPDATE quest SET {', '.join(update_fields)} WHERE questId = ?",
+                                            tuple(update_params)
+                                        )
+                                        git_backfilled_count += 1
                     except Exception as e:
-                        print(f"[ERROR] Git回溯失败 for quest {quest_id}: {e}")
+                        print(f"[ERROR] 任务 {quest_id} 的 Git 回溯失败: {e}")
                         pass
                     finally:
-                        pbar.update()
+                        pbar.update(postfix=postfix)
 
             conn.commit()
-            print(f"Quest history phase-1.5 done: Git backfilled {git_backfilled_count} quests")
+            print(f"任务历史阶段 1.5 完成：已通过 Git 回填 {git_backfilled_count} 个任务")
         else:
-            print("所有任务都已有Git版本，跳过Git回溯")
+            print("所有任务都已有 Git 版本，跳过 Git 回溯。")
+
+        synced_created_from_git = _sync_created_version_from_git(cursor)
+        if synced_created_from_git > 0:
+            conn.commit()
+            print(
+                "任务历史阶段 1.5 后同步："
+                f"已用 git_created_version_id 修正 {synced_created_from_git} 条 created_version_id"
+            )
 
         unresolved_created_ids = _unresolved_created_quest_ids(cursor)
         unresolved_created_quests = len(unresolved_created_ids)
@@ -2539,50 +2510,52 @@ def backfill_quest_versions_from_history(
         if unresolved_created_quests <= 0:
             replay_mode = "none"
             print(
-                "Quest history phase-2 skipped: "
-                f"created_null=0 (unresolved_total={unresolved_quests}/{total_quests})"
+                "任务历史阶段 2 已跳过："
+                f"created_null=0 (未解决总数={unresolved_quests}/{total_quests})"
             )
         elif force:
             replay_mode = "full"
             print(
-                "Quest history phase-2 mode: full (force enabled), "
+                "任务历史阶段 2 模式：全量（已启用 force），"
                 f"created_null={unresolved_created_quests}/{total_quests}, "
                 f"unresolved_total={unresolved_quests}/{total_quests}"
             )
         elif unresolved_ratio <= max(0.0, float(unresolved_ratio_threshold)):
             replay_mode = "targeted"
             print(
-                "Quest history phase-2 mode: targeted, "
+                "任务历史阶段 2 模式：定向，"
                 f"created_null={unresolved_created_quests}/{total_quests} "
                 f"({unresolved_ratio * 100:.2f}%)"
             )
         else:
             replay_mode = "full"
             print(
-                "Quest history phase-2 mode: full (auto fallback), "
+                "任务历史阶段 2 模式：全量（自动回退），"
                 f"created_null={unresolved_created_quests}/{total_quests} "
-                f"({unresolved_ratio * 100:.2f}% > threshold {unresolved_ratio_threshold * 100:.2f}%)"
+                f"({unresolved_ratio * 100:.2f}% > 阈值 {unresolved_ratio_threshold * 100:.2f}%)"
             )
 
         if replay_mode in ("targeted", "full"):
-            # 简化进度显示，只显示主要进度
-            print(f"Processing {total_commits} Quest commits in {replay_mode} mode...")
+            print(f"正在以 {replay_mode} 模式处理 {total_commits} 个任务提交...")
             try:
                 target_quest_ids = unresolved_created_ids if replay_mode == "targeted" else None
-                commit_batch_size = 10
+                commit_batch_size = DEFAULT_HISTORY_COMMIT_BATCH_SIZE
                 processed_commits = 0
                 last_commit_sha = None
-                with LightweightProgress(total_commits, desc="Quest backfill", unit="commits") as pbar:
+                pbar = LightweightProgress(total_commits, desc="任务回填", unit="commits", initial_print=False)
+                pbar.current = start_idx
+                pbar.update(0)
+                with pbar:
                     for idx in range(start_idx, total_commits):
                         commit_sha, commit_title = commits[idx]
                         last_commit_sha = commit_sha
                         parent_sha = commits[idx - 1][0] if idx > 0 else first_parent_sha
                         version_label, version_id = _resolve_commit_version(repo_path, commit_sha, commit_title)
-                        if version_id is None:
-                            pbar.update()
-                            continue
+                        postfix = f"Commit {commit_sha[:8]}"
 
-                        pbar.set_postfix_str(f"Commit {commit_sha[:8]}")
+                        if version_id is None:
+                            pbar.update(postfix=postfix)
+                            continue
 
                         entries = (
                             _initial_entries(repo_path, commit_sha, include_paths=["BinOutput/Quest"])
@@ -2603,19 +2576,15 @@ def backfill_quest_versions_from_history(
                                 )
                                 phase2_commit_created_backfilled += updated
                             except Exception as e:
-                                print(f"Error processing quest entry: {e}")
+                                print(f"处理任务条目失败: {e}")
 
-                        pbar.update()
+                        pbar.update(postfix=postfix)
                         processed_commits += 1
 
-                        # 每处理一定数量的提交后进行一次数据库提交，减少提交次数
                         if processed_commits % commit_batch_size == 0 and last_commit_sha:
-                            # 批量提交并更新缓存点
-                            conn.commit()
                             set_meta(resume_target_key, resume_scope)
                             set_meta(resume_done_key, last_commit_sha)
 
-                    # 处理完所有提交后，确保进行最后一次提交
                     if processed_commits > 0 and last_commit_sha:
                         conn.commit()
                         set_meta(resume_target_key, resume_scope)
@@ -2624,7 +2593,7 @@ def backfill_quest_versions_from_history(
             except BaseException:
                 conn.rollback()
                 print(
-                    "Quest history backfill interrupted; checkpoint saved, rerun to continue.",
+                    "任务历史回填被中断；已保存断点，重新运行可继续。",
                     file=sys.stderr,
                 )
                 raise
@@ -2641,16 +2610,13 @@ def backfill_quest_versions_from_history(
         set_meta(meta_commit_key, resolved_target)
         if commits:
             set_meta(meta_title_key, _latest_commit_meta_title(commits) or commits[-1][0])
-    # 只有在完全处理完所有提交后才清空缓存点
-    # 这样在处理过程中中断时，下次运行可以从上次的位置继续
     if start_idx >= total_commits:
         set_meta(resume_target_key, "")
         set_meta(resume_done_key, "")
     rebuild_version_catalog(["quest"])
 
-    # 执行任务版本异常验证
-    print("\n=== 任务版本异常验证 ===")
-    validate_quest_versions(fix=False)
+    print("\n=== Quest Version Validation ===")
+    validate_quest_versions(fix=True)
 
     return {
         "replay_mode": replay_mode,
@@ -2664,8 +2630,8 @@ def backfill_quest_versions_from_history(
 
 def reset_history_version_marks(*, scope: str = "all"):
     """
-    显式重置版本标记为NULL，用于选定的历史回填范围
-    这是有意与--force分开的，以便正常的回填运行不会清除数据
+    将所选范围的版本标记重置为 NULL。
+    该操作与 --force 分离，避免普通重跑时清空数据。
     """
     ensure_version_schema()
     normalized_scope = (scope or "all").strip().lower()
@@ -2740,9 +2706,7 @@ def reset_history_version_marks(*, scope: str = "all"):
     try:
         for table_name in table_names:
             if table_name == 'quest':
-                # 对于quest表，重置created_version_id和git_created_version_id，因为updated_version_id现在存储在quest_version表中
                 cursor.execute(f"UPDATE {table_name} SET created_version_id=NULL, git_created_version_id=NULL")
-                # 同时清空quest_version表
                 cursor.execute("DELETE FROM quest_version")
             else:
                 cursor.execute(f"UPDATE {table_name} SET created_version_id=NULL, updated_version_id=NULL")

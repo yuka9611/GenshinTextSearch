@@ -1,50 +1,45 @@
-import request from "@/utils/request";
-import { withCache } from "@/utils/requestCache";
+import request from '@/utils/request'
+import { withCache } from '@/utils/requestCache'
 
-/**
- * 获得数据库中导入的TextMap语言列表
- */
+// Load imported text languages.
 const getImportedTextLanguages = withCache(() => {
-    return request.get("/api/getImportedTextLanguages");
-});
+  return request.get('/api/getImportedTextLanguages')
+})
 
-
-/**
- * 获得游戏安装的语音列表
- */
+// Load imported voice languages.
 const getImportedVoiceLanguages = withCache(() => {
-    return request.get("/api/getImportedVoiceLanguages");
-});
+  return request.get('/api/getImportedVoiceLanguages')
+})
 
 const getAvailableVersions = () => {
-    // Version aggregation can be heavy on large databases, but we need fresh data
-    return request.get("/api/getAvailableVersions", { timeout: 30000 });
-};
+  // Version aggregation can be heavy on large databases, but we need fresh data.
+  return request.get('/api/getAvailableVersions', { timeout: 30000 })
+}
 
 const saveConfig = (resultLanguages, defaultSearchLanguage, sourceLanguage, isMale) => {
-    let tmp = []
-    for(let code of resultLanguages){
-        tmp.push(parseInt(code))
-    }
+  const normalizedLanguages = []
+  for (const code of resultLanguages) {
+    normalizedLanguages.push(parseInt(code))
+  }
 
-    return request.post("/api/saveSettings", {
-        'config' :{
-            "resultLanguages": tmp,
-            "defaultSearchLanguage": parseInt(defaultSearchLanguage),
-            "sourceLanguage": parseInt(sourceLanguage),
-            "isMale": isMale
-        }
-    })
+  return request.post('/api/saveSettings', {
+    config: {
+      resultLanguages: normalizedLanguages,
+      defaultSearchLanguage: parseInt(defaultSearchLanguage),
+      sourceLanguage: parseInt(sourceLanguage),
+      isMale,
+    }
+  })
 }
 
 const getConfig = () => {
-    return request.get("/api/getSettings")
-};
+  return request.get('/api/getSettings')
+}
 
 export default {
-    getImportedTextLanguages,
-    getImportedVoiceLanguages,
-    getAvailableVersions,
-    getConfig,
-    saveConfig
+  getImportedTextLanguages,
+  getImportedVoiceLanguages,
+  getAvailableVersions,
+  getConfig,
+  saveConfig,
 }
