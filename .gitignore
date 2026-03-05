@@ -12,3 +12,4 @@ release/
 .trae/
 *.log
 tests/
+AGENTS.md
