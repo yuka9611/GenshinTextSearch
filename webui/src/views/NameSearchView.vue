@@ -24,7 +24,8 @@ const uiText = {
   noQuestResults: '没有找到任务结果',
   chapter: '章节',
   questId: '任务 ID',
-  firstSeen: '初次出现',
+  created: '创建',
+  updated: '更新',
   viewDetails: '查看详情',
   readableResults: '可读物结果',
   noReadableResults: '没有找到可读物结果',
@@ -184,8 +185,8 @@ setupVersionWatchers(onSearchClicked)
           <div v-if="quest.chapterName" class="cardMeta">{{ uiText.chapter }}: {{ quest.chapterName }}</div>
           <div class="cardMeta">{{ uiText.questId }}: {{ quest.questId }}</div>
           <div class="versionTags">
-            <el-tag size="small" effect="plain">{{ uiText.firstSeen }}: {{ displayVersion(quest, 'created') }}</el-tag>
-            <el-tag v-if="showUpdatedVersionTag(quest)" size="small" effect="plain">{{ uiText.updatedVersion }}: {{ displayVersion(quest, 'updated') }}</el-tag>
+            <el-tag size="small" effect="plain">{{ uiText.created }}: {{ displayVersion(quest, 'created') }}</el-tag>
+            <el-tag v-if="showUpdatedVersionTag(quest)" size="small" effect="plain">{{ uiText.updated }}: {{ displayVersion(quest, 'updated') }}</el-tag>
           </div>
           <el-button size="small" type="primary" @click="gotoQuest(quest.questId)">{{ uiText.viewDetails }}</el-button>
         </el-card>
@@ -201,8 +202,8 @@ setupVersionWatchers(onSearchClicked)
             <StylizedText :text="readable.title" :keyword="keywordLast" />
           </div>
           <div class="versionTags">
-            <el-tag size="small" effect="plain">{{ uiText.firstSeen }}: {{ displayVersion(readable, 'created') }}</el-tag>
-            <el-tag v-if="showUpdatedVersionTag(readable)" size="small" effect="plain">{{ uiText.updatedVersion }}: {{ displayVersion(readable, 'updated') }}</el-tag>
+            <el-tag size="small" effect="plain">{{ uiText.created }}: {{ displayVersion(readable, 'created') }}</el-tag>
+            <el-tag v-if="showUpdatedVersionTag(readable)" size="small" effect="plain">{{ uiText.updated }}: {{ displayVersion(readable, 'updated') }}</el-tag>
           </div>
           <el-button size="small" type="primary" @click="gotoReadable(readable)">{{ uiText.viewDetails }}</el-button>
         </el-card>

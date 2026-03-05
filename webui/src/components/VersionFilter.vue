@@ -1,9 +1,9 @@
 <template>
-  <div class="filterBar">
+  <div class="versionFilterGroup">
     <el-select 
       v-model="localCreatedVersion" 
       placeholder="创建版本" 
-      class="versionInput" 
+      class="versionFilter" 
       clearable 
       filterable
     >
@@ -12,7 +12,7 @@
     <el-select 
       v-model="localUpdatedVersion" 
       placeholder="更新版本" 
-      class="versionInput" 
+      class="versionFilter" 
       clearable 
       filterable
     >
@@ -64,21 +64,27 @@ watch(() => props.updatedVersion, (newValue) => {
 </script>
 
 <style scoped>
-.filterBar {
+.versionFilterGroup {
   display: flex;
-  flex-wrap: wrap;
+  flex-direction: row;
   gap: 8px;
   margin: 0;
+  width: 100%;
 }
 
-.versionInput {
-  width: 150px;
+.versionFilter {
+  flex: 1 1 150px;
+  min-width: 150px;
 }
 
 @media (max-width: 720px) {
-  .versionInput {
-    margin-left: 0;
-    display: block;
+  .versionFilterGroup {
+    width: 100%;
+    flex-wrap: wrap;
+  }
+
+  .versionFilter {
+    min-width: 0;
   }
 }
 </style>

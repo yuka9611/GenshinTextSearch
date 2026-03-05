@@ -245,25 +245,28 @@ onBeforeMount(async () => {
 
 .searchBarAdditional {
     display: flex;
-    align-items: center;
+    align-items: flex-start;
+    flex-wrap: wrap;
     gap: 8px;
 }
 
 .speakerInput {
-    width: 150px;
+    flex: 1 1 150px;
+    min-width: 150px;
     margin-top: 0;
 }
 
 .voiceFilter {
-    width: 150px;
+    flex: 1 1 150px;
+    min-width: 150px;
     margin-top: 0;
     margin-left: 0;
 }
 
-:deep(.versionFilter) {
-    width: 150px;
+:deep(.versionFilterGroup) {
+    flex: 2 1 308px;
+    min-width: 308px;
     margin-top: 0;
-    margin-left: 0;
 }
 
 .searchSpacer {
@@ -300,10 +303,15 @@ onBeforeMount(async () => {
         margin-top: 8px;
     }
 
-    .voiceFilter,
-    .versionFilter {
-        margin-left: 0;
-        display: block;
+    .speakerInput,
+    .voiceFilter {
+        flex-basis: calc(50% - 4px);
+        min-width: 0;
+    }
+
+    :deep(.versionFilterGroup) {
+        flex-basis: 100%;
+        min-width: 0;
     }
 
     .searchSpacer {
