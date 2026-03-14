@@ -157,6 +157,35 @@ _CACHE: dict[str, dict] = {
 }
 
 
+_RAW_CHARACTER_NAME_CACHE: dict[str, str | None] = {}
+
+
+def _get_gender_cache_key() -> str:
+    gender = config.getIsMale()
+    return str(gender)
+
+
+def _normalize_output_text(text: str | None, langCode: int):
+    if text is None:
+        return None
+    import placeholderHandler
+
+    return placeholderHandler.replace(text, config.getIsMale(), langCode)
+
+
+def getCharacterNameRaw(avatarId: int, langCode: int = 1):
+    cache_key = f"{avatarId}:{langCode}"
+    if cache_key in _RAW_CHARACTER_NAME_CACHE:
+        return _RAW_CHARACTER_NAME_CACHE[cache_key]
+    with closing(conn.cursor()) as cursor:
+        sql = "select content from avatar, textMap where avatarId=? and avatar.nameTextMapHash=textMap.hash and lang=?"
+        cursor.execute(sql, (avatarId, langCode))
+        rows = cursor.fetchall()
+        result = rows[0][0] if rows else None
+        _RAW_CHARACTER_NAME_CACHE[cache_key] = result
+        return result
+
+
 def _table_has_column(table_name: str, column_name: str) -> bool:
     """
     检查表是否包含指定列
@@ -1408,50 +1437,45 @@ def getSourceFromFetter(textHash: int, langCode: int = 1):
             return None
         avatarId, voiceTitle = ans[0]
 
-        sql2 = 'select content from avatar, textMap where avatarId=? and avatar.nameTextMapHash=textMap.hash and lang=?'
-        cursor.execute(sql2, (avatarId, langCode))
-        ans2 = cursor.fetchall()
-        if len(ans2) == 0:
+        avatarName = getCharterName(avatarId, langCode)
+        if avatarName is None:
             return None
-        avatarName = ans2[0][0]
 
-        return "{} · {}".format(avatarName, voiceTitle)
+        return "{} · {}".format(avatarName, _normalize_output_text(voiceTitle, langCode))
 
 
 def getCharterName(avatarId: int, langCode: int = 1):
     """
     获取角色名称
     """
-    cache_key = f"{avatarId}:{langCode}"
+    cache_key = f"{avatarId}:{langCode}:{_get_gender_cache_key()}"
     if cache_key in _CACHE["names"]["characters"]:
         return _CACHE["names"]["characters"][cache_key]
-    with closing(conn.cursor()) as cursor:
-        sql2 = 'select content from avatar, textMap where avatarId=? and avatar.nameTextMapHash=textMap.hash and lang=?'
-        cursor.execute(sql2, (avatarId, langCode,))
-        ans2 = cursor.fetchall()
-        result = ans2[0][0] if ans2 else None
-        _CACHE["names"]["characters"][cache_key] = result
-        return result
+    result = _normalize_output_text(getCharacterNameRaw(avatarId, langCode), langCode)
+    _CACHE["names"]["characters"][cache_key] = result
+    return result
 
 
 def getWanderName(langCode: int = 1):
     """
     获取旅行者名称
     """
-    if langCode in _CACHE["names"]["wander"]:
-        return _CACHE["names"]["wander"][langCode]
-    _CACHE["names"]["wander"][langCode] = getCharterName(10000075, langCode)
-    return _CACHE["names"]["wander"][langCode]
+    cache_key = f"{langCode}:{_get_gender_cache_key()}"
+    if cache_key in _CACHE["names"]["wander"]:
+        return _CACHE["names"]["wander"][cache_key]
+    _CACHE["names"]["wander"][cache_key] = getCharterName(10000075, langCode)
+    return _CACHE["names"]["wander"][cache_key]
 
 
 def getTravellerName(langCode: int = 1):
     """
     获取空旅行者名称
     """
-    if langCode in _CACHE["names"]["traveller"]:
-        return _CACHE["names"]["traveller"][langCode]
-    _CACHE["names"]["traveller"][langCode] = getCharterName(10000005, langCode)
-    return _CACHE["names"]["traveller"][langCode]
+    cache_key = f"{langCode}:{_get_gender_cache_key()}"
+    if cache_key in _CACHE["names"]["traveller"]:
+        return _CACHE["names"]["traveller"][cache_key]
+    _CACHE["names"]["traveller"][cache_key] = getCharterName(10000005, langCode)
+    return _CACHE["names"]["traveller"][cache_key]
 
 
 def getTalkInfo(textHash):
@@ -1484,9 +1508,7 @@ def getTalkerName(talkerType: str, talkerId: int, langCode: int = 1):
         elif talkerType == "TALK_ROLE_MATE_AVATAR":
             talkerName = "同伴"
 
-        if talkerName == '#{REALNAME[ID(1)|HOSTONLY(true)]}':
-            talkerName = getWanderName(langCode)
-        return talkerName
+        return _normalize_output_text(talkerName, langCode)
 
 
 def getTalkerNameFromTextHash(textHash: int, langCode: int = 1):
@@ -1528,7 +1550,7 @@ def getQuestName(questId, langCode):
         if len(ans2) == 0:
             return "对话文本"
 
-        questTitle = ans2[0][0]
+        questTitle = _normalize_output_text(ans2[0][0], langCode)
 
         sql3 = 'select chapterTitleTextMapHash,chapterNumTextMapHash from chapter, quest where questId=? and quest.chapterId=chapter.chapterId'
         cursor.execute(sql3, (questId,))
@@ -1543,13 +1565,13 @@ def getQuestName(questId, langCode):
         if len(ans4) == 0:
             return questTitle
 
-        chapterTitleText = ans4[0][0]
+        chapterTitleText = _normalize_output_text(ans4[0][0], langCode)
 
         cursor.execute(sql4, (chapterNumTextMapHash, langCode))
         ans5 = cursor.fetchall()
 
         if len(ans5) > 0:
-            chapterNumText = ans5[0][0]
+            chapterNumText = _normalize_output_text(ans5[0][0], langCode)
             questCompleteName = '{} · {} · {}'.format(chapterNumText, chapterTitleText, questTitle)
         else:
             questCompleteName = '{} · {}'.format(chapterTitleText, questTitle)
