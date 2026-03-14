@@ -425,6 +425,57 @@ def _normalize_speaker(value: str, langCode: int) -> str:
     return normalized
 
 
+def _normalize_match_text(value: str | None, langCode: int) -> str:
+    text = str(value or "").strip()
+    if langCode in databaseHelper.CHINESE_LANG_CODES:
+        text = "".join(text.split())
+    return text.lower()
+
+
+def _match_rank(value: str | None, keyword: str, langCode: int) -> int:
+    normalized_keyword = _normalize_match_text(keyword, langCode)
+    if not normalized_keyword:
+        return 0
+    normalized_value = _normalize_match_text(value, langCode)
+    if not normalized_value:
+        return 3
+    if normalized_value == normalized_keyword:
+        return 0
+    if normalized_value.startswith(normalized_keyword):
+        return 1
+    if normalized_keyword in normalized_value:
+        return 2
+    return 3
+
+
+def _best_field_match(values: list[str | None], keyword: str, langCode: int) -> tuple[int, int, int]:
+    best = (3, len(values), 10**9)
+    for index, value in enumerate(values):
+        normalized_value = _normalize_match_text(value, langCode)
+        rank = _match_rank(value, keyword, langCode)
+        candidate = (rank, index, len(normalized_value))
+        if candidate < best:
+            best = candidate
+    return best
+
+
+def _sort_entries_by_match(
+    entries: list[dict],
+    keyword: str,
+    langCode: int,
+    field_getter,
+):
+    keyword_trim = (keyword or "").strip()
+    if not keyword_trim:
+        return entries
+
+    def sort_key(entry: dict):
+        return _best_field_match(field_getter(entry), keyword_trim, langCode)
+
+    entries.sort(key=sort_key)
+    return entries
+
+
 def _apply_voice_filter(entries: list[dict], voice_filter: str) -> list[dict]:
     """
     应用语音过滤
@@ -512,6 +563,12 @@ def _handle_speaker_only_query(speaker_keyword: str, langCode: int, page: int, p
         )
 
     ans = _apply_voice_filter(ans, voice_filter)
+    _sort_entries_by_match(
+        ans,
+        speaker_keyword,
+        langCode,
+        lambda entry: [entry.get('talker')],
+    )
     return _paginate(ans, page, page_size, total)
 
 
@@ -609,6 +666,17 @@ def _handle_speaker_and_keyword_query(speaker_keyword: str, keyword_trim: str, l
     )
 
     ans = _apply_voice_filter(ans, voice_filter)
+    ans.sort(
+        key=lambda entry: (
+            _best_field_match(
+                [entry.get('translates', {}).get(str(langCode))],
+                keyword_trim,
+                langCode,
+            ),
+            _best_field_match([entry.get('talker')], speaker_keyword, langCode),
+            0 if entry.get('voicePaths') else 1,
+        )
+    )
     return _paginate(ans, page, page_size, total)
 
 
@@ -658,9 +726,9 @@ def _handle_keyword_only_query(keyword: str, keyword_trim: str, langCode: int, p
     safe_size = page_size if page_size and page > 0 else 50
 
     if voice_filter == "all":
-        return _handle_all_voice_filter(keyword, keyword_trim, langCode, safe_page, safe_size, hash_value, is_hash_query, hash_obj, hash_extra, text_hashes_seen, langs, sourceLangCode, langStr, targetLangStrs, strToLangId, prefix_labels, created_version_filter, updated_version_filter)
+        return _handle_all_voice_filter_ranked(keyword, keyword_trim, langCode, safe_page, safe_size, hash_value, is_hash_query, hash_obj, hash_extra, text_hashes_seen, langs, sourceLangCode, langStr, targetLangStrs, strToLangId, prefix_labels, created_version_filter, updated_version_filter)
     else:
-        return _handle_specific_voice_filter(keyword, keyword_trim, langCode, safe_page, safe_size, voice_filter, hash_value, is_hash_query, hash_obj, hash_extra, text_hashes_seen, langs, sourceLangCode, langStr, targetLangStrs, strToLangId, prefix_labels, created_version_filter, updated_version_filter)
+        return _handle_specific_voice_filter_ranked(keyword, keyword_trim, langCode, safe_page, safe_size, voice_filter, hash_value, is_hash_query, hash_obj, hash_extra, text_hashes_seen, langs, sourceLangCode, langStr, targetLangStrs, strToLangId, prefix_labels, created_version_filter, updated_version_filter)
 
 
 def _handle_all_voice_filter(keyword, keyword_trim, langCode, safe_page, safe_size, hash_value, is_hash_query, hash_obj, hash_extra, text_hashes_seen, langs, sourceLangCode, langStr, targetLangStrs, strToLangId, prefix_labels, created_version_filter, updated_version_filter):
@@ -873,6 +941,174 @@ def _handle_specific_voice_filter(keyword, keyword_trim, langCode, safe_page, sa
     return ans, total
 
 
+def _handle_all_voice_filter_ranked(keyword, keyword_trim, langCode, safe_page, safe_size, hash_value, is_hash_query, hash_obj, hash_extra, text_hashes_seen, langs, sourceLangCode, langStr, targetLangStrs, strToLangId, prefix_labels, created_version_filter, updated_version_filter):
+    total_textmap = _count_textmap_from_keyword_cached(
+        keyword,
+        langCode,
+        created_version_filter,
+        updated_version_filter,
+    )
+    total_readable = 0
+    if langStr:
+        total_readable = _count_readable_from_keyword_cached(
+            keyword,
+            langCode,
+            langStr,
+            created_version_filter,
+            updated_version_filter,
+        )
+    total_subtitle = _count_subtitle_from_keyword_cached(
+        keyword,
+        langCode,
+        created_version_filter,
+        updated_version_filter,
+    )
+    total = total_textmap + total_readable + total_subtitle + (1 if hash_extra else 0)
+
+    candidate_limit = max(safe_size, safe_page * safe_size)
+    candidates = []
+
+    if hash_extra and hash_obj is not None:
+        candidates.append(hash_obj)
+        if hash_value is not None:
+            text_hashes_seen.add(hash_value)
+
+    rows = databaseHelper.selectTextMapFromKeywordPaged(
+        keyword,
+        langCode,
+        candidate_limit,
+        0,
+        hash_value if is_hash_query else None,
+        None,
+        created_version_filter,
+        updated_version_filter,
+    )
+    for text_hash, _content, _created_raw, _updated_raw in rows:
+        if text_hash in text_hashes_seen:
+            continue
+        text_hashes_seen.add(text_hash)
+        candidates.append(queryTextHashInfo(text_hash, langs, sourceLangCode))
+
+    if langStr:
+        readable_contents = databaseHelper.selectReadableFromKeyword(
+            keyword,
+            langCode,
+            langStr,
+            candidate_limit,
+            None,
+            created_version_filter,
+            updated_version_filter,
+        )
+        for fileName, content, titleTextMapHash, readableId, created_raw, updated_raw in readable_contents:
+            candidates.append(_build_readable_obj(fileName, content, titleTextMapHash, readableId, created_raw, updated_raw, sourceLangCode, langCode, targetLangStrs, strToLangId, prefix_labels))
+
+    subtitle_contents = databaseHelper.selectSubtitleFromKeyword(
+        keyword,
+        langCode,
+        candidate_limit,
+        None,
+        created_version_filter,
+        updated_version_filter,
+    )
+    for fileName, content, startTime, endTime, subtitleId, created_raw, updated_raw in subtitle_contents:
+        candidates.append(_build_subtitle_obj(fileName, content, startTime, endTime, subtitleId, created_raw, updated_raw, langs))
+
+    _sort_search_results(candidates, keyword_trim, langCode, is_hash_query, hash_value)
+    start = (safe_page - 1) * safe_size
+    end = start + safe_size
+    return candidates[start:end], total
+
+
+def _handle_specific_voice_filter_ranked(keyword, keyword_trim, langCode, safe_page, safe_size, voice_filter, hash_value, is_hash_query, hash_obj, hash_extra, text_hashes_seen, langs, sourceLangCode, langStr, targetLangStrs, strToLangId, prefix_labels, created_version_filter, updated_version_filter):
+    hash_extra_filtered = False
+    if hash_extra and hash_obj is not None:
+        hash_has_voice = databaseHelper.hasVoiceForTextHashDb(hash_value)
+        if (voice_filter == "with" and hash_has_voice) or (
+            voice_filter == "without" and not hash_has_voice
+        ):
+            hash_extra_filtered = True
+
+    total_textmap = _count_textmap_from_keyword_voice_cached(
+        keyword,
+        langCode,
+        voice_filter,
+        created_version_filter,
+        updated_version_filter,
+    )
+    total_readable = 0
+    total_subtitle = 0
+    if voice_filter == "without":
+        if langStr:
+            total_readable = _count_readable_from_keyword_cached(
+                keyword,
+                langCode,
+                langStr,
+                created_version_filter,
+                updated_version_filter,
+            )
+        total_subtitle = _count_subtitle_from_keyword_cached(
+            keyword,
+            langCode,
+            created_version_filter,
+            updated_version_filter,
+        )
+
+    total = total_textmap + total_readable + total_subtitle + (1 if hash_extra_filtered else 0)
+    candidate_limit = max(safe_size, safe_page * safe_size)
+    candidates = []
+
+    if hash_extra_filtered and hash_obj is not None:
+        candidates.append(hash_obj)
+        if hash_value is not None:
+            text_hashes_seen.add(hash_value)
+
+    rows = databaseHelper.selectTextMapFromKeywordPaged(
+        keyword,
+        langCode,
+        candidate_limit,
+        0,
+        hash_value if is_hash_query else None,
+        voice_filter,
+        created_version_filter,
+        updated_version_filter,
+    )
+    for text_hash, _content, _created_raw, _updated_raw in rows:
+        if text_hash in text_hashes_seen:
+            continue
+        text_hashes_seen.add(text_hash)
+        candidates.append(queryTextHashInfo(text_hash, langs, sourceLangCode))
+
+    if voice_filter == "without":
+        if langStr:
+            readable_contents = databaseHelper.selectReadableFromKeyword(
+                keyword,
+                langCode,
+                langStr,
+                candidate_limit,
+                None,
+                created_version_filter,
+                updated_version_filter,
+            )
+            for fileName, content, titleTextMapHash, readableId, created_raw, updated_raw in readable_contents:
+                candidates.append(_build_readable_obj(fileName, content, titleTextMapHash, readableId, created_raw, updated_raw, sourceLangCode, langCode, targetLangStrs, strToLangId, prefix_labels))
+
+        subtitle_contents = databaseHelper.selectSubtitleFromKeyword(
+            keyword,
+            langCode,
+            candidate_limit,
+            None,
+            created_version_filter,
+            updated_version_filter,
+        )
+        for fileName, content, startTime, endTime, subtitleId, created_raw, updated_raw in subtitle_contents:
+            candidates.append(_build_subtitle_obj(fileName, content, startTime, endTime, subtitleId, created_raw, updated_raw, langs))
+
+    _sort_search_results(candidates, keyword_trim, langCode, is_hash_query, hash_value)
+    start = (safe_page - 1) * safe_size
+    end = start + safe_size
+    return candidates[start:end], total
+
+
 def _build_readable_obj(fileName, content, titleTextMapHash, readableId, created_raw, updated_raw, sourceLangCode, langCode, targetLangStrs, strToLangId, prefix_labels):
     """
     构建可读内容对象
@@ -942,28 +1178,18 @@ def _sort_search_results(ans: list[dict], keyword: str, langCode: int, is_hash_q
     """
     排序搜索结果
     """
-    keyword_lower = keyword.strip().lower()
-
-    def is_exact_match(entry: dict) -> bool:
-        if not keyword_lower:
-            return False
+    def sort_key(entry: dict) -> tuple[int, int, int, int, int]:
         target_text = entry.get('translates', {}).get(str(langCode))
-        if not isinstance(target_text, str):
-            return False
-        return keyword_lower in target_text.lower()
-
-    def has_voice(entry: dict) -> bool:
-        return len(entry.get('voicePaths', [])) > 0
-
-    def sort_key(entry: dict) -> tuple[int, int, int, int]:
         hash_rank = 0 if (is_hash_query and entry.get('hash') == hash_value) else 1
-        exact = is_exact_match(entry)
-        voice = has_voice(entry)
-        target_len = len(entry.get('translates', {}).get(str(langCode), "") or "")
+        match_rank = _match_rank(target_text, keyword, langCode)
+        voice_rank = 0 if entry.get('voicePaths') else 1
+        talk_rank = 0 if entry.get('isTalk') else 1
+        target_len = len(_normalize_match_text(target_text, langCode))
         return (
             hash_rank,
-            0 if exact else 1,
-            0 if (not exact and voice) else 1,
+            match_rank,
+            voice_rank,
+            talk_rank,
             target_len,
         )
 
@@ -1222,6 +1448,23 @@ def searchNameEntries(
                     **_build_version_fields(created_raw, updated_raw),
                 })
 
+    _sort_entries_by_match(
+        quests,
+        keyword_trim,
+        langCode,
+        lambda entry: [
+            entry.get("title"),
+            entry.get("chapterName"),
+            str(entry.get("questId", "")),
+        ],
+    )
+    _sort_entries_by_match(
+        readables,
+        keyword_trim,
+        langCode,
+        lambda entry: [entry.get("title"), entry.get("fileName")],
+    )
+
     return {
         "quests": quests,
         "readables": readables
@@ -1236,6 +1479,12 @@ def searchAvatarEntries(keyword: str, langCode: int):
             "avatarId": avatarId,
             "name": avatarName
         })
+    _sort_entries_by_match(
+        avatars,
+        keyword,
+        langCode,
+        lambda entry: [entry.get("name")],
+    )
     return {
         "avatars": avatars
     }
@@ -1451,6 +1700,15 @@ def searchAvatarVoicesByFilters(
 
         voices.append(obj)
 
+    _sort_entries_by_match(
+        voices,
+        title_keyword or "",
+        keywordLangCode,
+        lambda entry: [
+            entry.get("voiceTitle"),
+            entry.get("translates", {}).get(str(keywordLangCode)),
+        ],
+    )
     return {
         "voices": voices
     }
@@ -1549,6 +1807,15 @@ def searchAvatarStoriesByFilters(
             **_build_version_fields(created_raw, updated_raw),
         })
 
+    _sort_entries_by_match(
+        stories,
+        title_keyword or "",
+        keywordLangCode,
+        lambda entry: [
+            entry.get("storyTitle"),
+            entry.get("translates", {}).get(str(keywordLangCode)),
+        ],
+    )
     return {
         "stories": stories
     }
