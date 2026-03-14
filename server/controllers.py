@@ -216,11 +216,7 @@ def queryTextHashInfo(textHash: int, langs: 'list[int]', sourceLangCode: int, qu
         # 回退：如果选择的语言没有翻译，返回至少一种可用语言
         translates = databaseHelper.selectTextMapFromTextHash(textHash, None)
     for translate in translates:
-        # #开头的要进行占位符替换
-        if translate[0].startswith("#"):
-            obj['translates'][str(translate[1])] = placeholderHandler.replace(translate[0], config.getIsMale(), translate[1])
-        else:
-            obj['translates'][str(translate[1])] = translate[0]
+        obj['translates'][str(translate[1])] = _normalize_text_map_content(translate[0], translate[1])
 
     # 查询来源信息
     if queryOrigin:
@@ -264,9 +260,7 @@ def _resolve_avatar_query_langs(search_lang: int | None = None) -> tuple[list[in
 def _normalize_text_map_content(content: str | None, lang_code: int):
     if content is None:
         return None
-    if content.startswith("#"):
-        return placeholderHandler.replace(content, config.getIsMale(), lang_code)[1:]
-    return content
+    return placeholderHandler.replace(content, config.getIsMale(), lang_code)
 
 
 def _get_text_map_content_with_fallback(
@@ -1142,7 +1136,8 @@ def _build_readable_obj(fileName, content, titleTextMapHash, readableId, created
     translations = databaseHelper.selectReadableFromFileName(fileName, targetLangStrs)
     for transContent, transLangStr in translations:
         if transLangStr in strToLangId:
-            obj['translates'][str(strToLangId[transLangStr])] = transContent
+            lang_id = strToLangId[transLangStr]
+            obj['translates'][str(lang_id)] = _normalize_text_map_content(transContent, lang_id)
 
     return obj
 
@@ -1170,7 +1165,7 @@ def _build_subtitle_obj(fileName, content, startTime, endTime, subtitleId, creat
     if not translations:
         translations = databaseHelper.selectSubtitleTranslations(fileName, startTime, langs)
     for transContent, transLangCode in translations:
-        obj['translates'][str(transLangCode)] = transContent
+        obj['translates'][str(transLangCode)] = _normalize_text_map_content(transContent, transLangCode)
     return obj
 
 
@@ -1955,7 +1950,8 @@ def getReadableContent(readableId: int | None, fileName: str | None, searchLang:
     translateMap = {}
     for transContent, transLangStr in translations:
         if transLangStr in strToLangId:
-            translateMap[str(strToLangId[transLangStr])] = transContent
+            lang_id = strToLangId[transLangStr]
+            translateMap[str(lang_id)] = _normalize_text_map_content(transContent, lang_id)
 
     return {
         "fileName": fileName,
@@ -1979,7 +1975,10 @@ def getSubtitleContext(fileName: str, _subtitleId: int | None = None, searchLang
     # Group by per-language line index (more stable than timestamp across language variants).
     lines_by_lang: dict[int, list[tuple[str, float, float]]] = {}
     for content, lang, startTime, endTime in lines:
-        lines_by_lang.setdefault(lang, []).append((content, startTime, endTime))
+        norm_content = _normalize_text_map_content(content, lang)
+        if norm_content is None:
+            continue  # Skip lines where normalization failed
+        lines_by_lang.setdefault(lang, []).append((norm_content, startTime, endTime))
     for lang in lines_by_lang:
         lines_by_lang[lang].sort(key=lambda x: x[1])
 

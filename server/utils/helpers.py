@@ -81,11 +81,10 @@ def _resolve_avatar_query_langs(search_lang: int | None = None) -> tuple[list[in
 def _normalize_text_map_content(content: str | None, lang_code: int):
     if content is None:
         return None
-    if content.startswith("#"):
-        import placeholderHandler
-        import config
-        return placeholderHandler.replace(content, config.getIsMale(), lang_code)[1:]
-    return content
+    import placeholderHandler
+    import config
+
+    return placeholderHandler.replace(content, config.getIsMale(), lang_code)
 
 
 def _get_text_map_content_with_fallback(
