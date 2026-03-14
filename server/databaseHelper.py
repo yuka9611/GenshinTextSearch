@@ -581,8 +581,50 @@ def _build_like_patterns(keyword: str, lang_code: int) -> tuple[str, str]:
     return exact, fuzzy
 
 
+def _normalize_match_keyword(keyword: str | None, lang_code: int) -> str:
+    text = str(keyword or "").strip()
+    if lang_code in CHINESE_LANG_CODES:
+        text = "".join(text.split())
+    return text.lower()
+
+
+def _build_normalized_match_expr(field_expr: str, lang_code: int) -> str:
+    trimmed = f"trim(coalesce({field_expr}, ''))"
+    if lang_code in CHINESE_LANG_CODES:
+        return (
+            "lower(replace(replace(replace(replace("
+            f"{trimmed}, ' ', ''), char(9), ''), char(10), ''), char(13), ''))"
+        )
+    return f"lower({trimmed})"
+
+
+def _build_match_sort_case(
+    field_expr: str,
+    keyword: str,
+    lang_code: int,
+    base_rank: int = 0,
+) -> tuple[str, list]:
+    normalized_keyword = _normalize_match_keyword(keyword, lang_code)
+    if not normalized_keyword:
+        return str(base_rank), []
+
+    normalized_expr = _build_normalized_match_expr(field_expr, lang_code)
+    escaped = _escape_like(normalized_keyword)
+    prefix = f"{escaped}%"
+    contains = f"%{escaped}%"
+    sql = (
+        "case "
+        f"when {normalized_expr} = ? then {base_rank} "
+        f"when {normalized_expr} like ? escape '\\' then {base_rank + 1} "
+        f"when {normalized_expr} like ? escape '\\' then {base_rank + 2} "
+        f"else {base_rank + 3} end"
+    )
+    return sql, [normalized_keyword, prefix, contains]
+
+
 def _build_textmap_query(
     use_fts: bool,
+    keyword: str,
     langCode: int,
     exact: str,
     fuzzy: str,
@@ -636,24 +678,30 @@ def _build_textmap_query(
         elif voice_filter == "without":
             sql += f"and not ({voice_expr}) "
 
+    match_sort_sql, match_sort_params = _build_match_sort_case("tm.content", keyword, langCode)
+    normalized_length_sql = f"length({_build_normalized_match_expr('tm.content', langCode)})"
+
     # 添加排序和分页
     if hash_value is not None:
         sql += (
             "order by "
             "case when tm.hash = ? then 0 else 1 end, "
-            "case when tm.content like ? escape '\\' then 0 else 1 end, "
+            f"{match_sort_sql}, "
             "case when exists (select 1 from dialogue d join voice v on v.dialogueId = d.dialogueId where d.textHash = tm.hash limit 1) or exists (select 1 from fetters f join voice v on v.dialogueId = f.voiceFile and (v.avatarId = f.avatarId or v.avatarId = 0) where f.voiceFileTextTextMapHash = tm.hash limit 1) then 0 else 1 end, "
-            "case when exists (select 1 from dialogue d join questTalk qt on d.talkId = qt.talkId join quest q on qt.questId = q.questId where d.textHash = tm.hash limit 1) then 0 else 1 end "
+            "case when exists (select 1 from dialogue d join questTalk qt on d.talkId = qt.talkId join quest q on qt.questId = q.questId where d.textHash = tm.hash limit 1) then 0 else 1 end, "
+            f"{normalized_length_sql} "
         )
-        params.extend([hash_value, exact])
+        params.append(hash_value)
+        params.extend(match_sort_params)
     else:
         sql += (
             "order by "
-            "case when tm.content like ? escape '\\' then 0 else 1 end, "
+            f"{match_sort_sql}, "
             "case when exists (select 1 from dialogue d join voice v on v.dialogueId = d.dialogueId where d.textHash = tm.hash limit 1) or exists (select 1 from fetters f join voice v on v.dialogueId = f.voiceFile and (v.avatarId = f.avatarId or v.avatarId = 0) where f.voiceFileTextTextMapHash = tm.hash limit 1) then 0 else 1 end, "
-            "case when exists (select 1 from dialogue d join questTalk qt on d.talkId = qt.talkId join quest q on qt.questId = q.questId where d.textHash = tm.hash limit 1) then 0 else 1 end "
+            "case when exists (select 1 from dialogue d join questTalk qt on d.talkId = qt.talkId join quest q on qt.questId = q.questId where d.textHash = tm.hash limit 1) then 0 else 1 end, "
+            f"{normalized_length_sql} "
         )
-        params.append(exact)
+        params.extend(match_sort_params)
 
     if limit is not None:
         sql += "limit ?"
@@ -974,13 +1022,15 @@ def selectTextMapFromKeyword(keyWord: str, langCode: int, limit: int | None = No
     with closing(conn.cursor()) as cursor:
         exact, fuzzy = _build_like_patterns(keyWord, langCode)
         fts_match = _build_textmap_fts_match(keyWord, langCode)
+        match_sort_sql, match_sort_params = _build_match_sort_case("tm.content", keyWord, langCode)
+        normalized_length_sql = f"length({_build_normalized_match_expr('tm.content', langCode)})"
 
         sql_like = (
             "select tm.hash, tm.content from textMap tm "
             "where tm.lang=? and (tm.content like ? escape '\\' or tm.content like ? escape '\\') "
-            "order by case when tm.content like ? escape '\\' then 0 else 1 end, length(tm.content)"
+            f"order by {match_sort_sql}, {normalized_length_sql}"
         )
-        params_like = [langCode, exact, fuzzy, exact]
+        params_like = [langCode, exact, fuzzy] + match_sort_params
         if limit is not None:
             sql_like += " limit ?"
             params_like.append(limit)
@@ -991,9 +1041,9 @@ def selectTextMapFromKeyword(keyWord: str, langCode: int, limit: int | None = No
                 f"where tm.id in (select rowid from {_TEXTMAP_FTS_TABLE} where {_TEXTMAP_FTS_TABLE} match ? and lang=?) "
                 "and tm.lang=? "
                 "and (tm.content like ? escape '\\' or tm.content like ? escape '\\') "
-                "order by case when tm.content like ? escape '\\' then 0 else 1 end, length(tm.content)"
+                f"order by {match_sort_sql}, {normalized_length_sql}"
             )
-            params_fts = [fts_match, langCode, langCode, exact, fuzzy, exact]
+            params_fts = [fts_match, langCode, langCode, exact, fuzzy] + match_sort_params
             if limit is not None:
                 sql_fts += " limit ?"
                 params_fts.append(limit)
@@ -1035,6 +1085,7 @@ def selectTextMapFromKeywordPaged(
         # 构建LIKE查询
         sql_like, params_like = _build_textmap_query(
             use_fts=False,
+            keyword=keyWord,
             langCode=langCode,
             exact=exact,
             fuzzy=fuzzy,
@@ -1052,6 +1103,7 @@ def selectTextMapFromKeywordPaged(
         if _is_textmap_fts_lang_enabled(langCode) and fts_match is not None:
             sql_fts, params_fts = _build_textmap_query(
                 use_fts=True,
+                keyword=keyWord,
                 langCode=langCode,
                 exact=exact,
                 fuzzy=fuzzy,
@@ -1769,6 +1821,8 @@ def selectReadableFromKeyword(
 ):
     with closing(conn.cursor()) as cursor:
         exact, fuzzy = _build_like_patterns(keyword, langCode)
+        match_sort_sql, match_sort_params = _build_match_sort_case("content", keyword, langCode)
+        normalized_length_sql = f"length({_build_normalized_match_expr('content', langCode)})"
         readable_langs = _expand_readable_langs([langStr])
         if not readable_langs:
             return []
@@ -1783,7 +1837,6 @@ def selectReadableFromKeyword(
             params.append(lang)
         params.append(exact)
         params.append(fuzzy)
-        params.append(exact)
         sql = _append_version_filter_clause(
             sql + " ",
             params,
@@ -1792,7 +1845,8 @@ def selectReadableFromKeyword(
             updated_version,
             "readable",
         )
-        sql += "order by case when content like ? escape '\\' then 0 else 1 end, length(content) "
+        sql += f"order by {match_sort_sql}, {normalized_length_sql} "
+        params.extend(match_sort_params)
         if limit is not None:
             sql += " limit ?"
             params.append(int(limit))
@@ -1953,6 +2007,8 @@ def selectQuestByTitleKeyword(
     with closing(conn.cursor()) as cursor:
         exact, fuzzy = _build_like_patterns(keyword, langCode)
         version_select = _version_select_expr("quest", "quest", langCode)
+        match_sort_sql, match_sort_params = _build_match_sort_case("textMap.content", keyword, langCode)
+        normalized_length_sql = f"length({_build_normalized_match_expr('textMap.content', langCode)})"
         sql = (
             f"select quest.questId, textMap.content, {version_select} from quest "
             "join textMap on quest.titleTextMapHash=textMap.hash "
@@ -1968,10 +2024,10 @@ def selectQuestByTitleKeyword(
             "quest",
         )
         sql += (
-            "order by case when textMap.content like ? escape '\\' then 0 else 1 end, length(textMap.content) "
+            f"order by {match_sort_sql}, {normalized_length_sql} "
             "limit 200"
         )
-        params.append(exact)
+        params.extend(match_sort_params)
         cursor.execute(sql, params)
         return cursor.fetchall()
 
@@ -1986,6 +2042,8 @@ def selectQuestByIdContains(
         escaped = _escape_like(keyword)
         pattern = f"%{escaped}%"
         version_select = _version_select_expr("quest", "quest", langCode)
+        match_sort_sql, match_sort_params = _build_match_sort_case("cast(quest.questId as text)", keyword, langCode)
+        normalized_length_sql = f"length({_build_normalized_match_expr('cast(quest.questId as text)', langCode)})"
         sql = (
             f"select quest.questId, textMap.content, {version_select} "
             "from quest "
@@ -2002,7 +2060,8 @@ def selectQuestByIdContains(
             "quest",
             langCode,
         )
-        sql += "order by length(cast(quest.questId as text)) limit 200"
+        sql += f"order by {match_sort_sql}, {normalized_length_sql} limit 200"
+        params.extend(match_sort_params)
         cursor.execute(sql, params)
         return cursor.fetchall()
 
@@ -2010,14 +2069,16 @@ def selectQuestByIdContains(
 def selectAvatarByNameKeyword(keyword: str, langCode: int):
     with closing(conn.cursor()) as cursor:
         exact, fuzzy = _build_like_patterns(keyword, langCode)
+        match_sort_sql, match_sort_params = _build_match_sort_case("textMap.content", keyword, langCode)
+        normalized_length_sql = f"length({_build_normalized_match_expr('textMap.content', langCode)})"
         sql = (
             "select avatar.avatarId, textMap.content "
             "from avatar join textMap on avatar.nameTextMapHash=textMap.hash "
             "where textMap.lang=? and (textMap.content like ? escape '\\' or textMap.content like ? escape '\\') "
-            "order by case when textMap.content like ? escape '\\' then 0 else 1 end, length(textMap.content) "
+            f"order by {match_sort_sql}, {normalized_length_sql} "
             "limit 200"
         )
-        cursor.execute(sql, (langCode, exact, fuzzy, exact))
+        cursor.execute(sql, (langCode, exact, fuzzy, *match_sort_params))
         return cursor.fetchall()
 
 
@@ -2369,6 +2430,8 @@ def selectReadableByTitleKeyword(
 ):
     with closing(conn.cursor()) as cursor:
         exact, fuzzy = _build_like_patterns(keyword, langCode)
+        match_sort_sql, match_sort_params = _build_match_sort_case("textMap.content", keyword, langCode)
+        normalized_length_sql = f"length({_build_normalized_match_expr('textMap.content', langCode)})"
         readable_langs = _expand_readable_langs([langStr])
         if not readable_langs:
             return []
@@ -2391,9 +2454,9 @@ def selectReadableByTitleKeyword(
         )
         sql += ("group by readable.fileName, readable.readableId, readable.titleTextMapHash, textMap.content, "
                 f"{version_group} "
-                "order by case when textMap.content like ? escape '\\' then 0 else 1 end, length(textMap.content) "
+                f"order by {match_sort_sql}, {normalized_length_sql} "
                 "limit 200")
-        params.append(exact)
+        params.extend(match_sort_params)
         cursor.execute(sql, params)
         return cursor.fetchall()
 
@@ -2408,6 +2471,8 @@ def selectReadableByFileNameContains(
     with closing(conn.cursor()) as cursor:
         escaped = _escape_like(keyword)
         pattern = f"%{escaped}%"
+        match_sort_sql, match_sort_params = _build_match_sort_case("readable.fileName", keyword, langCode)
+        normalized_length_sql = f"length({_build_normalized_match_expr('readable.fileName', langCode)})"
         readable_langs = _expand_readable_langs([langStr])
         if not readable_langs:
             return []
@@ -2432,8 +2497,9 @@ def selectReadableByFileNameContains(
         )
         sql += ("group by readable.fileName, readable.readableId, readable.titleTextMapHash, textMap.content, "
                 f"{version_group} "
-                "order by length(readable.fileName) "
+                f"order by {match_sort_sql}, {normalized_length_sql} "
                 "limit 200")
+        params.extend(match_sort_params)
         cursor.execute(sql, params)
         return cursor.fetchall()
 
@@ -2518,11 +2584,13 @@ def selectSubtitleFromKeyword(
     with closing(conn.cursor()) as cursor:
         exact, fuzzy = _build_like_patterns(keyword, langCode)
         version_select = _version_select_expr("subtitle", "subtitle")
+        match_sort_sql, match_sort_params = _build_match_sort_case("content", keyword, langCode)
+        normalized_length_sql = f"length({_build_normalized_match_expr('content', langCode)})"
         sql = (
             f"select fileName, content, startTime, endTime, subtitleId, {version_select} from subtitle "
             "where lang=? and (content like ? escape '\\' or content like ? escape '\\') "
         )
-        params = [langCode, exact, fuzzy, exact]
+        params = [langCode, exact, fuzzy]
         sql = _append_version_filter_clause(
             sql + " ",
             params,
@@ -2531,7 +2599,8 @@ def selectSubtitleFromKeyword(
             updated_version,
             "subtitle",
         )
-        sql += "order by case when content like ? escape '\\' then 0 else 1 end, length(content) "
+        sql += f"order by {match_sort_sql}, {normalized_length_sql} "
+        params.extend(match_sort_params)
         if limit is not None:
             sql += " limit ?"
             params.append(int(limit))
@@ -2618,6 +2687,8 @@ def selectDialogueByTalkerKeyword(
 ):
     with closing(conn.cursor()) as cursor:
         exact, fuzzy = _build_like_patterns(keyword, langCode)
+        speaker_sort_sql, speaker_sort_params = _build_match_sort_case("npcName.content", keyword, langCode)
+        speaker_length_sql = f"length({_build_normalized_match_expr('npcName.content', langCode)})"
         sql = (
             "select dialogue.textHash, dialogue.talkerType, dialogue.talkerId, dialogue.dialogueId "
             "from dialogue "
@@ -2635,7 +2706,8 @@ def selectDialogueByTalkerKeyword(
             updated_version,
             "textMap",
         )
-        sql += "order by case when npcName.content like ? escape '\\' then 0 else 1 end, length(npcName.content), dialogue.dialogueId "
+        sql += f"order by {speaker_sort_sql}, {speaker_length_sql}, dialogue.dialogueId "
+        params.extend(speaker_sort_params)
         if limit is not None:
             sql += " limit ?"
             params.append(limit)
@@ -2684,6 +2756,9 @@ def selectDialogueByTalkerAndKeyword(
     with closing(conn.cursor()) as cursor:
         speaker_exact, speaker_fuzzy = _build_like_patterns(speaker_keyword, langCode)
         keyword_exact, keyword_fuzzy = _build_like_patterns(keyword, langCode)
+        dialogue_sort_sql, dialogue_sort_params = _build_match_sort_case("dialogueText.content", keyword, langCode)
+        speaker_sort_sql, speaker_sort_params = _build_match_sort_case("npcName.content", speaker_keyword, langCode)
+        dialogue_length_sql = f"length({_build_normalized_match_expr('dialogueText.content', langCode)})"
         sql = (
             "select dialogue.textHash, dialogue.talkerType, dialogue.talkerId, dialogue.dialogueId "
             "from dialogue "
@@ -2712,9 +2787,11 @@ def selectDialogueByTalkerAndKeyword(
             "textMap",
         )
         sql += (
-            "order by case when dialogueText.content like ? escape '\\' then 0 else 1 end, "
-            "length(dialogueText.content), dialogue.dialogueId "
+            f"order by {dialogue_sort_sql}, {speaker_sort_sql}, "
+            f"{dialogue_length_sql}, dialogue.dialogueId "
         )
+        params.extend(dialogue_sort_params)
+        params.extend(speaker_sort_params)
         if limit is not None:
             sql += " limit ?"
             params.append(limit)
@@ -2732,6 +2809,8 @@ def selectDialogueByTalkerTypeAndKeyword(
 ):
     with closing(conn.cursor()) as cursor:
         exact, fuzzy = _build_like_patterns(keyword, langCode)
+        dialogue_sort_sql, dialogue_sort_params = _build_match_sort_case("dialogueText.content", keyword, langCode)
+        dialogue_length_sql = f"length({_build_normalized_match_expr('dialogueText.content', langCode)})"
         sql = (
             "select dialogue.textHash, dialogue.talkerType, dialogue.talkerId, dialogue.dialogueId "
             "from dialogue "
@@ -2750,9 +2829,10 @@ def selectDialogueByTalkerTypeAndKeyword(
             "textMap",
         )
         sql += (
-            "order by case when dialogueText.content like ? escape '\\' then 0 else 1 end, "
-            "length(dialogueText.content), dialogue.dialogueId "
+            f"order by {dialogue_sort_sql}, "
+            f"{dialogue_length_sql}, dialogue.dialogueId "
         )
+        params.extend(dialogue_sort_params)
         if limit is not None:
             sql += " limit ?"
             params.append(limit)
@@ -2771,6 +2851,9 @@ def selectFetterBySpeakerAndKeyword(
     with closing(conn.cursor()) as cursor:
         speaker_exact, speaker_fuzzy = _build_like_patterns(speaker_keyword, langCode)
         keyword_exact, keyword_fuzzy = _build_like_patterns(keyword, langCode)
+        voice_sort_sql, voice_sort_params = _build_match_sort_case("voiceText.content", keyword, langCode)
+        speaker_sort_sql, speaker_sort_params = _build_match_sort_case("avatarName.content", speaker_keyword, langCode)
+        voice_length_sql = f"length({_build_normalized_match_expr('voiceText.content', langCode)})"
         sql = (
             "select fetters.voiceFileTextTextMapHash, fetters.avatarId "
             "from fetters "
@@ -2800,9 +2883,11 @@ def selectFetterBySpeakerAndKeyword(
             "textMap",
         )
         sql += (
-            "order by case when voiceText.content like ? escape '\\' then 0 else 1 end, "
-            "length(voiceText.content), fetters.fetterId "
+            f"order by {voice_sort_sql}, {speaker_sort_sql}, "
+            f"{voice_length_sql}, fetters.fetterId "
         )
+        params.extend(voice_sort_params)
+        params.extend(speaker_sort_params)
         if limit is not None:
             sql += " limit ?"
             params.append(limit)
