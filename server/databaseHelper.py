@@ -1,4 +1,6 @@
+import json
 import sqlite3
+import threading
 from contextlib import closing
 import re
 import os
@@ -158,6 +160,10 @@ _CACHE: dict[str, dict] = {
 
 
 _RAW_CHARACTER_NAME_CACHE: dict[str, str | None] = {}
+_FETTER_VOICE_TABLE = "fetterVoice"
+_FETTER_VOICE_SYNC_LOCK = threading.Lock()
+_FETTER_VOICE_SYNC_ATTEMPTED = False
+_FETTER_AVATAR_MAPPINGS: dict[str, int] | None = None
 
 
 def _get_gender_cache_key() -> str:
@@ -635,7 +641,7 @@ def _build_match_sort_case(
 ) -> tuple[str, list]:
     normalized_keyword = _normalize_match_keyword(keyword, lang_code)
     if not normalized_keyword:
-        return str(base_rank), []
+        return f"case when 1=1 then {base_rank} end", []
 
     normalized_expr = _build_normalized_match_expr(field_expr, lang_code)
     escaped = _escape_like(normalized_keyword)
@@ -716,7 +722,7 @@ def _build_textmap_query(
             "order by "
             "case when tm.hash = ? then 0 else 1 end, "
             f"{match_sort_sql}, "
-            "case when exists (select 1 from dialogue d join voice v on v.dialogueId = d.dialogueId where d.textHash = tm.hash limit 1) or exists (select 1 from fetters f join voice v on v.dialogueId = f.voiceFile and (v.avatarId = f.avatarId or v.avatarId = 0) where f.voiceFileTextTextMapHash = tm.hash limit 1) then 0 else 1 end, "
+            f"{_voice_order_expr('tm.hash')}, "
             "case when exists (select 1 from dialogue d join questTalk qt on d.talkId = qt.talkId join quest q on qt.questId = q.questId where d.textHash = tm.hash limit 1) then 0 else 1 end, "
             f"{normalized_length_sql} "
         )
@@ -726,7 +732,7 @@ def _build_textmap_query(
         sql += (
             "order by "
             f"{match_sort_sql}, "
-            "case when exists (select 1 from dialogue d join voice v on v.dialogueId = d.dialogueId where d.textHash = tm.hash limit 1) or exists (select 1 from fetters f join voice v on v.dialogueId = f.voiceFile and (v.avatarId = f.avatarId or v.avatarId = 0) where f.voiceFileTextTextMapHash = tm.hash limit 1) then 0 else 1 end, "
+            f"{_voice_order_expr('tm.hash')}, "
             "case when exists (select 1 from dialogue d join questTalk qt on d.talkId = qt.talkId join quest q on qt.questId = q.questId where d.textHash = tm.hash limit 1) then 0 else 1 end, "
             f"{normalized_length_sql} "
         )
@@ -881,7 +887,288 @@ def _subtitle_file_candidates(file_name: str | None, langs: list[int] | None = N
     return candidates
 
 
-def _voice_exists_expr(text_hash_field: str) -> str:
+def _ensure_fetter_voice_schema(cursor: sqlite3.Cursor | None = None) -> None:
+    def ensure(local_cursor: sqlite3.Cursor) -> None:
+        row = local_cursor.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name=?",
+            (_FETTER_VOICE_TABLE,),
+        ).fetchone()
+        if row:
+            columns = {
+                column_row[1]
+                for column_row in local_cursor.execute(f"PRAGMA table_info({_FETTER_VOICE_TABLE})").fetchall()
+            }
+            if "avatarId" not in columns:
+                local_cursor.execute(f"DROP TABLE IF EXISTS {_FETTER_VOICE_TABLE}")
+
+        local_cursor.execute(
+            f"""
+            CREATE TABLE IF NOT EXISTS {_FETTER_VOICE_TABLE}
+            (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                avatarId INTEGER NOT NULL,
+                voiceFile INTEGER NOT NULL,
+                voicePath TEXT NOT NULL
+            )
+            """
+        )
+        local_cursor.execute(
+            f"CREATE INDEX IF NOT EXISTS {_FETTER_VOICE_TABLE}_avatarId_voiceFile_index "
+            f"ON {_FETTER_VOICE_TABLE}(avatarId, voiceFile)"
+        )
+        local_cursor.execute(
+            f"CREATE UNIQUE INDEX IF NOT EXISTS {_FETTER_VOICE_TABLE}_avatarId_voiceFile_voicePath_uindex "
+            f"ON {_FETTER_VOICE_TABLE}(avatarId, voiceFile, voicePath)"
+        )
+
+    if cursor is not None:
+        ensure(cursor)
+        return
+    with closing(conn.cursor()) as local_cursor:
+        ensure(local_cursor)
+    conn.commit()
+
+
+def _resolve_anime_game_data_root() -> Path | None:
+    candidates: list[Path] = []
+    env_path = os.environ.get("GTS_ANIME_GAME_DATA", "").strip()
+    if env_path:
+        candidates.append(Path(env_path))
+    try:
+        repo_root = config.project_root()
+        candidates.extend([
+            repo_root / "AnimeGameData",
+            repo_root.parent / "AnimeGameData",
+        ])
+    except Exception:
+        pass
+    current_root = Path(__file__).resolve().parents[1]
+    candidates.extend([
+        current_root / "AnimeGameData",
+        current_root.parent / "AnimeGameData",
+    ])
+
+    seen: set[str] = set()
+    for candidate in candidates:
+        normalized = candidate.expanduser()
+        key = str(normalized)
+        if key in seen:
+            continue
+        seen.add(key)
+        if (normalized / "BinOutput" / "Voice" / "Items").is_dir():
+            return normalized
+    return None
+
+
+def _collect_fetter_switch_names(config_node, output: set[str]) -> None:
+    if isinstance(config_node, dict):
+        for value in config_node.values():
+            _collect_fetter_switch_names(value, output)
+        return
+    if isinstance(config_node, list):
+        for item in config_node:
+            _collect_fetter_switch_names(item, output)
+        return
+    if isinstance(config_node, str):
+        lowered = config_node.lower()
+        if lowered.startswith("switch_"):
+            output.add(lowered)
+
+
+def _extract_fetter_internal_names(avatar_config: dict) -> set[str]:
+    switch_names: set[str] = set()
+    _collect_fetter_switch_names(avatar_config, switch_names)
+    generic_names = {
+        "switch_boy",
+        "switch_girl",
+        "switch_male",
+        "switch_female",
+        "switch_loli",
+        "switch_lady",
+        "switch_other",
+    }
+    filtered = {name for name in switch_names if name not in generic_names}
+    if filtered:
+        return filtered
+
+    legacy_name = (
+        avatar_config.get("PLJBIDOIHEA", {})
+        .get("KDKDKOMMCOB", {})
+        .get("GLMJHDNIGID")
+    )
+    if isinstance(legacy_name, str) and legacy_name:
+        return {legacy_name.lower()}
+    return set()
+
+
+def _load_fetter_avatar_mappings() -> dict[str, int]:
+    global _FETTER_AVATAR_MAPPINGS
+    if _FETTER_AVATAR_MAPPINGS is not None:
+        return _FETTER_AVATAR_MAPPINGS
+
+    data_root = _resolve_anime_game_data_root()
+    if data_root is None:
+        _FETTER_AVATAR_MAPPINGS = {}
+        return _FETTER_AVATAR_MAPPINGS
+
+    avatar_excel = data_root / "ExcelBinOutput" / "AvatarExcelConfigData.json"
+    avatar_dir = data_root / "BinOutput" / "Avatar"
+    if not avatar_excel.is_file() or not avatar_dir.is_dir():
+        _FETTER_AVATAR_MAPPINGS = {}
+        return _FETTER_AVATAR_MAPPINGS
+
+    try:
+        with open(avatar_excel, encoding="utf-8") as fp:
+            avatars_json = json.load(fp)
+    except Exception:
+        _FETTER_AVATAR_MAPPINGS = {}
+        return _FETTER_AVATAR_MAPPINGS
+
+    mappings: dict[str, int] = {}
+    for avatar in avatars_json:
+        if not isinstance(avatar, dict):
+            continue
+        avatar_id = avatar.get("id")
+        if not isinstance(avatar_id, int) or avatar_id >= 11000000:
+            continue
+        icon_name = str(avatar.get("iconName") or "")
+        if len(icon_name) <= 14:
+            continue
+        config_path = avatar_dir / f"ConfigAvatar_{icon_name[14:]}.json"
+        if not config_path.is_file():
+            continue
+        try:
+            with open(config_path, encoding="utf-8") as fp:
+                avatar_config = json.load(fp)
+        except Exception:
+            continue
+        for internal_name in _extract_fetter_internal_names(avatar_config):
+            mappings.setdefault(internal_name, avatar_id)
+
+    _FETTER_AVATAR_MAPPINGS = mappings
+    return mappings
+
+
+def _map_fetter_switch_name_to_avatar_id(raw_name: str | None) -> int:
+    text = str(raw_name or "").strip().lower()
+    if not text:
+        return 0
+    if text.startswith("switch_gcg") or text.startswith("gcg"):
+        return 0
+    if text == "switch_hero":
+        return 10000005
+    if text == "switch_heroine":
+        return 10000007
+    if text == "switch_tartaglia_melee":
+        text = "switch_tartaglia"
+    return _load_fetter_avatar_mappings().get(text, 0)
+
+
+def _extract_fetter_voice_rows(content: dict) -> list[tuple[int, int, str]]:
+    raw_type = content.get("IACPGADBANJ")
+    if raw_type is None:
+        raw_type = content.get("Type", content.get("type"))
+    if str(raw_type or "").strip().lower() != "fetter":
+        return []
+
+    raw_voice_file = content.get("MGOMDNKKLCP")
+    if raw_voice_file is None:
+        raw_voice_file = content.get("voiceFile", content.get("Id", content.get("id")))
+    try:
+        voice_file = int(raw_voice_file)
+    except (TypeError, ValueError):
+        return []
+
+    source_nodes = content.get("OPGDOEDEJOJ")
+    if source_nodes is None:
+        source_nodes = content.get("SourceNames", content.get("sourceNames", []))
+    if not isinstance(source_nodes, list):
+        return []
+
+    rows: list[tuple[int, int, str]] = []
+    seen_rows: set[tuple[int, str]] = set()
+    for source in source_nodes:
+        if not isinstance(source, dict):
+            continue
+        switch_name = (
+            source.get("IEPAMKPOOII")
+            or source.get("avatarName")
+            or source.get("GDIJGLOHHFM")
+            or source.get("switchName")
+        )
+        avatar_id = _map_fetter_switch_name_to_avatar_id(switch_name)
+        if avatar_id <= 0:
+            continue
+        voice_path = source.get("MDOCAGOFPAP")
+        if voice_path is None:
+            voice_path = source.get("sourceFileName", source.get("DCIHFJLBLAP", source.get("BJDAJEKPCFP")))
+        voice_path_text = str(voice_path or "").strip()
+        row_key = (avatar_id, voice_path_text)
+        if not voice_path_text or row_key in seen_rows:
+            continue
+        seen_rows.add(row_key)
+        rows.append((avatar_id, voice_file, voice_path_text))
+    return rows
+
+
+def _load_fetter_voice_rows_from_data() -> list[tuple[int, int, str]]:
+    data_root = _resolve_anime_game_data_root()
+    if data_root is None:
+        return []
+
+    items_dir = data_root / "BinOutput" / "Voice" / "Items"
+    rows: list[tuple[int, str]] = []
+    for json_file in sorted(items_dir.glob("*.json")):
+        try:
+            with open(json_file, encoding="utf-8") as fp:
+                payload = json.load(fp)
+        except Exception:
+            continue
+        if not isinstance(payload, dict):
+            continue
+        for content in payload.values():
+            if not isinstance(content, dict):
+                continue
+            rows.extend(_extract_fetter_voice_rows(content))
+    return rows
+
+
+def _ensure_fetter_voice_data() -> None:
+    global _FETTER_VOICE_SYNC_ATTEMPTED
+    _ensure_fetter_voice_schema()
+    with closing(conn.cursor()) as cursor:
+        row = cursor.execute(f"SELECT 1 FROM {_FETTER_VOICE_TABLE} LIMIT 1").fetchone()
+        if row:
+            return
+    if _FETTER_VOICE_SYNC_ATTEMPTED:
+        return
+
+    with _FETTER_VOICE_SYNC_LOCK:
+        with closing(conn.cursor()) as cursor:
+            _ensure_fetter_voice_schema(cursor)
+            row = cursor.execute(f"SELECT 1 FROM {_FETTER_VOICE_TABLE} LIMIT 1").fetchone()
+            if row:
+                _FETTER_VOICE_SYNC_ATTEMPTED = True
+                conn.commit()
+                return
+
+        rows = _load_fetter_voice_rows_from_data()
+        with closing(conn.cursor()) as cursor:
+            _ensure_fetter_voice_schema(cursor)
+            if rows:
+                cursor.executemany(
+                    f"""
+                    INSERT INTO {_FETTER_VOICE_TABLE}(avatarId, voiceFile, voicePath)
+                    VALUES (?, ?, ?)
+                    ON CONFLICT(avatarId, voiceFile, voicePath) DO NOTHING
+                    """,
+                    rows,
+                )
+        conn.commit()
+        _FETTER_VOICE_SYNC_ATTEMPTED = True
+
+
+def _text_hash_has_voice_expr(text_hash_field: str) -> str:
     return (
         "exists ("
         "select 1 from dialogue d "
@@ -889,11 +1176,157 @@ def _voice_exists_expr(text_hash_field: str) -> str:
         f"where d.textHash = {text_hash_field} limit 1"
         ") or exists ("
         "select 1 from fetters f "
-        "join voice v on v.dialogueId = f.voiceFile "
-        "and (v.avatarId = f.avatarId or v.avatarId = 0) "
+        f"join {_FETTER_VOICE_TABLE} fv on fv.avatarId = f.avatarId and fv.voiceFile = f.voiceFile "
         f"where f.voiceFileTextTextMapHash = {text_hash_field} limit 1"
         ")"
     )
+
+
+def _voice_exists_expr(text_hash_field: str) -> str:
+    return _text_hash_has_voice_expr(text_hash_field)
+
+
+def _voice_order_expr(text_hash_field: str) -> str:
+    return (
+        "case when "
+        f"{_text_hash_has_voice_expr(text_hash_field)} "
+        "then 0 else 1 end"
+    )
+
+
+def _has_avatar_scoped_fetter_voice(textHash: int) -> bool:
+    _ensure_fetter_voice_data()
+    with closing(conn.cursor()) as cursor:
+        sql = (
+            "SELECT EXISTS("
+            "SELECT 1 FROM dialogue d "
+            "JOIN voice v ON v.dialogueId = d.dialogueId "
+            "WHERE d.textHash = ?"
+            ") OR EXISTS("
+            "SELECT 1 FROM fetters f "
+            f"JOIN {_FETTER_VOICE_TABLE} fv ON fv.avatarId = f.avatarId AND fv.voiceFile = f.voiceFile "
+            "WHERE f.voiceFileTextTextMapHash = ?"
+            ")"
+        )
+        cursor.execute(sql, (textHash, textHash))
+        row = cursor.fetchone()
+        return bool(row and row[0])
+
+
+def _select_avatar_scoped_voice_path_from_text_hash(textHash: int):
+    _ensure_fetter_voice_data()
+    with closing(conn.cursor()) as cursor:
+        sql_dialogue = (
+            "select voicePath from dialogue "
+            "join voice on voice.dialogueId = dialogue.dialogueId "
+            "where textHash=? limit 1"
+        )
+        cursor.execute(sql_dialogue, (textHash,))
+        match = cursor.fetchone()
+        if match:
+            return match[0]
+
+        sql_fetter = (
+            "select fv.voicePath from fetters "
+            f"join {_FETTER_VOICE_TABLE} fv on fv.avatarId = fetters.avatarId and fv.voiceFile = fetters.voiceFile "
+            "where voiceFileTextTextMapHash=? limit 1"
+        )
+        cursor.execute(sql_fetter, (textHash,))
+        match = cursor.fetchone()
+        if match:
+            return match[0]
+        return None
+
+
+def _get_avatar_scoped_voice_path(voice_hash: str, lang: int):
+    try:
+        text_hash = int(voice_hash)
+    except (TypeError, ValueError):
+        return None
+    return _select_avatar_scoped_voice_path_from_text_hash(text_hash)
+
+
+def _select_avatar_scoped_voice_items(avatarId: int, limit: int = 400):
+    _ensure_fetter_voice_data()
+    with closing(conn.cursor()) as cursor:
+        sql = (
+            f"select fetters.voiceTitleTextMapHash, fetters.voiceFileTextTextMapHash, fv.voicePath "
+            "from fetters "
+            f"left join {_FETTER_VOICE_TABLE} fv on fv.avatarId = fetters.avatarId and fv.voiceFile = fetters.voiceFile "
+            "where fetters.avatarId=? "
+            "order by fetters.fetterId, fv.voicePath "
+            "limit ?"
+        )
+        cursor.execute(sql, (avatarId, limit))
+        return cursor.fetchall()
+
+
+def _select_avatar_scoped_voice_items_by_filters(
+    keyword: str | None,
+    langCode: int,
+    limit: int | None = 800,
+    created_version: str | None = None,
+    updated_version: str | None = None,
+    version_lang_code: int | None = None,
+):
+    _ensure_fetter_voice_data()
+    with closing(conn.cursor()) as cursor:
+        keyword_text = (keyword or "").strip()
+        exact = fuzzy = None
+        if keyword_text:
+            escaped = _escape_like(keyword_text)
+            exact = f"%{escaped}%"
+            fuzzy = exact
+
+        sql = (
+            "select fetters.avatarId, fetters.voiceTitleTextMapHash, "
+            f"fetters.voiceFileTextTextMapHash, fv.voicePath "
+            "from fetters "
+            f"left join {_FETTER_VOICE_TABLE} fv on fv.avatarId = fetters.avatarId and fv.voiceFile = fetters.voiceFile "
+            "left join textMap as titleText on titleText.hash = fetters.voiceTitleTextMapHash "
+            "and titleText.lang = ? "
+            "left join textMap as contentText on contentText.hash = fetters.voiceFileTextTextMapHash "
+            "and contentText.lang = ? "
+            "where 1=1 "
+        )
+        params = [langCode, langCode]
+
+        if keyword_text:
+            sql += (
+                "and ("
+                "(titleText.content like ? escape '\\' or titleText.content like ? escape '\\') "
+                "or (contentText.content like ? escape '\\' or contentText.content like ? escape '\\')"
+                ") "
+            )
+            params.extend([exact, fuzzy, exact, fuzzy])
+
+        sql = _append_textmap_exists_version_filter(
+            sql,
+            params,
+            "fetters.voiceFileTextTextMapHash",
+            created_version,
+            updated_version,
+            version_lang_code,
+        )
+
+        if keyword_text:
+            sql += (
+                "order by case "
+                "when titleText.content like ? escape '\\' then 0 "
+                "when contentText.content like ? escape '\\' then 1 "
+                "else 2 end, "
+                "length(coalesce(titleText.content, contentText.content, '')), fetters.fetterId, fv.voicePath "
+            )
+            params.extend([exact, exact])
+        else:
+            sql += "order by fetters.fetterId, fv.voicePath "
+
+        if limit is not None:
+            sql += "limit ?"
+            params.append(limit)
+
+        cursor.execute(sql, params)
+        return cursor.fetchall()
 
 
 def _append_version_filter_clause(
@@ -1105,6 +1538,7 @@ def selectTextMapFromKeywordPaged(
 
     这些优化措施在保证搜索速度的同时，不会增加数据库体积，实现了速度与体积的平衡
     """
+    _ensure_fetter_voice_data()
     with closing(conn.cursor()) as cursor:
         exact, fuzzy = _build_like_patterns(keyWord, langCode)
         fts_match = _build_textmap_fts_match(keyWord, langCode)
@@ -1224,6 +1658,7 @@ def countTextMapFromKeywordVoice(
 
     这些优化措施在保证计数速度的同时，不会增加数据库体积，实现了速度与体积的平衡
     """
+    _ensure_fetter_voice_data()
     with closing(conn.cursor()) as cursor:
         exact, fuzzy = _build_like_patterns(keyWord, langCode)
         fts_match = _build_textmap_fts_match(keyWord, langCode)
@@ -2209,6 +2644,13 @@ def selectAvatarVoiceItemsByFilters(
         return cursor.fetchall()
 
 
+_hasVoiceForTextHashDb_impl = _has_avatar_scoped_fetter_voice
+_selectVoicePathFromTextHash_impl = _select_avatar_scoped_voice_path_from_text_hash
+_getVoicePath_impl = _get_avatar_scoped_voice_path
+_selectAvatarVoiceItems_impl = _select_avatar_scoped_voice_items
+_selectAvatarVoiceItemsByFilters_impl = _select_avatar_scoped_voice_items_by_filters
+
+
 def selectAvatarStoryItemsByFilters(
     keyword: str | None,
     langCode: int,
@@ -3174,3 +3616,37 @@ def selectSubtitleContextBySubtitleId(subtitleId: int, langs: list[int]):
         params = file_candidates + langs + [anchor_start - 0.5, anchor_start + 0.5]
         cursor.execute(sql, params)
         return cursor.fetchall()
+
+
+def hasVoiceForTextHashDb(textHash: int) -> bool:
+    return _hasVoiceForTextHashDb_impl(textHash)
+
+
+def selectVoicePathFromTextHash(textHash: int):
+    return _selectVoicePathFromTextHash_impl(textHash)
+
+
+def getVoicePath(voice_hash: str, lang: int):
+    return _getVoicePath_impl(voice_hash, lang)
+
+
+def selectAvatarVoiceItems(avatarId: int, limit: int = 400):
+    return _selectAvatarVoiceItems_impl(avatarId, limit)
+
+
+def selectAvatarVoiceItemsByFilters(
+    keyword: str | None,
+    langCode: int,
+    limit: int | None = 800,
+    created_version: str | None = None,
+    updated_version: str | None = None,
+    version_lang_code: int | None = None,
+):
+    return _selectAvatarVoiceItemsByFilters_impl(
+        keyword,
+        langCode,
+        limit=limit,
+        created_version=created_version,
+        updated_version=updated_version,
+        version_lang_code=version_lang_code,
+    )

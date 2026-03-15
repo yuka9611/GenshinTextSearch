@@ -6,7 +6,7 @@ const queryBaidu = (keyword) => {
     return {
         "k": "KEYWORD",
         "v": "KEYWORD EXPLAIN"
-    }
+    };
     // return request.post("/api/baiduQuery", {
     //     keyword: keyword
     // });
@@ -41,20 +41,26 @@ const queryByKeyword = (
  * @return {Promise<ArrayBuffer|null>}
  */
 const getVoiceOver = async (voicePath, langCode) => {
+    const voiceOverUrl = request.defaults.baseURL
+        ? new URL("/api/getVoiceOver", request.defaults.baseURL).toString()
+        : "/api/getVoiceOver";
 
-    let ans = await axios.post(request.defaults.baseURL ? request.defaults.baseURL: "" + "api/getVoiceOver", {
+    const ans = await axios.post(voiceOverUrl, {
         voicePath: voicePath,
         langCode: parseInt(langCode)
     }, {
-        responseType: 'arraybuffer',
+        responseType: "arraybuffer",
     });
 
-    if(ans.headers.has("Error")) {
-        console.log("戳了")
-        return null
+    if (ans.headers?.error === "True") {
+        return null;
     }
 
-    return ans.data
+    if (!ans.data || ans.data.byteLength === 0) {
+        return null;
+    }
+
+    return ans.data;
 };
 
 const getTalkFromHash = withCache((textHash, searchLang) => {

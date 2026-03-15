@@ -30,7 +30,7 @@
       </el-form-item>
 
       <el-form-item label="双子">
-        <el-select v-model="selectedTwin" placeholder="Select" class="languageSelector">
+        <el-select v-model="selectedTwin" placeholder="请选择" class="languageSelector">
           <el-option v-for="(v, k) in twinList" :label="v.label" :value="v.value" :key="k" />
         </el-select>
       </el-form-item>

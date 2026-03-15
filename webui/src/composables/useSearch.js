@@ -143,7 +143,8 @@ const useSearch = () => {
   }
 
   const goToPage = async (page) => {
-    if (!keywordLast.value && !speakerLast.value && !createdVersionLast.value && !updatedVersionLast.value) {
+    const hasVoiceFilter = voiceFilterLast.value && voiceFilterLast.value !== 'all'
+    if (!keywordLast.value && !speakerLast.value && !createdVersionLast.value && !updatedVersionLast.value && !hasVoiceFilter) {
       return
     }
     const safePage = Math.min(Math.max(1, page), totalPages.value)

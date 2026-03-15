@@ -6,6 +6,7 @@ import api from '@/api/keywordQuery'
 import TranslateDisplay from '@/components/ResultEntry.vue'
 import AudioPlayer from '@liripeng/vue-audio-player'
 import * as converter from '@/assets/wem2wav'
+import { ElMessage } from 'element-plus'
 import useLanguage from '@/composables/useLanguage'
 import useVersion from '@/composables/useVersion'
 import useSearchCommon from '@/composables/useSearchCommon'
@@ -43,6 +44,9 @@ const uiText = {
   clearPlaylist: '清空播放列表',
   noVoiceResults: '没有语音结果',
   loadingVoices: '加载语音中',
+  audioUnavailable: '当前语言暂无语音',
+  audioMissing: '未找到语音文件',
+  noPlayableAudio: '所选语言没有可播放的语音',
 }
 
 const formatText = (template, values) => {
@@ -102,18 +106,6 @@ onBeforeMount(async () => {
 })
 
 const availableVoiceLanguages = computed(() => global.voiceLanguages || {})
-const voiceLanguageOptions = computed(() => {
-  return Object.keys(availableVoiceLanguages.value).map((key) => ({
-    id: key,
-    name: availableVoiceLanguages.value[key]
-  }))
-})
-
-watch(voiceLanguageOptions, (options) => {
-  if (!selectedVoiceLanguage.value && options.length > 0) {
-    selectedVoiceLanguage.value = options[0].id
-  }
-}, { immediate: true })
 
 const deriveCategory = (title) => {
   const raw = (title || '').trim()
@@ -172,6 +164,40 @@ const filteredVoices = computed(() => {
     return false
   })
 })
+
+const isVoiceAvailableForEntry = (entry, langCode) => {
+  const availableLangs = entry?.availableVoiceLangs || []
+  return entry?.voicePaths?.length > 0 && availableLangs.includes(Number(langCode))
+}
+
+const voiceLanguageOptions = computed(() => {
+  const activeLangs = new Set()
+  for (const entry of filteredVoices.value) {
+    for (const langCode of entry.availableVoiceLangs || []) {
+      const key = String(langCode)
+      if (availableVoiceLanguages.value[key]) {
+        activeLangs.add(key)
+      }
+    }
+  }
+
+  return Array.from(activeLangs).map((key) => ({
+    id: key,
+    name: availableVoiceLanguages.value[key]
+  }))
+})
+
+const playableFilteredVoices = computed(() => {
+  return filteredVoices.value.filter((entry) => isVoiceAvailableForEntry(entry, selectedVoiceLanguage.value))
+})
+
+watch(voiceLanguageOptions, (options) => {
+  const firstOption = options[0]?.id || ''
+  const currentOptionStillValid = options.some((option) => option.id === selectedVoiceLanguage.value)
+  if (!currentOptionStillValid) {
+    selectedVoiceLanguage.value = firstOption
+  }
+}, { immediate: true })
 
 const highlightKeyword = computed(() => textFilter.value.trim())
 
@@ -342,9 +368,10 @@ const onVoicePlay = (voiceUrl) => {
 const getAudioUrlForEntry = async (entry) => {
   const voicePath = entry.voicePaths?.[0]
   const langCode = selectedVoiceLanguage.value
-  if (!voicePath || !langCode) return null
+  if (!voicePath || !langCode || !isVoiceAvailableForEntry(entry, langCode)) return null
   try {
     const buffer = await api.getVoiceOver(voicePath, langCode)
+    if (!buffer) return null
     return await converter.convertBufferedArray(buffer)
   } catch (error) {
     console.error(error)
@@ -353,7 +380,11 @@ const getAudioUrlForEntry = async (entry) => {
 }
 
 const loadPlaylist = async () => {
-  const items = filteredVoices.value
+  const items = playableFilteredVoices.value
+  if (items.length === 0) {
+    ElMessage.warning(uiText.noPlayableAudio)
+    return
+  }
   playlistLoading.total = items.length
   playlistLoading.current = 0
   playlistLoading.percentage = 0
@@ -372,7 +403,10 @@ const loadPlaylist = async () => {
   }
 
   playlistLoading.show = false
-  if (urls.length === 0) return
+  if (urls.length === 0) {
+    ElMessage.warning(uiText.noPlayableAudio)
+    return
+  }
 
   if (firstShowPlayer.value) {
     showPlayer.value = true
@@ -476,7 +510,7 @@ setupVersionWatchers(onSearchClicked)
             :value="item.id"
           />
         </el-select>
-        <el-button size="small" type="primary" @click="loadPlaylist">{{ uiText.playCurrent }}</el-button>
+        <el-button size="small" type="primary" :disabled="playableFilteredVoices.length === 0" @click="loadPlaylist">{{ uiText.playCurrent }}</el-button>
         <el-button size="small" @click="clearPlaylist">{{ uiText.clearPlaylist }}</el-button>
       </div>
 

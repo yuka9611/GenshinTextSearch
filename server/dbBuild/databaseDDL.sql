@@ -186,6 +186,22 @@ create table voice
 create index voice_dialogueId_index
     on voice (dialogueId);
 
+create table fetterVoice
+(
+    id          integer
+        constraint fetterVoice_pk
+            primary key autoincrement,
+    avatarId    integer,
+    voiceFile   integer,
+    voicePath   TEXT
+);
+
+create index fetterVoice_avatarId_voiceFile_index
+    on fetterVoice (avatarId, voiceFile);
+
+create unique index fetterVoice_avatarId_voiceFile_voicePath_uindex
+    on fetterVoice (avatarId, voiceFile, voicePath);
+
 
 create table npc
 (
