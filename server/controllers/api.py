@@ -382,7 +382,8 @@ def keywordQuery():
     has_speaker = speaker and speaker.strip() != ""
     has_created = createdVersion and str(createdVersion).strip() != ""
     has_updated = updatedVersion and str(updatedVersion).strip() != ""
-    if not has_keyword and not has_speaker and not has_created and not has_updated:
+    has_voice_filter = voiceFilter in ("with", "without")
+    if not has_keyword and not has_speaker and not has_created and not has_updated and not has_voice_filter:
         return jsonify({
             "data": {
                 "contents": [],

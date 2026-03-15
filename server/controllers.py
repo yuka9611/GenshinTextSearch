@@ -184,6 +184,36 @@ def selectVoicePathFromTextHash(textHash: int):
     return databaseHelper.selectVoicePathFromTextHash(textHash)
 
 
+def _get_available_voice_langs(voice_path: str | None, langs: list[int] | None) -> list[int]:
+    if not voice_path:
+        return []
+
+    available_langs = []
+    for lang in list(dict.fromkeys(langs or [])):
+        if lang not in languagePackReader.langPackages:
+            continue
+        if languagePackReader.checkAudioBin(voice_path, lang):
+            available_langs.append(lang)
+    return available_langs
+
+
+def _attach_voice_metadata(obj: dict, voice_path: str | None, langs: list[int] | None) -> dict:
+    obj.setdefault("voicePaths", [])
+    obj.setdefault("availableVoiceLangs", [])
+    if not voice_path:
+        return obj
+
+    if voice_path not in obj["voicePaths"]:
+        obj["voicePaths"].append(voice_path)
+
+    known_langs = set(obj["availableVoiceLangs"])
+    for lang in _get_available_voice_langs(voice_path, langs):
+        if lang not in known_langs:
+            obj["availableVoiceLangs"].append(lang)
+            known_langs.add(lang)
+    return obj
+
+
 def selectVoiceOriginFromTextHash(textHash: int, langCode: int) -> tuple[str, bool]:
     origin = databaseHelper.getSourceFromDialogue(textHash, langCode)
     if origin is not None:
@@ -204,7 +234,7 @@ def queryTextHashInfo(textHash: int, langs: 'list[int]', sourceLangCode: int, qu
     - 查询语音路径
     - 获取版本信息
     """
-    obj = {'translates': {}, 'voicePaths': [], 'hash': textHash}
+    obj = {'translates': {}, 'voicePaths': [], 'availableVoiceLangs': [], 'hash': textHash}
     # 去重并添加源语言
     lang_list = list(dict.fromkeys(langs or []))
     if sourceLangCode and sourceLangCode not in lang_list:
@@ -226,15 +256,7 @@ def queryTextHashInfo(textHash: int, langs: 'list[int]', sourceLangCode: int, qu
 
     # 查询语音路径
     voicePath = selectVoicePathFromTextHash(textHash)
-    if voicePath is not None:
-        voiceExist = False
-        for lang in lang_list:
-            if lang in languagePackReader.langPackages and languagePackReader.checkAudioBin(voicePath, lang):
-                voiceExist = True
-                break
-
-        if voiceExist:
-            obj['voicePaths'].append(voicePath)
+    _attach_voice_metadata(obj, voicePath, lang_list)
 
     # 添加版本信息
     created_raw, updated_raw = databaseHelper.getTextMapVersionInfo(textHash, sourceLangCode)
@@ -465,6 +487,36 @@ def _sort_entries_by_match(
 
     def sort_key(entry: dict):
         return _best_field_match(field_getter(entry), keyword_trim, langCode)
+
+    entries.sort(key=sort_key)
+    return entries
+
+
+def _coerce_sort_int(value, fallback: int = 10**12) -> int:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return fallback
+
+
+def _sort_entries_by_match_with_exact_id(
+    entries: list[dict],
+    keyword: str,
+    langCode: int,
+    field_getter,
+    id_getter,
+    stable_getter=None,
+):
+    keyword_trim = (keyword or "").strip()
+    if not keyword_trim:
+        return entries
+
+    def sort_key(entry: dict):
+        match_key = _best_field_match(field_getter(entry), keyword_trim, langCode)
+        stable_value = stable_getter(entry) if stable_getter else ""
+        if match_key[0] == 0:
+            return (0, _coerce_sort_int(id_getter(entry)), match_key[1], match_key[2], stable_value)
+        return (1, match_key[0], match_key[1], match_key[2], stable_value)
 
     entries.sort(key=sort_key)
     return entries
@@ -1151,6 +1203,7 @@ def _build_subtitle_obj(fileName, content, startTime, endTime, subtitleId, creat
     obj = {
         'translates': {},
         'voicePaths': [],
+        'availableVoiceLangs': [],
         'hash': fileHash,
         'isTalk': False,
         'origin': origin,
@@ -1443,7 +1496,7 @@ def searchNameEntries(
                     **_build_version_fields(created_raw, updated_raw),
                 })
 
-    _sort_entries_by_match(
+    _sort_entries_by_match_with_exact_id(
         quests,
         keyword_trim,
         langCode,
@@ -1452,12 +1505,16 @@ def searchNameEntries(
             entry.get("chapterName"),
             str(entry.get("questId", "")),
         ],
+        lambda entry: entry.get("questId"),
+        lambda entry: str(entry.get("questId", "")),
     )
-    _sort_entries_by_match(
+    _sort_entries_by_match_with_exact_id(
         readables,
         keyword_trim,
         langCode,
         lambda entry: [entry.get("title"), entry.get("fileName")],
+        lambda entry: entry.get("readableId"),
+        lambda entry: str(entry.get("fileName", "")),
     )
 
     return {
@@ -1522,14 +1579,7 @@ def getAvatarVoices(avatarId: int, searchLang: int | None = None):
         created_raw, updated_raw = databaseHelper.getTextMapVersionInfo(textHash, sourceLangCode)
         obj.update(_build_version_fields(created_raw, updated_raw))
 
-        if voicePath and voicePath not in obj.get('voicePaths', []):
-            voiceExist = False
-            for lang in langs:
-                if lang in languagePackReader.langPackages and languagePackReader.checkAudioBin(voicePath, lang):
-                    voiceExist = True
-                    break
-            if voiceExist:
-                obj['voicePaths'].append(voicePath)
+        _attach_voice_metadata(obj, voicePath, langs)
 
         voices.append(obj)
 
@@ -1596,13 +1646,14 @@ def getAvatarStories(avatarId: int, searchLang: int | None = None):
                     created_raw, updated_raw = None, None
                 version_cache[context_hash] = (created_raw, updated_raw)
 
-            stories.append({
-                "translates": translates,
-                "voicePaths": [],
-                "hash": context_hash,
-                "isTalk": False,
-                "viewAsTextHash": True,
-                "disableDetail": True,
+                stories.append({
+                    "translates": translates,
+                    "voicePaths": [],
+                    "availableVoiceLangs": [],
+                    "hash": context_hash,
+                    "isTalk": False,
+                    "viewAsTextHash": True,
+                    "disableDetail": True,
                 "origin": origin,
                 "storyTitle": title or "",
                 "fetterId": fetterId,
@@ -1684,14 +1735,7 @@ def searchAvatarVoicesByFilters(
         obj['avatarId'] = avatarId
         obj['avatarName'] = avatarName or ""
 
-        if voicePath and voicePath not in obj.get('voicePaths', []):
-            voiceExist = False
-            for lang in langs:
-                if lang in languagePackReader.langPackages and languagePackReader.checkAudioBin(voicePath, lang):
-                    voiceExist = True
-                    break
-            if voiceExist:
-                obj['voicePaths'].append(voicePath)
+        _attach_voice_metadata(obj, voicePath, langs)
 
         voices.append(obj)
 
@@ -1790,6 +1834,7 @@ def searchAvatarStoriesByFilters(
         stories.append({
             "translates": translates,
             "voicePaths": [],
+            "availableVoiceLangs": [],
             "hash": contextHash,
             "isTalk": False,
             "viewAsTextHash": True,
@@ -2009,6 +2054,7 @@ def getSubtitleContext(fileName: str, _subtitleId: int | None = None, searchLang
             'talker': '',
             'translates': translates,
             'voicePaths': [],
+            'availableVoiceLangs': [],
             'dialogueId': int((start_time or 0) * 1000) + idx,
             **_build_version_fields(created_raw, updated_raw),
         })
@@ -2103,3 +2149,132 @@ def setSourceLanguage(newSourceLanguage):
 
 def setIsMale(isMale):
     config.setIsMale(isMale)
+
+
+def getAvatarVoices(avatarId: int, searchLang: int | None = None):
+    langs, sourceLangCode, _keywordLangCode = _resolve_avatar_query_langs(searchLang)
+
+    avatarName = databaseHelper.getCharterName(avatarId, sourceLangCode)
+    voice_rows = databaseHelper.selectAvatarVoiceItems(avatarId)
+
+    voices = []
+    voice_map: dict[int, dict] = {}
+
+    for titleHash, textHash, voicePath in voice_rows:
+        if textHash is None:
+            continue
+
+        obj = voice_map.get(textHash)
+        if obj is None:
+            obj = queryTextHashInfo(textHash, langs, sourceLangCode)
+            obj['isTalk'] = False
+            obj['viewAsTextHash'] = True
+            obj['disableDetail'] = True
+            if avatarName:
+                if titleHash:
+                    title = _get_text_map_content_with_fallback(titleHash, sourceLangCode, langs)
+                    if title:
+                        obj['origin'] = f"{avatarName} ﾂｷ {title}"
+                        obj['voiceTitle'] = title
+                    else:
+                        obj['origin'] = avatarName
+                        obj['voiceTitle'] = ""
+                else:
+                    obj['origin'] = avatarName
+                    obj['voiceTitle'] = ""
+            else:
+                obj['voiceTitle'] = ""
+            created_raw, updated_raw = databaseHelper.getTextMapVersionInfo(textHash, sourceLangCode)
+            obj.update(_build_version_fields(created_raw, updated_raw))
+            voice_map[textHash] = obj
+            voices.append(obj)
+
+        _attach_voice_metadata(obj, voicePath, langs)
+
+    return {
+        "avatarId": avatarId,
+        "avatarName": avatarName,
+        "voices": voices
+    }
+
+
+def searchAvatarVoicesByFilters(
+    title_keyword: str | None = None,
+    searchLang: int | None = None,
+    created_version: str | None = None,
+    updated_version: str | None = None,
+    limit: int = 1200,
+):
+    langs, sourceLangCode, keywordLangCode = _resolve_avatar_query_langs(searchLang)
+
+    voice_rows = databaseHelper.selectAvatarVoiceItemsByFilters(
+        title_keyword,
+        keywordLangCode,
+        limit=limit,
+        created_version=created_version,
+        updated_version=updated_version,
+        version_lang_code=sourceLangCode,
+    )
+
+    voices = []
+    voice_map: dict[tuple[int, int], dict] = {}
+    avatar_name_cache: dict[int, str | None] = {}
+    title_cache: dict[int, str | None] = {}
+
+    for avatarId, titleHash, textHash, voicePath in voice_rows:
+        if textHash is None:
+            continue
+        dedupe_key = (avatarId, textHash)
+
+        obj = voice_map.get(dedupe_key)
+        if obj is None:
+            if avatarId not in avatar_name_cache:
+                avatar_name_cache[avatarId] = databaseHelper.getCharterName(avatarId, sourceLangCode)
+            avatarName = avatar_name_cache[avatarId]
+
+            if titleHash and titleHash not in title_cache:
+                title_cache[titleHash] = _normalize_text_map_content(
+                    databaseHelper.getTextMapContent(titleHash, sourceLangCode),
+                    sourceLangCode,
+                )
+            title = title_cache.get(titleHash) if titleHash else None
+
+            obj = queryTextHashInfo(textHash, langs, sourceLangCode)
+            obj['isTalk'] = False
+            obj['viewAsTextHash'] = True
+            obj['disableDetail'] = True
+            if avatarName and title:
+                obj['origin'] = f"{avatarName} ﾂｷ {title}"
+                obj['voiceTitle'] = title
+            elif avatarName:
+                obj['origin'] = avatarName
+                obj['voiceTitle'] = ""
+            elif title:
+                obj['origin'] = title
+                obj['voiceTitle'] = title
+            else:
+                obj['origin'] = "隗定牡隸ｭ髻ｳ"
+                obj['voiceTitle'] = ""
+            created_raw, updated_raw = databaseHelper.getTextMapVersionInfo(textHash, sourceLangCode)
+            obj.update(_build_version_fields(created_raw, updated_raw))
+
+            obj['avatarId'] = avatarId
+            obj['avatarName'] = avatarName or ""
+
+            voice_map[dedupe_key] = obj
+            voices.append(obj)
+
+        _attach_voice_metadata(obj, voicePath, langs)
+
+    _sort_entries_by_match(
+        voices,
+        title_keyword or "",
+        keywordLangCode,
+        lambda entry: [
+            entry.get("voiceTitle"),
+            entry.get("translates", {}).get(str(keywordLangCode)),
+        ],
+    )
+    return {
+        "voices": voices
+    }

@@ -39,6 +39,10 @@ const UI_TEXT = Object.freeze({
     updated: "更新",
     unknown: "未知",
     version: "版本",
+    talkId: "对话 ID",
+    audioUnavailable: "当前语言暂无语音",
+    audioMissing: "未找到语音文件",
+    noPlayableAudio: "当前语言没有可播放的语音",
 })
 
 const route = useRoute()
@@ -299,6 +303,25 @@ const displayLanguages = computed(() => {
     return langs
 })
 
+const isVoiceAvailableForLang = (entry, langCode) => {
+    const availableVoiceLangs = entry?.availableVoiceLangs || []
+    return entry?.voicePaths?.length > 0 && availableVoiceLangs.includes(Number(langCode))
+}
+
+const shouldShowVoiceButton = (entry, langCode) => {
+    if (!entry?.voicePaths?.length) {
+        return false
+    }
+    if (isVoiceAvailableForLang(entry, langCode)) {
+        return true
+    }
+    return !(entry?.availableVoiceLangs?.length > 0)
+}
+
+const hasPlayableVoicesForLang = (langCode) => {
+    return dialogues.value.some((entry) => isVoiceAvailableForLang(entry, langCode))
+}
+
 const dialogueGroups = computed(() => {
     if (!dialogues.value || dialogues.value.length === 0) {
         return []
@@ -386,6 +409,11 @@ const onVoicePlay = (voiceUrl, dialogueId) => {
 }
 
 const playAllLangVoice = async (langCode) => {
+    if (!hasPlayableVoicesForLang(langCode)) {
+        ElMessage.warning(UI_TEXT.noPlayableAudio)
+        return
+    }
+
     let newAudios = []
     playableDialogueIdList = []
     voiceListLoadingInfo.total = dialogues.value.length
@@ -394,14 +422,17 @@ const playAllLangVoice = async (langCode) => {
     if (!voiceListLoadingInfo.audioLoaded)
         voiceListLoadingInfo.showLoadingDialogue = true
     for(let dialogue of dialogues.value) {
-        if(!playVoiceButtonDict[langCode][dialogue.dialogueId]) {
+        const voiceButton = playVoiceButtonDict[langCode]?.[dialogue.dialogueId]
+        if(!voiceButton) {
             voiceListLoadingInfo.current += 1;
             voiceListLoadingInfo.percentage = 100 * voiceListLoadingInfo.current / voiceListLoadingInfo.total
             continue
         }
-        let currentUrl = await playVoiceButtonDict[langCode][dialogue.dialogueId].getAudioUrl()
-        newAudios.push(currentUrl)
-        playableDialogueIdList.push(dialogue.dialogueId)
+        let currentUrl = await voiceButton.getAudioUrl(false)
+        if (currentUrl) {
+            newAudios.push(currentUrl)
+            playableDialogueIdList.push(dialogue.dialogueId)
+        }
         voiceListLoadingInfo.current += 1;
         voiceListLoadingInfo.percentage = 100 * voiceListLoadingInfo.current / voiceListLoadingInfo.total
     }
@@ -410,7 +441,10 @@ const playAllLangVoice = async (langCode) => {
     voiceListLoadingInfo.audioLoaded = true
 
 
-    if(newAudios.length === 0) return
+    if(newAudios.length === 0) {
+        ElMessage.warning(UI_TEXT.noPlayableAudio)
+        return
+    }
 
     if(firstShowPlayer){
         showPlayer.value = true;
@@ -447,7 +481,7 @@ const onPlay = () => {
         let dialogueId = playableDialogueIdList[currentPlayingIndex.value]
         let langCode = Object.getOwnPropertyNames(playVoiceButtonDict)[0]
         let voiceButton = playVoiceButtonDict[langCode][dialogueId]
-        voiceButton.scrollTo()
+        voiceButton && voiceButton.scrollTo()
     }
 
 
@@ -539,7 +573,7 @@ onDeactivated(() => {
             </div>
             <div class="dialogueGroups">
                 <div v-for="group in dialogueGroups" :key="group.talkId || 'single'" class="dialogueGroup">
-                    <h3 v-if="group.talkId" class="dialogueGroupTitle">Talk ID: {{ group.talkId }}</h3>
+                    <h3 v-if="group.talkId" class="dialogueGroupTitle">{{ UI_TEXT.talkId }}: {{ group.talkId }}</h3>
                     <el-table :data="group.rows" :row-class-name="tableRowClassName">
                         <el-table-column prop="talker" :label="UI_TEXT.speaker" width="110" />
                         <el-table-column v-if="showDialogueVersions" :label="UI_TEXT.version" width="110">
@@ -569,15 +603,18 @@ onDeactivated(() => {
                             <el-table-column width="40">
                                 <template #header>
                                     <el-tooltip :content="UI_TEXT.playAll + global.languages[langCode] + UI_TEXT.voice">
-                                        <el-icon @click="playAllLangVoice(langCode)"><VideoPlay /></el-icon>
+                                        <el-icon :class="{ disabledPlayIcon: !hasPlayableVoicesForLang(langCode) }" @click="playAllLangVoice(langCode)"><VideoPlay /></el-icon>
                                     </el-tooltip>
                                 </template>
                                 <template #default="scope">
-                                    <span v-if="global.voiceLanguages[langCode]">
+                                    <span v-if="shouldShowVoiceButton(scope.row, langCode)">
                                         <PlayVoiceButton v-for="voice in scope.row.voicePaths"
-                                                         :voice-path="voice" :lang-code="langCode"
-                                                         @on-voice-play="(url) =>{ onVoicePlay(url, scope.row.dialogueId)}"
-                                                         :ref = "(el) => {registerVoicePlayButton(el, langCode, scope.row.dialogueId)}"
+                                                          :voice-path="voice" :lang-code="langCode"
+                                                          :disabled="!isVoiceAvailableForLang(scope.row, langCode)"
+                                                          :disabled-tooltip="UI_TEXT.audioUnavailable"
+                                                          :unavailable-message="UI_TEXT.audioMissing"
+                                                          @on-voice-play="(url) =>{ onVoicePlay(url, scope.row.dialogueId)}"
+                                                          :ref = "(el) => {registerVoicePlayButton(el, langCode, scope.row.dialogueId)}"
                                         />
                                     </span>
                                 </template>
@@ -790,6 +827,10 @@ onDeactivated(() => {
 
 :deep( .playingDialogue) {
     background-color: var(--el-color-primary-light-9);
+}
+
+.disabledPlayIcon {
+    opacity: 0.35;
 }
 
 @media (max-width: 720px) {

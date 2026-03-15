@@ -109,6 +109,10 @@ def getAvatarIdFromVoiceItemAvatarName(avatarNameFromVoiceItem: str):
     rawName = avatarNameFromVoiceItem.lower()
     if rawName.startswith("switch_gcg") or rawName.startswith("gcg"):
         return 0
+    if rawName == "switch_hero":
+        return 10000005
+    if rawName == "switch_heroine":
+        return 10000007
 
     rawNameTranslate = {
         "switch_tartaglia_melee": "switch_tartaglia",
@@ -133,6 +137,84 @@ def _resolve_voice_schema(content: dict):
     if "NDLOFEPMEMO" in content:
         return "HEKJMGHIJBM", "JKHGLBHOKIC", "BJDAJEKPCFP", "HPIPCKOOMLL", "NDLOFEPMEMO"
     return None
+
+
+def _ensure_fetter_voice_schema(cursor):
+    row = cursor.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name='fetterVoice'"
+    ).fetchone()
+    if row:
+        columns = {
+            column_row[1]
+            for column_row in cursor.execute("PRAGMA table_info(fetterVoice)").fetchall()
+        }
+        if "avatarId" not in columns:
+            cursor.execute("DROP TABLE IF EXISTS fetterVoice")
+    cursor.execute(
+        """
+        CREATE TABLE IF NOT EXISTS fetterVoice
+        (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            avatarId INTEGER NOT NULL,
+            voiceFile INTEGER NOT NULL,
+            voicePath TEXT NOT NULL
+        )
+        """
+    )
+    cursor.execute(
+        "CREATE INDEX IF NOT EXISTS fetterVoice_avatarId_voiceFile_index ON fetterVoice(avatarId, voiceFile)"
+    )
+    cursor.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS fetterVoice_avatarId_voiceFile_voicePath_uindex "
+        "ON fetterVoice(avatarId, voiceFile, voicePath)"
+    )
+
+
+def _extract_fetter_voice_rows(content: dict):
+    raw_type = content.get("IACPGADBANJ")
+    if raw_type is None:
+        raw_type = content.get("Type", content.get("type"))
+    if str(raw_type or "").strip().lower() != "fetter":
+        return []
+
+    raw_voice_file = content.get("MGOMDNKKLCP")
+    if raw_voice_file is None:
+        raw_voice_file = content.get("voiceFile", content.get("Id", content.get("id")))
+    try:
+        voice_file = int(raw_voice_file)
+    except (TypeError, ValueError):
+        return []
+
+    source_names = content.get("OPGDOEDEJOJ")
+    if source_names is None:
+        source_names = content.get("SourceNames", content.get("sourceNames", []))
+    if not isinstance(source_names, list):
+        return []
+
+    rows = []
+    seen_rows = set()
+    for source in source_names:
+        if not isinstance(source, dict):
+            continue
+        avatar_name = (
+            source.get("IEPAMKPOOII")
+            or source.get("avatarName")
+            or source.get("GDIJGLOHHFM")
+            or source.get("switchName")
+        )
+        avatar_id = getAvatarIdFromVoiceItemAvatarName(str(avatar_name or ""))
+        if avatar_id <= 0:
+            continue
+        voice_path = source.get("MDOCAGOFPAP")
+        if voice_path is None:
+            voice_path = source.get("sourceFileName", source.get("DCIHFJLBLAP", source.get("BJDAJEKPCFP")))
+        voice_path_text = str(voice_path or "").strip()
+        row_key = (avatar_id, voice_path_text)
+        if not voice_path_text or row_key in seen_rows:
+            continue
+        seen_rows.add(row_key)
+        rows.append((avatar_id, voice_file, voice_path_text))
+    return rows
 
 
 def importVoiceItem(fileName: str, cursor, *, batch_size: int = DEFAULT_BATCH_SIZE):
@@ -184,6 +266,27 @@ def importVoiceItem(fileName: str, cursor, *, batch_size: int = DEFAULT_BATCH_SI
     executemany_batched(cursor, sql_insert, rows, batch_size=batch_size)
 
 
+def importFetterVoiceItem(fileName: str, cursor, *, batch_size: int = DEFAULT_BATCH_SIZE):
+    _ensure_fetter_voice_schema(cursor)
+    sql_insert = (
+        "INSERT INTO fetterVoice(avatarId, voiceFile, voicePath) VALUES (?, ?, ?) "
+        "ON CONFLICT(avatarId, voiceFile, voicePath) DO NOTHING"
+    )
+    file_path = os.path.join(DATA_PATH, "BinOutput", "Voice", "Items", fileName)
+
+    with open(file_path, encoding="utf-8") as f:
+        textMap = json.load(f)
+
+    rows = []
+    for content in textMap.values():
+        if not isinstance(content, dict):
+            continue
+        rows.extend(_extract_fetter_voice_rows(content))
+
+    if rows:
+        executemany_batched(cursor, sql_insert, rows, batch_size=batch_size)
+
+
 def importAllVoiceItems(
     *,
     commit: bool = True,
@@ -194,14 +297,17 @@ def importAllVoiceItems(
     files = os.listdir(os.path.join(DATA_PATH, "BinOutput", "Voice", "Items"))
     cursor = conn.cursor()
     failed_files: list[str] = []
+    _ensure_fetter_voice_schema(cursor)
 
     if reset:
         cursor.execute("DELETE FROM voice")
+        cursor.execute("DELETE FROM fetterVoice")
 
     with LightweightProgress(len(files), desc="Voice files", unit="files") as pbar:
         for fileName in files:
             try:
                 importVoiceItem(fileName, cursor, batch_size=batch_size)
+                importFetterVoiceItem(fileName, cursor, batch_size=batch_size)
             except Exception as e:
                 failed_files.append(f"{fileName} ({e})")
                 continue

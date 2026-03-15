@@ -1,73 +1,95 @@
 <script setup>
-import global from "@/global/global.js"
-import PlayVoiceButton from "@/components/PlayVoiceButton.vue"
-import StylizedText from "@/components/StylizedText.vue"
-import { useRouter } from "vue-router"
-import { ElMessage } from "element-plus"
-import { CopyDocument } from "@element-plus/icons-vue"
+import global from "@/global/global.js";
+import PlayVoiceButton from "@/components/PlayVoiceButton.vue";
+import StylizedText from "@/components/StylizedText.vue";
+import { useRouter } from "vue-router";
+import { ElMessage } from "element-plus";
+import { CopyDocument } from "@element-plus/icons-vue";
 
 const UI_TEXT = Object.freeze({
     noTextToCopy: "没有可复制的文本",
     copied: "已复制",
-    copyFailed: "复制失败，请手动复制",
+    copyFailed: "复制失败",
     unknown: "未知",
     created: "创建",
     updated: "更新",
     source: "来源",
-})
+    copy: "复制",
+    audioUnavailable: "当前语言暂无语音",
+    audioMissing: "未找到语音文件",
+});
 
-const props = defineProps(["translateObj", "keyword", "searchLang"])
-const emit = defineEmits(["onVoicePlay"])
-const router = useRouter()
+const props = defineProps(["translateObj", "keyword", "searchLang"]);
+const emit = defineEmits(["onVoicePlay"]);
+const router = useRouter();
 
 const onVoicePlay = (voiceUrl) => {
-    emit("onVoicePlay", voiceUrl)
-}
+    emit("onVoicePlay", voiceUrl);
+};
 
 const canOpenDetail = () => {
-    if (props.translateObj.disableDetail) return false
+    if (props.translateObj.disableDetail) return false;
     return Boolean(
         props.translateObj.isTalk ||
         props.translateObj.isSubtitle ||
         props.translateObj.viewAsTextHash ||
         props.translateObj.isReadable
-    )
-}
+    );
+};
+
+const hasVoicePaths = () => {
+    return Boolean(props.translateObj.voicePaths && props.translateObj.voicePaths.length > 0);
+};
+
+const hasAvailableVoice = () => {
+    return Boolean(props.translateObj.availableVoiceLangs && props.translateObj.availableVoiceLangs.length > 0);
+};
+
+const isVoiceAvailableForLang = (langCode) => {
+    const voiceLangs = props.translateObj.availableVoiceLangs || [];
+    return voiceLangs.includes(Number(langCode));
+};
+
+const shouldShowVoiceButton = (langCode) => {
+    if (!hasVoicePaths()) return false;
+    if (isVoiceAvailableForLang(langCode)) return true;
+    return !hasAvailableVoice();
+};
 
 const normalizeCopyText = (text) => {
-    if (!text) return ""
-    const normalized = text.replace(/\\n/g, "\n")
-    return normalized.replace(/\r\n/g, "\n").replace(/\r/g, "\n")
-}
+    if (!text) return "";
+    const normalized = text.replace(/\\n/g, "\n");
+    return normalized.replace(/\r\n/g, "\n").replace(/\r/g, "\n");
+};
 
 const copyToClipboard = async (text) => {
-    const sanitizedText = normalizeCopyText(text)
+    const sanitizedText = normalizeCopyText(text);
     if (!sanitizedText) {
-        ElMessage.warning(UI_TEXT.noTextToCopy)
-        return
+        ElMessage.warning(UI_TEXT.noTextToCopy);
+        return;
     }
     try {
         if (navigator.clipboard?.writeText) {
-            await navigator.clipboard.writeText(sanitizedText)
-            ElMessage.success(UI_TEXT.copied)
-            return
+            await navigator.clipboard.writeText(sanitizedText);
+            ElMessage.success(UI_TEXT.copied);
+            return;
         }
 
-        const textarea = document.createElement("textarea")
-        textarea.value = sanitizedText
-        textarea.setAttribute("readonly", "")
-        textarea.style.position = "absolute"
-        textarea.style.left = "-9999px"
-        document.body.appendChild(textarea)
-        textarea.select()
-        document.execCommand("copy")
-        document.body.removeChild(textarea)
-        ElMessage.success(UI_TEXT.copied)
+        const textarea = document.createElement("textarea");
+        textarea.value = sanitizedText;
+        textarea.setAttribute("readonly", "");
+        textarea.style.position = "absolute";
+        textarea.style.left = "-9999px";
+        document.body.appendChild(textarea);
+        textarea.select();
+        document.execCommand("copy");
+        document.body.removeChild(textarea);
+        ElMessage.success(UI_TEXT.copied);
     } catch (error) {
-        console.error(error)
-        ElMessage.error(UI_TEXT.copyFailed)
+        console.error(error);
+        ElMessage.error(UI_TEXT.copyFailed);
     }
-}
+};
 
 const gotoTalk = () => {
     if (props.translateObj.isSubtitle) {
@@ -76,12 +98,12 @@ const gotoTalk = () => {
             keyword: props.keyword,
             isSubtitle: 1,
             searchLang: props.searchLang,
-        }
+        };
         if (props.translateObj.subtitleId) {
-            query.subtitleId = props.translateObj.subtitleId
+            query.subtitleId = props.translateObj.subtitleId;
         }
-        router.push({ path: "/talk", query })
-        return
+        router.push({ path: "/talk", query });
+        return;
     }
     if (props.translateObj.isReadable) {
         const query = {
@@ -89,11 +111,11 @@ const gotoTalk = () => {
             fileName: props.translateObj.fileName,
             keyword: props.keyword,
             searchLang: props.searchLang,
-        }
-        router.push({ path: "/talk", query })
-        return
+        };
+        router.push({ path: "/talk", query });
+        return;
     }
-    if (!(props.translateObj.isTalk || props.translateObj.viewAsTextHash)) return
+    if (!(props.translateObj.isTalk || props.translateObj.viewAsTextHash)) return;
     router.push({
         path: "/talk",
         query: {
@@ -101,33 +123,36 @@ const gotoTalk = () => {
             keyword: props.keyword,
             searchLang: props.searchLang,
         },
-    })
-}
+    });
+};
 
 const formatVersion = (versionTag, rawVersion) => {
-    if (versionTag) return versionTag
-    if (rawVersion) return String(rawVersion)
-    return UI_TEXT.unknown
-}
+    if (versionTag) return versionTag;
+    if (rawVersion) return String(rawVersion);
+    return UI_TEXT.unknown;
+};
 
 const showUpdatedVersionTag = () => {
-    const created = formatVersion(props.translateObj.createdVersion, props.translateObj.createdVersionRaw)
-    const updated = formatVersion(props.translateObj.updatedVersion, props.translateObj.updatedVersionRaw)
-    return created !== updated
-}
+    const created = formatVersion(props.translateObj.createdVersion, props.translateObj.createdVersionRaw);
+    const updated = formatVersion(props.translateObj.updatedVersion, props.translateObj.updatedVersionRaw);
+    return created !== updated;
+};
 </script>
 
 <template>
-    <div class="entry" :class="{ 'entry-with-voice': props.translateObj.voicePaths && props.translateObj.voicePaths.length > 0 }">
+    <div class="entry" :class="{ 'entry-with-voice': hasVoicePaths() }">
         <div class="translate" v-for="(translate, translateKey) in props.translateObj.translates" :key="translateKey">
             <p class="info">
                 <span class="language-label">{{ global.languages[translateKey] }}:</span>
-                <span v-if="global.voiceLanguages[translateKey]" class="voice-buttons">
+                <span v-if="shouldShowVoiceButton(translateKey)" class="voice-buttons">
                     <PlayVoiceButton
                         v-for="voice in props.translateObj.voicePaths"
                         :key="`${voice}-${translateKey}`"
                         :voice-path="voice"
                         :lang-code="translateKey"
+                        :disabled="!isVoiceAvailableForLang(translateKey)"
+                        :disabled-tooltip="UI_TEXT.audioUnavailable"
+                        :unavailable-message="UI_TEXT.audioMissing"
                         @on-voice-play="onVoicePlay"
                     />
                 </span>
@@ -137,7 +162,7 @@ const showUpdatedVersionTag = () => {
                     circle
                     size="small"
                     @click="copyToClipboard(translate)"
-                    :title="UI_TEXT.noTextToCopy"
+                    :title="UI_TEXT.copy"
                 />
             </p>
             <StylizedText :text="translate" :keyword="$props.keyword" />
@@ -282,7 +307,6 @@ const showUpdatedVersionTag = () => {
     padding: 2px 10px;
 }
 
-/* 响应式设计 */
 @media (max-width: 720px) {
     .entry {
         padding: 12px;

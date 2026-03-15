@@ -103,7 +103,7 @@ watch(router.currentRoute, () => {
         <div class="headerHolder">
             <div class="leftTitle">
                 <!--                <img alt="" src="../assets/logo.png">-->
-                Genshin Text Search
+                原神文本搜索
             </div>
 
         </div>
