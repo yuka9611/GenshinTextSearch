@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from import_utils import DEFAULT_BATCH_SIZE, executemany_batched
+from import_utils import DEFAULT_BATCH_SIZE, executemany_batched, normalize_unique_ints
 
 
 def _quest_talk_dialogue_join_condition(qt_alias: str = "qt", d_alias: str = "d") -> str:
@@ -27,23 +27,6 @@ def ensure_quest_hash_map_schema(cursor):
     cursor.execute(
         "CREATE INDEX IF NOT EXISTS quest_hash_map_questId_index ON quest_hash_map(questId)"
     )
-
-
-def _normalize_int_ids(raw_ids) -> list[int]:
-    normalized: list[int] = []
-    seen = set()
-    for raw in raw_ids or []:
-        try:
-            val = int(raw)
-        except Exception:
-            continue
-        if val in seen:
-            continue
-        seen.add(val)
-        normalized.append(val)
-    return normalized
-
-
 def refresh_quest_hash_map_for_quest_ids(
     cursor,
     quest_ids,
@@ -51,7 +34,7 @@ def refresh_quest_hash_map_for_quest_ids(
     batch_size: int = DEFAULT_BATCH_SIZE,
 ) -> int:
     ensure_quest_hash_map_schema(cursor)
-    normalized_ids = _normalize_int_ids(quest_ids)
+    normalized_ids = normalize_unique_ints(quest_ids)
     if not normalized_ids:
         return 0
 
@@ -77,7 +60,7 @@ def refresh_quest_hash_map_for_talk_ids(
     batch_size: int = DEFAULT_BATCH_SIZE,
 ) -> int:
     ensure_quest_hash_map_schema(cursor)
-    normalized_ids = _normalize_int_ids(talk_ids)
+    normalized_ids = normalize_unique_ints(talk_ids)
     if not normalized_ids:
         return 0
 

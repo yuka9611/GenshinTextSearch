@@ -1,9 +1,11 @@
+import json
 import os
 from contextlib import contextmanager
 from itertools import islice
 
 
 DEFAULT_BATCH_SIZE = max(100, int(os.environ.get("GTS_DB_BATCH_SIZE", "10000")))
+_MISSING = object()
 
 
 def iter_batches(iterable, batch_size: int):
@@ -33,6 +35,76 @@ def reset_temp_table(cursor, create_sql: str, table_name: str):
 
 def drop_temp_table(cursor, table_name: str):
     cursor.execute(f"DROP TABLE IF EXISTS {table_name}")
+
+
+def load_json_file(
+    path: str,
+    *,
+    missing_msg: str | None = None,
+    error_msg: str | None = None,
+    default=_MISSING,
+):
+    """
+    Load UTF-8 JSON from disk.
+    When `error_msg` is provided, missing/parse errors return `default` instead of raising.
+    """
+    if missing_msg is not None and not os.path.exists(path):
+        print(f"{missing_msg}: {path}")
+        return None if default is _MISSING else default
+    try:
+        with open(path, encoding="utf-8") as f:
+            return json.load(f)
+    except Exception as exc:
+        if error_msg is None:
+            raise
+        print(f"{error_msg}: {exc}")
+        return None if default is _MISSING else default
+
+
+def _sample_text(items, sample_size: int) -> tuple[list[str], int]:
+    values = [str(item) for item in items]
+    samples = values[: max(1, sample_size)]
+    remaining = len(values) - len(samples)
+    return samples, remaining
+
+
+def print_summary(title: str, items, sample_size: int = 10):
+    values = list(items)
+    if not values:
+        return
+    samples, remaining = _sample_text(values, sample_size)
+    sample_text = ", ".join(samples)
+    if remaining > 0:
+        sample_text += f", ...(+{remaining})"
+    print(f"[SUMMARY] {title}: {len(values)}. samples: {sample_text}")
+
+
+def print_skip_summary(title: str, skipped_files, sample_size: int = 10):
+    values = list(skipped_files)
+    if not values:
+        return
+    samples, remaining = _sample_text(values, sample_size)
+    sample_text = ", ".join(samples)
+    if remaining > 0:
+        sample_text += f", ...(+{remaining})"
+    print(f"[SKIP] {title}: {len(values)} files skipped. samples: {sample_text}")
+
+
+def normalize_unique_ints(values, *, positive_only: bool = False) -> list[int]:
+    normalized: list[int] = []
+    seen: set[int] = set()
+    for raw in values or []:
+        try:
+            value = int(raw)
+        except Exception:
+            continue
+        if positive_only and value <= 0:
+            continue
+        if value in seen:
+            continue
+        seen.add(value)
+        normalized.append(value)
+    return normalized
 
 
 def to_hash_value(raw_hash):

@@ -9,30 +9,13 @@ from import_utils import (
     drop_temp_table,
     executemany_batched,
     iter_batches,
+    print_skip_summary as _print_skip_summary,
+    print_summary as _print_issue_summary,
     reset_temp_table,
     to_hash_value,
 )
 from version_control import ensure_version_schema, get_current_version, get_or_create_version_id
 from textmap_name_utils import parse_textmap_file_name, textmap_file_sort_key
-
-
-def _print_issue_summary(title: str, items: list[str], sample_size: int = 10):
-    if not items:
-        return
-    samples = items[: max(1, sample_size)]
-    sample_text = ", ".join(samples)
-    remaining = len(items) - len(samples)
-    if remaining > 0:
-        sample_text += f", ...(+{remaining})"
-    print(f"[SUMMARY] {title}: {len(items)}. samples: {sample_text}")
-
-
-def _print_skip_summary(title: str, skipped_files: list[str], sample_size: int = 10):
-    if not skipped_files:
-        return
-    _print_issue_summary(title, skipped_files, sample_size=sample_size)
-
-
 def _load_existing_textmap_content_by_hash(
     cursor,
     lang_id: int,

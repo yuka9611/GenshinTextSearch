@@ -1,18 +1,35 @@
 import os
-import json
 import hashlib
-import glob
 import re
 from lightweight_progress import LightweightProgress
 
 from DBConfig import conn, DATA_PATH
-from import_utils import DEFAULT_BATCH_SIZE, executemany_batched
+from import_utils import (
+    DEFAULT_BATCH_SIZE,
+    executemany_batched,
+    load_json_file,
+    normalize_unique_ints,
+    print_skip_summary as _print_skip_summary,
+    print_summary as _print_issue_summary,
+)
 from quest_hash_map_utils import (
     ensure_quest_hash_map_schema as _ensure_quest_hash_map_schema,
     refresh_quest_hash_map_for_quest_ids as _refresh_quest_hash_map_for_quest_ids,
     refresh_quest_hash_map_for_talk_ids as _refresh_quest_hash_map_for_talk_ids,
 )
 from quest_utils import extract_quest_id, extract_quest_row, extract_quest_talk_ids
+from quest_source_utils import (
+    SOURCE_TYPE_ANECDOTE,
+    SOURCE_TYPE_HANGOUT,
+    build_hangout_payload,
+    build_step_title_hash_by_talk_id,
+    extract_anecdote_payload,
+    iter_subquest_talk_rows,
+    load_main_coop_ids_by_quest_id,
+    load_talk_excel_perform_cfg_map,
+    reset_quest_source_caches,
+    resolve_quest_source_fields,
+)
 from version_control import backfill_quest_created_version_from_textmap as _backfill_quest_created_version_from_textmap
 from version_control import (
     _build_version_preference_case_sql,
@@ -22,182 +39,18 @@ from version_control import (
 )
 
 
-def _print_skip_summary(title: str, skipped_files: list[str], sample_size: int = 10):
-    if not skipped_files:
-        return
-    samples = skipped_files[: max(1, sample_size)]
-    sample_text = ", ".join(samples)
-    remaining = len(skipped_files) - len(samples)
-    if remaining > 0:
-        sample_text += f", ...(+{remaining})"
-    print(f"[SKIP] {title}: {len(skipped_files)} files skipped. samples: {sample_text}")
-
-
-def _print_issue_summary(title: str, issues: list[str], sample_size: int = 10):
-    if not issues:
-        return
-    samples = issues[: max(1, sample_size)]
-    sample_text = ", ".join(samples)
-    remaining = len(issues) - len(samples)
-    if remaining > 0:
-        sample_text += f", ...(+{remaining})"
-    print(f"[SUMMARY] {title}: {len(issues)}. samples: {sample_text}")
-
-
 _MAIN_QUEST_DESC_HASH_BY_ID: dict[int, int | None] | None = None
-_QUEST_SOURCE_RAW_BY_ID: dict[int, str] | None = None
-_HANGOUT_QUEST_IDS: set[int] | None = None
-_MAIN_COOP_IDS_BY_QUEST_ID: dict[int, list[int]] | None = None
-
-SOURCE_TYPE_AQ = "AQ"
-SOURCE_TYPE_LQ = "LQ"
-SOURCE_TYPE_WQ = "WQ"
-SOURCE_TYPE_EQ = "EQ"
-SOURCE_TYPE_IQ = "IQ"
-SOURCE_TYPE_HANGOUT = "HANGOUT"
-SOURCE_TYPE_ANECDOTE = "ANECDOTE"
-SOURCE_TYPE_UNKNOWN = "UNKNOWN"
-_BASE_QUEST_SOURCE_TYPES = {
-    SOURCE_TYPE_AQ,
-    SOURCE_TYPE_LQ,
-    SOURCE_TYPE_WQ,
-    SOURCE_TYPE_EQ,
-    SOURCE_TYPE_IQ,
-}
 QUEST_TALK_NORMAL_COOP_ID = 0
 QUEST_TALK_SCOPE_ALL = "all"
 QUEST_TALK_SCOPE_NORMAL = "normal"
 QUEST_TALK_SCOPE_COOP = "coop"
 
 
-def _load_json_file(path: str):
-    with open(path, encoding="utf-8") as f:
-        return json.load(f)
-
-
-def _normalize_nonzero_int(value):
-    if isinstance(value, int) and value != 0:
-        return value
+def _load_json_dict(path: str) -> dict | None:
+    obj = load_json_file(path)
+    if isinstance(obj, dict):
+        return obj
     return None
-
-
-def _normalize_source_code_raw(value) -> str:
-    if not isinstance(value, str):
-        return SOURCE_TYPE_UNKNOWN
-    normalized = value.strip().upper()
-    if normalized in _BASE_QUEST_SOURCE_TYPES:
-        return normalized
-    return SOURCE_TYPE_UNKNOWN
-
-
-def _reset_quest_source_caches():
-    global _QUEST_SOURCE_RAW_BY_ID, _HANGOUT_QUEST_IDS, _MAIN_COOP_IDS_BY_QUEST_ID
-    _QUEST_SOURCE_RAW_BY_ID = None
-    _HANGOUT_QUEST_IDS = None
-    _MAIN_COOP_IDS_BY_QUEST_ID = None
-
-
-def _load_quest_source_raw_by_id() -> dict[int, str]:
-    global _QUEST_SOURCE_RAW_BY_ID
-    if _QUEST_SOURCE_RAW_BY_ID is not None:
-        return _QUEST_SOURCE_RAW_BY_ID
-
-    mapping: dict[int, str] = {}
-    folder = os.path.join(DATA_PATH, "BinOutput", "QuestBrief")
-    if os.path.isdir(folder):
-        for file_name in sorted(os.listdir(folder)):
-            if not file_name.endswith(".json"):
-                continue
-            path = os.path.join(folder, file_name)
-            try:
-                obj = _load_json_file(path)
-            except Exception:
-                continue
-            quest_id = extract_quest_id(obj)
-            if not isinstance(quest_id, int) or quest_id <= 0:
-                continue
-            mapping[quest_id] = _normalize_source_code_raw(obj.get("DLPKMDPABFM"))
-
-    _QUEST_SOURCE_RAW_BY_ID = mapping
-    return mapping
-
-
-def _load_main_coop_ids_by_quest_id() -> dict[int, list[int]]:
-    global _MAIN_COOP_IDS_BY_QUEST_ID
-    if _MAIN_COOP_IDS_BY_QUEST_ID is not None:
-        return _MAIN_COOP_IDS_BY_QUEST_ID
-
-    mapping: dict[int, list[int]] = {}
-    main_coop_path = os.path.join(DATA_PATH, "ExcelBinOutput", "MainCoopExcelConfigData.json")
-    if os.path.isfile(main_coop_path):
-        try:
-            rows = _load_json_file(main_coop_path)
-        except Exception:
-            rows = []
-        if isinstance(rows, list):
-            for row in rows:
-                if not isinstance(row, dict):
-                    continue
-                raw_id = row.get("id")
-                if not isinstance(raw_id, int) or raw_id <= 0:
-                    raw_id = row.get("JLJFKNHFLJP")
-                if not isinstance(raw_id, int) or raw_id <= 0:
-                    continue
-                quest_id = raw_id // 100
-                bucket = mapping.setdefault(quest_id, [])
-                if raw_id not in bucket:
-                    bucket.append(raw_id)
-
-    coop_folder = os.path.join(DATA_PATH, "BinOutput", "Coop")
-    if os.path.isdir(coop_folder):
-        for file_name in os.listdir(coop_folder):
-            match = re.match(r"^Coop(\d+)\.json$", file_name)
-            if not match:
-                continue
-            raw_id = int(match.group(1))
-            quest_id = raw_id // 100
-            bucket = mapping.setdefault(quest_id, [])
-            if raw_id not in bucket:
-                bucket.append(raw_id)
-
-    _MAIN_COOP_IDS_BY_QUEST_ID = mapping
-    return mapping
-
-
-def _load_hangout_quest_ids() -> set[int]:
-    global _HANGOUT_QUEST_IDS
-    if _HANGOUT_QUEST_IDS is not None:
-        return _HANGOUT_QUEST_IDS
-
-    quest_ids: set[int] = set(_load_main_coop_ids_by_quest_id().keys())
-
-    coop_folder = os.path.join(DATA_PATH, "BinOutput", "Coop")
-    if os.path.isdir(coop_folder):
-        for file_name in os.listdir(coop_folder):
-            match = re.match(r"^Coop(\d+)\.json$", file_name)
-            if not match:
-                continue
-            try:
-                quest_ids.add(int(match.group(1)) // 100)
-            except Exception:
-                continue
-
-    _HANGOUT_QUEST_IDS = quest_ids
-    return quest_ids
-
-
-def _resolve_quest_source_fields(quest_id: int | None, *, is_anecdote: bool = False) -> tuple[str, str]:
-    if is_anecdote:
-        return SOURCE_TYPE_ANECDOTE, SOURCE_TYPE_ANECDOTE
-    if not isinstance(quest_id, int) or quest_id <= 0:
-        return SOURCE_TYPE_UNKNOWN, SOURCE_TYPE_UNKNOWN
-
-    source_code_raw = _load_quest_source_raw_by_id().get(quest_id, SOURCE_TYPE_UNKNOWN)
-    if quest_id in _load_hangout_quest_ids():
-        return SOURCE_TYPE_HANGOUT, source_code_raw
-    if source_code_raw in _BASE_QUEST_SOURCE_TYPES:
-        return source_code_raw, source_code_raw
-    return SOURCE_TYPE_UNKNOWN, source_code_raw
 
 
 def _build_quest_upsert_sql(*, with_created_version: bool = False) -> str:
@@ -244,7 +97,7 @@ def _build_quest_upsert_sql(*, with_created_version: bool = False) -> str:
     )
 
 
-def _is_hidden_quest_obj(obj: dict) -> bool:
+def _is_hidden_quest_obj(obj: object) -> bool:
     quest_type = None
     if isinstance(obj, dict):
         if "questType" in obj:
@@ -289,21 +142,6 @@ def _ensure_quest_version_tables(cursor):
     )
     cursor.execute("CREATE INDEX IF NOT EXISTS quest_source_type_index ON quest(source_type)")
     _ensure_quest_hash_map_schema(cursor)
-
-
-def _normalize_talk_ids(talk_ids):
-    normalized = []
-    seen = set()
-    for talk_id in talk_ids:
-        try:
-            tid = int(talk_id)
-        except Exception:
-            continue
-        if tid in seen:
-            continue
-        seen.add(tid)
-        normalized.append(tid)
-    return normalized
 
 
 def _normalize_coop_quest_id(value) -> int:
@@ -409,7 +247,7 @@ def _load_main_quest_desc_hash_by_id() -> dict[int, int | None]:
     path = os.path.join(DATA_PATH, "ExcelBinOutput", "MainQuestExcelConfigData.json")
     if os.path.isfile(path):
         try:
-            rows = _load_json_file(path)
+            rows = load_json_file(path)
         except Exception:
             rows = []
         if isinstance(rows, list):
@@ -432,99 +270,12 @@ def _get_quest_desc_text_map_hash(quest_id: int | None) -> int | None:
     return _load_main_quest_desc_hash_by_id().get(quest_id)
 
 
-def _get_quest_subquests(obj: dict) -> list[dict]:
-    subquests = obj.get("NLCNGJKMAEN")
-    if not isinstance(subquests, list):
-        subquests = obj.get("subQuests")
-    if not isinstance(subquests, list):
-        subquests = obj.get("GFLHMKOOHHA")
-    if not isinstance(subquests, list):
-        return []
-    return [item for item in subquests if isinstance(item, dict)]
-
-
-def _get_step_desc_text_map_hash(step_obj: dict) -> int | None:
-    for key in ("stepDescTextMapHash", "OCMKKHHNKJO", "BMBANCMPPOM", "NAEMBIJFJCA", "HMLBMECMBGA"):
-        value = step_obj.get(key)
-        if isinstance(value, int) and value != 0:
-            return value
-    return None
-
-
-def _get_step_talk_ids(step_obj: dict) -> list[int]:
-    talk_ids: list[int] = []
-    seen: set[int] = set()
-
-    conditions = step_obj.get("AACKELGGJGC")
-    if not isinstance(conditions, list):
-        conditions = step_obj.get("finishCond")
-    if not isinstance(conditions, list):
-        conditions = step_obj.get("KBFJAAFDHKJ")
-    if not isinstance(conditions, list):
-        return talk_ids
-
-    for condition in conditions:
-        if not isinstance(condition, dict):
-            continue
-        cond_type = (
-            condition.get("DLPKMDPABFM")
-            or condition.get("type")
-            or condition.get("PAINLIBBLDK")
-        )
-        if cond_type != "QUEST_CONTENT_COMPLETE_TALK":
-            continue
-        params = (
-            condition.get("IEKGEJMAOCN")
-            or condition.get("param")
-            or condition.get("paramList")
-            or condition.get("LNHLPKELCAL")
-        )
-        if not isinstance(params, list) or not params:
-            continue
-        talk_id = params[0]
-        if isinstance(talk_id, int) and talk_id > 0 and talk_id not in seen:
-            seen.add(talk_id)
-            talk_ids.append(talk_id)
-    return talk_ids
-
-
-def _build_step_title_hash_by_talk_id(obj: dict) -> dict[int, int]:
-    mapping: dict[int, int] = {}
-    for subquest in _get_quest_subquests(obj):
-        step_hash = _get_step_desc_text_map_hash(subquest)
-        if not isinstance(step_hash, int) or step_hash == 0:
-            continue
-        for talk_id in _get_step_talk_ids(subquest):
-            mapping.setdefault(talk_id, step_hash)
-    return mapping
-
-
 def _build_quest_talk_rows(obj: dict, talk_ids: list[int]) -> list[tuple[int, int | None, int]]:
-    step_title_hash_by_talk_id = _build_step_title_hash_by_talk_id(obj)
+    step_title_hash_by_talk_id = build_step_title_hash_by_talk_id(obj)
     rows: list[tuple[int, int | None, int]] = []
-    for talk_id in sorted(_normalize_talk_ids(talk_ids)):
+    for talk_id in sorted(normalize_unique_ints(talk_ids)):
         rows.append((talk_id, step_title_hash_by_talk_id.get(talk_id), QUEST_TALK_NORMAL_COOP_ID))
     return _normalize_quest_talk_rows(rows)
-
-
-def _resolve_main_quest_id_for_subquest(subquest: dict, fallback_quest_id: int | None = None) -> int | None:
-    if isinstance(fallback_quest_id, int) and fallback_quest_id > 0:
-        return fallback_quest_id
-    for key in ("mainQuestId", "GNGFBMPFBOK", "JKHGFFKOFFN"):
-        value = subquest.get(key)
-        if isinstance(value, int) and value > 0:
-            return value
-    return None
-
-
-def _iter_subquest_talk_rows(obj: dict, fallback_quest_id: int | None = None):
-    for subquest in _get_quest_subquests(obj):
-        main_quest_id = _resolve_main_quest_id_for_subquest(subquest, fallback_quest_id)
-        if not isinstance(main_quest_id, int) or main_quest_id <= 0:
-            continue
-        step_hash = _get_step_desc_text_map_hash(subquest)
-        for talk_id in _get_step_talk_ids(subquest):
-            yield (main_quest_id, talk_id, step_hash, QUEST_TALK_NORMAL_COOP_ID)
 
 
 def _build_quest_dialogue_signature(cursor, talk_rows):
@@ -585,12 +336,20 @@ def importQuest(
     if own_cursor:
         cursor = conn.cursor()
         _ensure_quest_version_tables(cursor)
-    obj = _load_json_file(os.path.join(DATA_PATH, "BinOutput", "Quest", fileName))
+    obj = _load_json_dict(os.path.join(DATA_PATH, "BinOutput", "Quest", fileName))
+    if obj is None:
+        if skip_collector is not None:
+            skip_collector.append(fileName)
+        elif log_skip:
+            print("Skipping " + fileName)
+        if own_cursor:
+            cursor.close()
+        return None, False
 
     sql1 = _build_quest_upsert_sql(with_created_version=False)
     sql2 = _build_quest_talk_insert_sql()
 
-    quest_row = extract_quest_row(obj)
+    quest_row = extract_quest_row(obj) if isinstance(obj, dict) else None
     if quest_row is None:
         if skip_collector is not None:
             skip_collector.append(fileName)
@@ -602,7 +361,7 @@ def importQuest(
 
     questId, titleTextMapHash, chapterId = quest_row
     descTextMapHash = _get_quest_desc_text_map_hash(questId)
-    source_type, source_code_raw = _resolve_quest_source_fields(questId)
+    source_type, source_code_raw = resolve_quest_source_fields(questId)
     if titleTextMapHash in (None, 0):
         titleTextMapHash = None
         if not _is_hidden_quest_obj(obj):
@@ -666,7 +425,15 @@ def importQuestForDiff(
     if own_cursor:
         cursor = conn.cursor()
         _ensure_quest_version_tables(cursor)
-    obj = _load_json_file(os.path.join(DATA_PATH, "BinOutput", "Quest", fileName))
+    obj = _load_json_dict(os.path.join(DATA_PATH, "BinOutput", "Quest", fileName))
+    if obj is None:
+        if skip_collector is not None:
+            skip_collector.append(fileName)
+        elif log_skip:
+            print("Skipping " + fileName)
+        if own_cursor:
+            cursor.close()
+        return None, False
 
     version = current_version or get_current_version()
     get_or_create_version_id(version)
@@ -685,7 +452,7 @@ def importQuestForDiff(
 
     questId, titleTextMapHash, chapterId = quest_row
     descTextMapHash = _get_quest_desc_text_map_hash(questId)
-    source_type, source_code_raw = _resolve_quest_source_fields(questId)
+    source_type, source_code_raw = resolve_quest_source_fields(questId)
     if titleTextMapHash in (None, 0):
         titleTextMapHash = None
         if not _is_hidden_quest_obj(obj):
@@ -782,7 +549,7 @@ def importAllQuests(
     *,
     batch_size: int = DEFAULT_BATCH_SIZE,
 ):
-    _reset_quest_source_caches()
+    reset_quest_source_caches()
     cursor = conn.cursor()
     _ensure_quest_version_tables(cursor)
 
@@ -867,7 +634,7 @@ def importAllQuestsForDiff(
     *,
     batch_size: int = DEFAULT_BATCH_SIZE,
 ):
-    _reset_quest_source_caches()
+    reset_quest_source_caches()
     version = current_version or get_current_version()
     cursor = conn.cursor()
     _ensure_quest_version_tables(cursor)
@@ -976,8 +743,12 @@ def backfillQuestMetadata(*, commit: bool = True, batch_size: int = DEFAULT_BATC
         with LightweightProgress(len(quest_files), desc="Quest metadata", unit="files") as pbar:
             for fileName in quest_files:
                 try:
-                    obj = _load_json_file(os.path.join(quest_folder, fileName))
+                    obj = _load_json_dict(os.path.join(quest_folder, fileName))
                 except Exception:
+                    skipped_quest_files.append(fileName)
+                    pbar.update()
+                    continue
+                if obj is None:
                     skipped_quest_files.append(fileName)
                     pbar.update()
                     continue
@@ -1002,13 +773,24 @@ def backfillQuestMetadata(*, commit: bool = True, batch_size: int = DEFAULT_BATC
                         pbar.update()
                         continue
                     try:
-                        obj = _load_json_file(os.path.join(brief_folder, fileName))
+                        obj = _load_json_dict(os.path.join(brief_folder, fileName))
                     except Exception:
                         skipped_brief_files.append(fileName)
                         pbar.update()
                         continue
+                    if obj is None:
+                        skipped_brief_files.append(fileName)
+                        pbar.update()
+                        continue
                     quest_id = extract_quest_id(obj)
-                    brief_talk_rows.extend(_iter_subquest_talk_rows(obj, quest_id))
+                    brief_talk_rows.extend(
+                        (step_hash, main_quest_id, talk_id, coop_quest_id)
+                        for main_quest_id, talk_id, step_hash, coop_quest_id in iter_subquest_talk_rows(
+                            obj,
+                            quest_id,
+                            normal_coop_id=QUEST_TALK_NORMAL_COOP_ID,
+                        )
+                    )
                     pbar.update()
 
         executemany_batched(
@@ -1050,107 +832,6 @@ def backfillQuestMetadata(*, commit: bool = True, batch_size: int = DEFAULT_BATC
         "skipped_quest_file_count": len(skipped_quest_files),
         "skipped_brief_file_count": len(skipped_brief_files),
     }
-
-
-def _iter_talk_excel_config_paths() -> list[str]:
-    pattern = os.path.join(DATA_PATH, "ExcelBinOutput", "TalkExcelConfigData*.json")
-    return sorted(glob.glob(pattern))
-
-
-def _load_talk_excel_perform_cfg_map() -> dict[int, list[str]]:
-    mapping: dict[int, list[str]] = {}
-    for path in _iter_talk_excel_config_paths():
-        try:
-            rows = _load_json_file(path)
-        except Exception:
-            continue
-        if not isinstance(rows, list):
-            continue
-        for row in rows:
-            if not isinstance(row, dict):
-                continue
-            quest_id = row.get("questId")
-            perform_cfg = row.get("performCfg")
-            if not isinstance(quest_id, int) or quest_id <= 0:
-                continue
-            if not isinstance(perform_cfg, str) or not perform_cfg:
-                continue
-            mapping.setdefault(quest_id, []).append(perform_cfg)
-    return mapping
-
-
-def _extract_storyboard_group_talk_ids(obj: dict) -> list[int]:
-    if not isinstance(obj, dict):
-        return []
-    items = obj.get("DGJMIPFDEOF")
-    if not isinstance(items, list):
-        items = obj.get("talks")
-    if not isinstance(items, list):
-        return []
-    talk_ids: list[int] = []
-    seen: set[int] = set()
-    for item in items:
-        if not isinstance(item, dict):
-            continue
-        talk_id = item.get("BLKKAMEMBBJ")
-        if not isinstance(talk_id, int) or talk_id <= 0 or talk_id in seen:
-            continue
-        seen.add(talk_id)
-        talk_ids.append(talk_id)
-    return talk_ids
-
-
-def _extract_anecdote_payload(
-    row: dict,
-    *,
-    talk_excel_map: dict[int, list[str]] | None = None,
-    missing_group_collector: list[str] | None = None,
-    missing_talk_excel_collector: list[str] | None = None,
-) -> dict | None:
-    if not isinstance(row, dict):
-        return None
-    anecdote_id = row.get("DBGCFNMLHAJ")
-    if not isinstance(anecdote_id, int) or anecdote_id <= 0:
-        return None
-
-    title_text_map_hash = _normalize_nonzero_int(row.get("EJMLGHMLPLD"))
-    desc_text_map_hash = _normalize_nonzero_int(row.get("JKNBFACAMCF"))
-    group_ids = _normalize_talk_ids(row.get("LIIPHELCPKJ"))
-    talk_ids: list[int] = []
-    seen_talk_ids: set[int] = set()
-
-    storyboard_group_root = os.path.join(DATA_PATH, "BinOutput", "Talk", "StoryboardGroup")
-    for group_id in group_ids:
-        if talk_excel_map is not None and group_id not in talk_excel_map:
-            if missing_talk_excel_collector is not None:
-                missing_talk_excel_collector.append(f"{anecdote_id}:{group_id}")
-        group_path = os.path.join(storyboard_group_root, f"{group_id}.json")
-        if not os.path.isfile(group_path):
-            if missing_group_collector is not None:
-                missing_group_collector.append(f"{anecdote_id}:{group_id}")
-            continue
-        try:
-            group_obj = _load_json_file(group_path)
-        except Exception:
-            if missing_group_collector is not None:
-                missing_group_collector.append(f"{anecdote_id}:{group_id}")
-            continue
-        for talk_id in _extract_storyboard_group_talk_ids(group_obj):
-            if talk_id in seen_talk_ids:
-                continue
-            seen_talk_ids.add(talk_id)
-            talk_ids.append(talk_id)
-
-    return {
-        "quest_id": anecdote_id,
-        "title_text_map_hash": title_text_map_hash,
-        "desc_text_map_hash": desc_text_map_hash,
-        "talk_rows": [(talk_id, None, QUEST_TALK_NORMAL_COOP_ID) for talk_id in sorted(talk_ids)],
-        "source_type": SOURCE_TYPE_ANECDOTE,
-        "source_code_raw": SOURCE_TYPE_ANECDOTE,
-    }
-
-
 def importAnecdote(
     row: dict,
     *,
@@ -1167,11 +848,12 @@ def importAnecdote(
         cursor = conn.cursor()
         _ensure_quest_version_tables(cursor)
 
-    payload = _extract_anecdote_payload(
+    payload = extract_anecdote_payload(
         row,
         talk_excel_map=talk_excel_map,
         missing_group_collector=missing_group_collector,
         missing_talk_excel_collector=missing_talk_excel_collector,
+        normal_coop_id=QUEST_TALK_NORMAL_COOP_ID,
     )
     if payload is None:
         if skip_collector is not None:
@@ -1251,11 +933,12 @@ def importAnecdoteForDiff(
     version = current_version or get_current_version()
     get_or_create_version_id(version)
 
-    payload = _extract_anecdote_payload(
+    payload = extract_anecdote_payload(
         row,
         talk_excel_map=talk_excel_map,
         missing_group_collector=missing_group_collector,
         missing_talk_excel_collector=missing_talk_excel_collector,
+        normal_coop_id=QUEST_TALK_NORMAL_COOP_ID,
     )
     if payload is None:
         if skip_collector is not None:
@@ -1379,10 +1062,10 @@ def importAllAnecdotes(
             "hash_map_refreshed_quest_count": 0,
         }
 
-    rows = _load_json_file(anecdote_path)
+    rows = load_json_file(anecdote_path)
     if not isinstance(rows, list):
         rows = []
-    talk_excel_map = _load_talk_excel_perform_cfg_map()
+    talk_excel_map = load_talk_excel_perform_cfg_map()
     imported_quest_ids: set[int] = set()
     new_quest_ids: set[int] = set()
     skipped_rows: list[str] = []
@@ -1486,10 +1169,10 @@ def importAllAnecdotesForDiff(
             "hash_map_refreshed_quest_count": 0,
         }
 
-    rows = _load_json_file(anecdote_path)
+    rows = load_json_file(anecdote_path)
     if not isinstance(rows, list):
         rows = []
-    talk_excel_map = _load_talk_excel_perform_cfg_map()
+    talk_excel_map = load_talk_excel_perform_cfg_map()
     imported_quest_ids: set[int] = set()
     new_quest_ids: set[int] = set()
     skipped_rows: list[str] = []
@@ -1573,163 +1256,6 @@ def importAllAnecdotesForDiff(
         "missing_talk_excel_count": len(missing_talk_excel_rows),
         "hash_map_refreshed_quest_count": int(refreshed_hash_map_quests or 0),
     }
-
-
-def _extract_nested_text_map_hash(node) -> int | None:
-    if isinstance(node, int) and node != 0:
-        return node
-    if not isinstance(node, dict):
-        return None
-    for key in ("AEMBEELBLML", "textMapHash", "hash"):
-        value = node.get(key)
-        if isinstance(value, int) and value != 0:
-            return value
-    return None
-
-
-def _load_hangout_codex_hashes(quest_id: int) -> tuple[int | None, int | None]:
-    for candidate_id in (quest_id, quest_id + 10000):
-        path = os.path.join(DATA_PATH, "BinOutput", "CodexQuest", f"{candidate_id}.json")
-        if not os.path.isfile(path):
-            continue
-        try:
-            obj = _load_json_file(path)
-        except Exception:
-            continue
-        if not isinstance(obj, dict):
-            continue
-        title_hash = _extract_nested_text_map_hash(obj.get("HCGANIMKKLM"))
-        desc_hash = _extract_nested_text_map_hash(obj.get("NCBJBOHPGNA"))
-        if title_hash is not None or desc_hash is not None:
-            return title_hash, desc_hash
-    return None, None
-
-
-def _extract_hangout_coop_quest_ids(coop_obj: dict) -> list[int]:
-    result: list[int] = []
-    seen: set[int] = set()
-    root = coop_obj.get("NPOJHKBJIDO")
-    if isinstance(root, dict):
-        for raw_key, value in root.items():
-            candidates = [raw_key]
-            if isinstance(value, dict):
-                candidates.append(value.get("BLKKAMEMBBJ"))
-            for candidate in candidates:
-                try:
-                    coop_quest_id = int(candidate)
-                except Exception:
-                    continue
-                if coop_quest_id <= 0 or coop_quest_id in seen:
-                    continue
-                seen.add(coop_quest_id)
-                result.append(coop_quest_id)
-    return result
-
-
-def _collect_hangout_talk_rows(
-    main_coop_id: int,
-    *,
-    missing_coop_collector: list[str] | None = None,
-) -> list[tuple[int, int | None, int]]:
-    coop_path = os.path.join(DATA_PATH, "BinOutput", "Coop", f"Coop{main_coop_id}.json")
-    if not os.path.isfile(coop_path):
-        if missing_coop_collector is not None:
-            missing_coop_collector.append(str(main_coop_id))
-        return []
-    try:
-        coop_obj = _load_json_file(coop_path)
-    except Exception:
-        if missing_coop_collector is not None:
-            missing_coop_collector.append(str(main_coop_id))
-        return []
-    if not isinstance(coop_obj, dict):
-        if missing_coop_collector is not None:
-            missing_coop_collector.append(str(main_coop_id))
-        return []
-
-    talk_rows: list[tuple[int, int | None, int]] = []
-    seen_pairs: set[tuple[int, int]] = set()
-    talk_root = os.path.join(DATA_PATH, "BinOutput", "Talk", "Coop")
-    for coop_quest_id in _extract_hangout_coop_quest_ids(coop_obj):
-        pattern = os.path.join(talk_root, f"{coop_quest_id}_*.json")
-        for talk_path in sorted(glob.glob(pattern)):
-            try:
-                talk_obj = _load_json_file(talk_path)
-            except Exception:
-                continue
-            if not isinstance(talk_obj, dict):
-                continue
-            talk_id = talk_obj.get("LBPGKDMGFBN")
-            if not isinstance(talk_id, int) or talk_id <= 0:
-                continue
-            key = (talk_id, coop_quest_id)
-            if key in seen_pairs:
-                continue
-            seen_pairs.add(key)
-            talk_rows.append((talk_id, None, coop_quest_id))
-    return _normalize_quest_talk_rows(talk_rows)
-
-
-def _is_existing_real_hangout_quest(existing_row) -> bool:
-    if not existing_row:
-        return False
-    chapter_id = existing_row[2]
-    source_code_raw = existing_row[4]
-    return chapter_id is not None or source_code_raw in _BASE_QUEST_SOURCE_TYPES
-
-
-def _extract_hangout_payload(
-    quest_id: int,
-    *,
-    cursor,
-    missing_coop_collector: list[str] | None = None,
-) -> dict | None:
-    main_coop_ids = _load_main_coop_ids_by_quest_id().get(quest_id)
-    if not main_coop_ids:
-        return None
-
-    existing_quest_row = cursor.execute(
-        "SELECT titleTextMapHash, descTextMapHash, chapterId, source_type, source_code_raw FROM quest WHERE questId=?",
-        (quest_id,),
-    ).fetchone()
-    is_real_existing_quest = _is_existing_real_hangout_quest(existing_quest_row)
-    codex_title_hash, codex_desc_hash = _load_hangout_codex_hashes(quest_id)
-
-    talk_rows: list[tuple[int, int | None, int]] = []
-    for main_coop_id in main_coop_ids:
-        talk_rows.extend(
-            _collect_hangout_talk_rows(
-                main_coop_id,
-                missing_coop_collector=missing_coop_collector,
-            )
-        )
-    normalized_talk_rows = _normalize_quest_talk_rows(talk_rows)
-
-    if is_real_existing_quest:
-        title_text_map_hash = existing_quest_row[0] if existing_quest_row[0] not in (0,) else codex_title_hash
-        desc_text_map_hash = existing_quest_row[1] if existing_quest_row[1] not in (0,) else codex_desc_hash
-        chapter_id = existing_quest_row[2]
-        raw_source = existing_quest_row[4]
-        source_code_raw = raw_source if raw_source in _BASE_QUEST_SOURCE_TYPES else SOURCE_TYPE_HANGOUT
-    else:
-        title_text_map_hash = codex_title_hash
-        desc_text_map_hash = codex_desc_hash
-        chapter_id = None
-        source_code_raw = SOURCE_TYPE_HANGOUT
-
-    return {
-        "quest_id": quest_id,
-        "title_text_map_hash": title_text_map_hash,
-        "desc_text_map_hash": desc_text_map_hash,
-        "chapter_id": chapter_id,
-        "source_type": SOURCE_TYPE_HANGOUT,
-        "source_code_raw": source_code_raw,
-        "talk_rows": normalized_talk_rows,
-        "is_real_existing_quest": is_real_existing_quest,
-        "existing_quest_row": existing_quest_row,
-    }
-
-
 def importHangout(
     quest_id: int,
     *,
@@ -1743,9 +1269,13 @@ def importHangout(
         cursor = conn.cursor()
         _ensure_quest_version_tables(cursor)
 
-    payload = _extract_hangout_payload(
+    existing_quest_row = cursor.execute(
+        "SELECT titleTextMapHash, descTextMapHash, chapterId, source_type, source_code_raw FROM quest WHERE questId=?",
+        (quest_id,),
+    ).fetchone()
+    payload = build_hangout_payload(
         quest_id,
-        cursor=cursor,
+        existing_quest_row=existing_quest_row,
         missing_coop_collector=missing_coop_collector,
     )
     if payload is None:
@@ -1758,7 +1288,7 @@ def importHangout(
     chapter_id = payload["chapter_id"]
     source_type = payload["source_type"]
     source_code_raw = payload["source_code_raw"]
-    new_talk_rows = payload["talk_rows"]
+    new_talk_rows = _normalize_quest_talk_rows(payload["talk_rows"])
     is_real_existing_quest = payload["is_real_existing_quest"]
     existing_quest_row = payload["existing_quest_row"]
 
@@ -1819,9 +1349,13 @@ def importHangoutForDiff(
 
     version = current_version or get_current_version()
     get_or_create_version_id(version)
-    payload = _extract_hangout_payload(
+    existing_quest_row = cursor.execute(
+        "SELECT titleTextMapHash, descTextMapHash, chapterId, source_type, source_code_raw FROM quest WHERE questId=?",
+        (quest_id,),
+    ).fetchone()
+    payload = build_hangout_payload(
         quest_id,
-        cursor=cursor,
+        existing_quest_row=existing_quest_row,
         missing_coop_collector=missing_coop_collector,
     )
     if payload is None:
@@ -1834,7 +1368,7 @@ def importHangoutForDiff(
     chapter_id = payload["chapter_id"]
     source_type = payload["source_type"]
     source_code_raw = payload["source_code_raw"]
-    new_talk_rows = payload["talk_rows"]
+    new_talk_rows = _normalize_quest_talk_rows(payload["talk_rows"])
     is_real_existing_quest = payload["is_real_existing_quest"]
 
     if title_text_map_hash is None and missing_title_collector is not None:
@@ -1922,10 +1456,10 @@ def importAllHangouts(
     *,
     batch_size: int = DEFAULT_BATCH_SIZE,
 ):
-    _reset_quest_source_caches()
+    reset_quest_source_caches()
     cursor = conn.cursor()
     _ensure_quest_version_tables(cursor)
-    quest_ids = sorted(_load_main_coop_ids_by_quest_id().keys())
+    quest_ids = sorted(load_main_coop_ids_by_quest_id().keys())
     imported_quest_ids: set[int] = set()
     new_quest_ids: set[int] = set()
     missing_title_rows: list[str] = []
@@ -2017,12 +1551,12 @@ def importAllHangoutsForDiff(
     *,
     batch_size: int = DEFAULT_BATCH_SIZE,
 ):
-    _reset_quest_source_caches()
+    reset_quest_source_caches()
     version = current_version or get_current_version()
     get_or_create_version_id(version)
     cursor = conn.cursor()
     _ensure_quest_version_tables(cursor)
-    quest_ids = sorted(_load_main_coop_ids_by_quest_id().keys())
+    quest_ids = sorted(load_main_coop_ids_by_quest_id().keys())
     imported_quest_ids: set[int] = set()
     new_quest_ids: set[int] = set()
     missing_title_rows: list[str] = []
@@ -2128,7 +1662,15 @@ def importTalk(
     own_cursor = cursor is None
     if own_cursor:
         cursor = conn.cursor()
-    obj = _load_json_file(os.path.join(DATA_PATH, "BinOutput", "Talk", fileName))
+    obj = _load_json_dict(os.path.join(DATA_PATH, "BinOutput", "Talk", fileName))
+    if obj is None:
+        if skip_collector is not None:
+            skip_collector.append(fileName)
+        elif log_skip:
+            print("Skipping " + fileName)
+        if own_cursor:
+            cursor.close()
+        return 0
     if _is_non_dialog_talk_obj(obj):
         if own_cursor:
             cursor.close()
@@ -2175,8 +1717,9 @@ def importTalk(
             cursor.close()
         return 0
 
-    talkId = obj[talkIdKey]
-    if dialogueListKey not in obj or len(obj[dialogueListKey]) == 0:
+    talkId = obj.get(talkIdKey)
+    raw_dialogues = obj.get(dialogueListKey)
+    if not isinstance(raw_dialogues, list) or len(raw_dialogues) == 0:
         if own_cursor:
             cursor.close()
         return 0
@@ -2205,13 +1748,20 @@ def importTalk(
         coopQuestId = None
 
     rows = []
-    for dialogue in obj[dialogueListKey]:
+    for dialogue in raw_dialogues:
+        if not isinstance(dialogue, dict):
+            continue
         dialogueId = dialogue.get(dialogueIdKey)
         if dialogueId is None:
             continue
-        if talkRoleKey in dialogue and talkRoleIdKey in dialogue[talkRoleKey] and talkRoleTypeKey in dialogue[talkRoleKey]:
-            talkRoleId = dialogue[talkRoleKey][talkRoleIdKey]
-            talkRoleType = dialogue[talkRoleKey][talkRoleTypeKey]
+        talk_role = dialogue.get(talkRoleKey)
+        if (
+            isinstance(talk_role, dict)
+            and talkRoleIdKey in talk_role
+            and talkRoleTypeKey in talk_role
+        ):
+            talkRoleId = talk_role[talkRoleIdKey]
+            talkRoleType = talk_role[talkRoleTypeKey]
         else:
             talkRoleId = -1
             talkRoleType = None
@@ -2223,7 +1773,7 @@ def importTalk(
 
     if rows:
         executemany_batched(cursor, sql, rows, batch_size=batch_size)
-    if touched_talk_collector is not None:
+    if touched_talk_collector is not None and talkId is not None:
         try:
             touched_talk_collector.add(int(talkId))
         except Exception:
@@ -2238,7 +1788,7 @@ def importTalk(
     return len(rows)
 
 
-def _is_non_dialog_talk_obj(obj: dict) -> bool:
+def _is_non_dialog_talk_obj(obj: object) -> bool:
     if not isinstance(obj, dict):
         return False
     keys = set(obj.keys())
@@ -2359,13 +1909,20 @@ def importQuestBriefs(*, commit: bool = True, batch_size: int = DEFAULT_BATCH_SI
                     pbar.update()
                     continue
                 try:
-                    obj = _load_json_file(os.path.join(folder, fileName))
+                    obj = _load_json_dict(os.path.join(folder, fileName))
                 except Exception:
+                    pbar.update()
+                    continue
+                if obj is None:
                     pbar.update()
                     continue
 
                 questId = extract_quest_id(obj)
-                for mainQuestId, talkId, step_hash, coop_quest_id in _iter_subquest_talk_rows(obj, questId):
+                for mainQuestId, talkId, step_hash, coop_quest_id in iter_subquest_talk_rows(
+                    obj,
+                    questId,
+                    normal_coop_id=QUEST_TALK_NORMAL_COOP_ID,
+                ):
                     try:
                         touched_quest_ids.add(int(mainQuestId))
                     except Exception:

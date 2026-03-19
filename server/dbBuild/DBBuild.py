@@ -1,4 +1,3 @@
-import json
 import argparse
 import cProfile
 import sys
@@ -12,7 +11,7 @@ import readableImport
 import subtitleImport
 import textMapImport
 import questImport
-from import_utils import DEFAULT_BATCH_SIZE, executemany_batched, fast_import_pragmas
+from import_utils import DEFAULT_BATCH_SIZE, executemany_batched, fast_import_pragmas, load_json_file
 from version_control import (
     ensure_version_schema,
     rebuild_version_catalog,
@@ -107,13 +106,6 @@ def _dump_profile_stats(
     print(f"[PROFILE] cProfile top {max(1, top_n)} (sort={sort_key})")
     stats = pstats.Stats(profiler).strip_dirs().sort_stats(sort_key)
     stats.print_stats(max(1, top_n))
-
-
-def _load_json_file(path: str):
-    with open(path, encoding="utf-8") as f:
-        return json.load(f)
-
-
 def _is_non_dialog_talk_obj(obj: dict) -> bool:
     # Keep compatibility for callers (e.g. diffUpdate) that use DBBuild as facade.
     return questImport._is_non_dialog_talk_obj(obj)
@@ -155,7 +147,7 @@ def importAllTalkItems(
 
 def importAvatars(*, commit: bool = True, batch_size: int = DEFAULT_BATCH_SIZE):
     cursor = conn.cursor()
-    avatars = _load_json_file(DATA_PATH + "\\ExcelBinOutput\\AvatarExcelConfigData.json")
+    avatars = load_json_file(DATA_PATH + "\\ExcelBinOutput\\AvatarExcelConfigData.json")
 
     sql1 = (
         "INSERT INTO avatar(avatarId, nameTextMapHash) VALUES (?,?) "
@@ -178,7 +170,7 @@ def importAvatars(*, commit: bool = True, batch_size: int = DEFAULT_BATCH_SIZE):
 
 def importFetters(*, commit: bool = True, batch_size: int = DEFAULT_BATCH_SIZE):
     cursor = conn.cursor()
-    fetters = _load_json_file(DATA_PATH + "\\ExcelBinOutput\\FettersExcelConfigData.json")
+    fetters = load_json_file(DATA_PATH + "\\ExcelBinOutput\\FettersExcelConfigData.json")
     sql1 = (
         "INSERT INTO fetters(fetterId, avatarId, voiceTitleTextMapHash, voiceFileTextTextMapHash, voiceFile) "
         "VALUES (?,?,?,?,?) "
@@ -217,7 +209,7 @@ def importFetters(*, commit: bool = True, batch_size: int = DEFAULT_BATCH_SIZE):
 
 def importFetterStories(*, commit: bool = True, batch_size: int = DEFAULT_BATCH_SIZE):
     cursor = conn.cursor()
-    stories = _load_json_file(DATA_PATH + "\\ExcelBinOutput\\FetterStoryExcelConfigData.json")
+    stories = load_json_file(DATA_PATH + "\\ExcelBinOutput\\FetterStoryExcelConfigData.json")
     sql1 = ("INSERT INTO fetterStory("
             "fetterId, avatarId, storyTitleTextMapHash, storyTitle2TextMapHash, "
             "storyTitleLockedTextMapHash, storyContextTextMapHash, storyContext2TextMapHash"
@@ -387,7 +379,7 @@ def refreshQuestHashMapByQuestIds(
 
 def importChapters(*, commit: bool = True, batch_size: int = DEFAULT_BATCH_SIZE):
     cursor = conn.cursor()
-    chapters = _load_json_file(DATA_PATH + "\\ExcelBinOutput\\ChapterExcelConfigData.json")
+    chapters = load_json_file(DATA_PATH + "\\ExcelBinOutput\\ChapterExcelConfigData.json")
     sql1 = (
         "INSERT INTO chapter(chapterId, chapterTitleTextMapHash, chapterNumTextMapHash) VALUES (?,?,?) "
         "ON CONFLICT(chapterId) DO UPDATE SET "
@@ -412,7 +404,7 @@ def importChapters(*, commit: bool = True, batch_size: int = DEFAULT_BATCH_SIZE)
 
 def importNPCs(*, commit: bool = True, batch_size: int = DEFAULT_BATCH_SIZE):
     cursor = conn.cursor()
-    NPCs = _load_json_file(DATA_PATH + "\\ExcelBinOutput\\NpcExcelConfigData.json")
+    NPCs = load_json_file(DATA_PATH + "\\ExcelBinOutput\\NpcExcelConfigData.json")
 
     sql1 = (
         "INSERT INTO npc(npcId, textHash) VALUES (?,?) "
@@ -435,7 +427,7 @@ def importNPCs(*, commit: bool = True, batch_size: int = DEFAULT_BATCH_SIZE):
 
 def importManualTextMap(*, commit: bool = True, batch_size: int = DEFAULT_BATCH_SIZE):
     cursor = conn.cursor()
-    placeholders = _load_json_file(DATA_PATH + "\\ExcelBinOutput\\ManualTextMapConfigData.json")
+    placeholders = load_json_file(DATA_PATH + "\\ExcelBinOutput\\ManualTextMapConfigData.json")
     sql1 = (
         "INSERT INTO manualTextMap(textMapId, textHash) VALUES (?,?) "
         "ON CONFLICT(textMapId) DO UPDATE SET "

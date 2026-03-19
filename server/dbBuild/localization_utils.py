@@ -1,6 +1,6 @@
-import json
 import os
 import re
+from import_utils import load_json_file
 
 
 _SUBTITLE_PATH_KEYS = [
@@ -23,27 +23,14 @@ _SUBTITLE_PATH_KEYS = [
 ]
 
 _LANG_SUFFIX_RE = re.compile(r"_(CHS|CHT|DE|EN|ES|FR|ID|IT|JP|KR|PT|RU|TH|TR|VI)$", re.IGNORECASE)
-
-
-def _load_json_file(path: str, *, missing_msg: str, error_msg: str):
-    if not os.path.exists(path):
-        print(f"{missing_msg}: {path}")
-        return None
-    try:
-        with open(path, "r", encoding="utf-8") as f:
-            return json.load(f)
-    except Exception as e:
-        print(f"{error_msg}: {e}")
-        return None
-
-
 def load_document_loc_title_hash(data_path: str) -> dict:
     """Map localization ID -> titleTextMapHash from DocumentExcelConfigData."""
     doc_path = os.path.join(data_path, "ExcelBinOutput", "DocumentExcelConfigData.json")
-    data = _load_json_file(
+    data = load_json_file(
         doc_path,
         missing_msg="Document config not found",
         error_msg="Error loading DocumentExcelConfigData.json",
+        default=None,
     )
     if not isinstance(data, list):
         return {}
@@ -60,10 +47,11 @@ def load_document_loc_title_hash(data_path: str) -> dict:
 def load_localization_entries(data_path: str) -> list[dict]:
     """Load LocalizationExcelConfigData entries."""
     loc_path = os.path.join(data_path, "ExcelBinOutput", "LocalizationExcelConfigData.json")
-    data = _load_json_file(
+    data = load_json_file(
         loc_path,
         missing_msg="Localization config not found",
         error_msg="Error loading LocalizationExcelConfigData.json",
+        default=None,
     )
     if isinstance(data, list):
         return data

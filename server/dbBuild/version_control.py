@@ -2,6 +2,7 @@ from collections import Counter, defaultdict
 from collections.abc import Mapping, Sequence
 from DBConfig import conn
 from import_utils import reset_temp_table
+from quest_hash_map_utils import _quest_talk_dialogue_join_condition
 from versioning import (
     VERSION_DIM_TABLE,
     ensure_version_schema as _ensure_version_schema_impl,
@@ -481,15 +482,6 @@ def _quest_hash_map_available(cursor) -> bool:
         return False
     row = cursor.execute("SELECT 1 FROM quest_hash_map LIMIT 1").fetchone()
     return row is not None
-
-
-def _quest_talk_dialogue_join_condition(qt_alias: str = "qt", d_alias: str = "d") -> str:
-    return (
-        f"(({qt_alias}.coopQuestId IS NULL OR {qt_alias}.coopQuestId = 0) AND {d_alias}.coopQuestId IS NULL) "
-        f"OR ({qt_alias}.coopQuestId > 0 AND {d_alias}.coopQuestId = {qt_alias}.coopQuestId)"
-    )
-
-
 def _build_qh_source_sql(
     cursor,
     *,
