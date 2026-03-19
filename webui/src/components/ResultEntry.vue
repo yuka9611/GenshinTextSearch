@@ -126,15 +126,28 @@ const gotoTalk = () => {
     });
 };
 
+const resolveVersionValue = (versionTag, rawVersion) => {
+    if (versionTag) return String(versionTag).trim();
+    if (rawVersion) return String(rawVersion).trim();
+    return '';
+};
+
 const formatVersion = (versionTag, rawVersion) => {
-    if (versionTag) return versionTag;
-    if (rawVersion) return String(rawVersion);
-    return UI_TEXT.unknown;
+    return resolveVersionValue(versionTag, rawVersion) || UI_TEXT.unknown;
+};
+
+const hasCreatedVersionTag = () => {
+    return !!resolveVersionValue(props.translateObj.createdVersion, props.translateObj.createdVersionRaw);
+};
+
+const hasAnyVersionInfo = () => {
+    return hasCreatedVersionTag() || !!resolveVersionValue(props.translateObj.updatedVersion, props.translateObj.updatedVersionRaw);
 };
 
 const showUpdatedVersionTag = () => {
-    const created = formatVersion(props.translateObj.createdVersion, props.translateObj.createdVersionRaw);
-    const updated = formatVersion(props.translateObj.updatedVersion, props.translateObj.updatedVersionRaw);
+    const updated = resolveVersionValue(props.translateObj.updatedVersion, props.translateObj.updatedVersionRaw);
+    if (!updated) return false;
+    const created = resolveVersionValue(props.translateObj.createdVersion, props.translateObj.createdVersionRaw);
     return created !== updated;
 };
 </script>
@@ -168,8 +181,9 @@ const showUpdatedVersionTag = () => {
             <StylizedText :text="translate" :keyword="$props.keyword" />
         </div>
 
-        <div class="versionTags" v-if="props.translateObj.createdVersion || props.translateObj.updatedVersion">
+        <div class="versionTags" v-if="hasAnyVersionInfo()">
             <el-tag
+                v-if="hasCreatedVersionTag()"
                 size="small"
                 effect="plain"
                 class="versionTag"
