@@ -338,14 +338,21 @@ const isCopyableText = (text) => {
     return normalized.trim().length > 0
 }
 
+const resolveVersionValue = (versionTag, rawVersion) => {
+    if (versionTag) return String(versionTag).trim()
+    if (rawVersion) return String(rawVersion).trim()
+    return ''
+}
+
 const formatVersionTag = (versionTag, rawVersion) => {
-    if (versionTag) return versionTag
-    if (rawVersion) return String(rawVersion)
-    return UI_TEXT.unknown
+    return resolveVersionValue(versionTag, rawVersion) || UI_TEXT.unknown
 }
 
 const shouldShowUpdatedVersionTag = (createdTag, createdRaw, updatedTag, updatedRaw) => {
-    return formatVersionTag(createdTag, createdRaw) !== formatVersionTag(updatedTag, updatedRaw)
+    const updatedValue = resolveVersionValue(updatedTag, updatedRaw)
+    if (!updatedValue) return false
+    const createdValue = resolveVersionValue(createdTag, createdRaw)
+    return createdValue !== updatedValue
 }
 
 const displayLanguages = computed(() => {

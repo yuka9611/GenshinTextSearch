@@ -1,5 +1,7 @@
 import { ref, watch } from 'vue'
 
+const UNKNOWN_VERSION_TEXT = '未知'
+
 const useSearchCommon = () => {
   const keyword = ref('')
   const keywordLast = ref('')
@@ -14,6 +16,12 @@ const useSearchCommon = () => {
   }
 
   const normalizeVersion = (value) => normalizeText(value)
+
+  const resolveVersionValue = (versionTag, rawVersion) => {
+    if (versionTag) return String(versionTag).trim()
+    if (rawVersion) return String(rawVersion).trim()
+    return ''
+  }
 
   const getNormalizedEntryVersion = (entry, kind) => {
     if (kind === 'created') return normalizeVersion(entry.createdVersion || entry.createdVersionRaw || '')
@@ -41,12 +49,17 @@ const useSearchCommon = () => {
   }
 
   const displayVersion = (entry, kind) => {
-    if (kind === 'created') return entry.createdVersion || entry.createdVersionRaw || '未知'
-    return entry.updatedVersion || entry.updatedVersionRaw || '未知'
+    const value = kind === 'created'
+      ? resolveVersionValue(entry.createdVersion, entry.createdVersionRaw)
+      : resolveVersionValue(entry.updatedVersion, entry.updatedVersionRaw)
+    return value || UNKNOWN_VERSION_TEXT
   }
 
   const showUpdatedVersionTag = (entry) => {
-    return displayVersion(entry, 'created') !== displayVersion(entry, 'updated')
+    const updatedValue = resolveVersionValue(entry.updatedVersion, entry.updatedVersionRaw)
+    if (!updatedValue) return false
+    const createdValue = resolveVersionValue(entry.createdVersion, entry.createdVersionRaw)
+    return createdValue !== updatedValue
   }
 
   const setupVersionWatchers = (callback) => {
