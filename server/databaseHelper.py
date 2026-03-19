@@ -10,6 +10,15 @@ import config
 import fts_tokenizer
 
 
+def _coerce_optional_int(value: object) -> int | None:
+    if value is None:
+        return None
+    try:
+        return int(str(value))
+    except (TypeError, ValueError):
+        return None
+
+
 def _normalize_fts_tokenizer(tokenizer: str | None) -> str:
     text = str(tokenizer or "").strip()
     return text or "trigram"
@@ -1324,9 +1333,8 @@ def _extract_fetter_voice_rows(content: dict) -> list[tuple[int, int, str]]:
     raw_voice_file = content.get("MGOMDNKKLCP")
     if raw_voice_file is None:
         raw_voice_file = content.get("voiceFile", content.get("Id", content.get("id")))
-    try:
-        voice_file = int(raw_voice_file)
-    except (TypeError, ValueError):
+    voice_file = _coerce_optional_int(raw_voice_file)
+    if voice_file is None:
         return []
 
     source_nodes = content.get("OPGDOEDEJOJ")
@@ -1367,7 +1375,7 @@ def _load_fetter_voice_rows_from_data() -> list[tuple[int, int, str]]:
         return []
 
     items_dir = data_root / "BinOutput" / "Voice" / "Items"
-    rows: list[tuple[int, str]] = []
+    rows: list[tuple[int, int, str]] = []
     for json_file in sorted(items_dir.glob("*.json")):
         try:
             with open(json_file, encoding="utf-8") as fp:
@@ -1539,7 +1547,7 @@ def _select_avatar_scoped_voice_items_by_filters(
             "and contentText.lang = ? "
             "where 1=1 "
         )
-        params = [langCode, langCode]
+        params: list[object] = [langCode, langCode]
 
         if keyword_text:
             sql += (
@@ -1995,7 +2003,7 @@ def countTextMapFromKeywordVoice(
         return int(row[0]) if row else 0
 
 
-def hasVoiceForTextHashDb(textHash: int) -> bool:
+def _legacy_hasVoiceForTextHashDb(textHash: int) -> bool:
     with closing(conn.cursor()) as cursor:
         # 优化语音存在性检查：直接查询dialogue和voice表，减少子查询嵌套
         sql = (
@@ -2059,7 +2067,7 @@ def getTextMapVersionInfo(textHash: int, preferred_lang: int | None = None):
         return None, None
 
 
-def selectVoicePathFromTextHash(textHash: int):
+def _legacy_selectVoicePathFromTextHash(textHash: int):
     with closing(conn.cursor()) as cursor:
         # 先查询dialogue表
         sql_dialogue = "select voicePath from dialogue join voice on voice.dialogueId = dialogue.dialogueId where textHash=? limit 1"
@@ -2274,7 +2282,7 @@ def getTalkQuestId(talkId: int):
         return ans2[0][0]
 
 
-def getQuestName(questId, langCode):
+def getQuestName(questId, langCode) -> str:
     with closing(conn.cursor()) as cursor:
         sql2 = ('select content from quest, textMap '
                 'where quest.questId=? and titleTextMapHash=hash and lang=?')
@@ -2283,7 +2291,7 @@ def getQuestName(questId, langCode):
         if len(ans2) == 0:
             return "对话文本"
 
-        questTitle = _normalize_output_text(ans2[0][0], langCode)
+        questTitle = _normalize_output_text(ans2[0][0], langCode) or "对话文本"
 
         sql3 = 'select chapterTitleTextMapHash,chapterNumTextMapHash from chapter, quest where questId=? and quest.chapterId=chapter.chapterId'
         cursor.execute(sql3, (questId,))
@@ -2319,11 +2327,11 @@ def getTalkQuestName(talkId: int, langCode: int = 1) -> str:
     return getQuestName(questId, langCode)
 
 
-def getCoopTalkQuestName(coopQuestId, langCode):
+def getCoopTalkQuestName(coopQuestId, langCode) -> str:
     return getQuestName(coopQuestId // 100, langCode)
 
 
-def getSourceFromDialogue(textHash: int, langCode: int = 1):
+def getSourceFromDialogue(textHash: int, langCode: int = 1) -> str | None:
     talkInfo = getTalkInfo(textHash)
     if talkInfo is None:
         return None
@@ -2389,7 +2397,7 @@ def selectVoiceFromKeywordPaged(keyWord: str, page: int, size: int, langCode: in
         return results
 
 
-def getVoicePath(voice_hash: str, lang: int):
+def _legacy_getVoicePath(voice_hash: str, lang: int):
     """
     获取语音路径
     """
@@ -2921,6 +2929,72 @@ def selectQuestByIdContains(
         return cursor.fetchall()
 
 
+def selectQuestByContentKeyword(
+    keyword: str,
+    langCode: int,
+    created_version: str | None = None,
+    updated_version: str | None = None,
+    source_type: str | None = None,
+):
+    with closing(conn.cursor()) as cursor:
+        exact, fuzzy = _build_like_patterns(keyword, langCode)
+        version_select = _version_select_expr("quest", "quest", langCode)
+        match_sql_parts: list[str] = []
+        if _table_has_column("quest", "descTextMapHash"):
+            match_sql_parts.append(
+                "select q.questId as questId, 0 as match_rank, descText.content as matched_text "
+                "from quest q "
+                "join textMap descText on q.descTextMapHash=descText.hash "
+                "where descText.lang=? "
+                "and (descText.content like ? escape '\\' or descText.content like ? escape '\\') "
+            )
+        match_sql_parts.append(
+            "select distinct qt.questId as questId, 1 as match_rank, dialogueText.content as matched_text "
+            "from questTalk qt "
+            "join dialogue d on d.talkId = qt.talkId "
+            "and ("
+            + _quest_talk_dialogue_join_condition("qt", "d")
+            + ") "
+            "join textMap dialogueText on dialogueText.hash=d.textHash "
+            "where dialogueText.lang=? "
+            "and (dialogueText.content like ? escape '\\' or dialogueText.content like ? escape '\\') "
+        )
+        match_sql = " union all ".join(match_sql_parts)
+        sql = (
+            "with matched as ("
+            + match_sql
+            + "), ranked as ("
+            "select questId, min(match_rank) as best_rank "
+            "from matched "
+            "group by questId"
+            ") "
+            f"select quest.questId, quest.titleTextMapHash, titleText.content, "
+            "(select min(m2.matched_text) from matched m2 "
+            "where m2.questId=ranked.questId and m2.match_rank=ranked.best_rank) as matched_text, "
+            f"{version_select}, ranked.best_rank "
+            "from ranked "
+            "join quest on ranked.questId=quest.questId "
+            "left join textMap titleText on quest.titleTextMapHash=titleText.hash and titleText.lang=? "
+        )
+        params: list = []
+        if _table_has_column("quest", "descTextMapHash"):
+            params.extend([langCode, exact, fuzzy])
+        params.extend([langCode, exact, fuzzy, langCode])
+        sql = _append_version_filter_clause(
+            sql,
+            params,
+            "quest",
+            created_version,
+            updated_version,
+            "quest",
+            langCode,
+        )
+        sql = _append_quest_source_type_filter_clause(sql, params, "quest", source_type)
+        sql += "order by ranked.best_rank, quest.questId limit 200"
+        cursor.execute(sql, params)
+        return cursor.fetchall()
+
+
 def selectAvatarByNameKeyword(keyword: str, langCode: int):
     with closing(conn.cursor()) as cursor:
         exact, fuzzy = _build_like_patterns(keyword, langCode)
@@ -2937,7 +3011,7 @@ def selectAvatarByNameKeyword(keyword: str, langCode: int):
         return cursor.fetchall()
 
 
-def selectAvatarVoiceItems(avatarId: int, limit: int = 400):
+def _legacy_selectAvatarVoiceItems(avatarId: int, limit: int = 400):
     with closing(conn.cursor()) as cursor:
         sql = (
             "select fetters.voiceTitleTextMapHash, fetters.voiceFileTextTextMapHash, voice.voicePath "
@@ -2969,7 +3043,7 @@ def selectAvatarStories(avatarId: int, limit: int = 800):
             return []
 
 
-def selectAvatarVoiceItemsByFilters(
+def _legacy_selectAvatarVoiceItemsByFilters(
     keyword: str | None,
     langCode: int,
     limit: int | None = 800,
@@ -2997,7 +3071,7 @@ def selectAvatarVoiceItemsByFilters(
             "and contentText.lang = ? "
             "where 1=1 "
         )
-        params = []
+        params: list[object] = []
         params.append(langCode)
         params.append(langCode)
 
@@ -4026,11 +4100,11 @@ def hasVoiceForTextHashDb(textHash: int) -> bool:
     return _hasVoiceForTextHashDb_impl(textHash)
 
 
-def selectVoicePathFromTextHash(textHash: int):
+def selectVoicePathFromTextHash(textHash: int) -> str | None:
     return _selectVoicePathFromTextHash_impl(textHash)
 
 
-def getVoicePath(voice_hash: str, lang: int):
+def getVoicePath(voice_hash: str, lang: int) -> str | None:
     return _getVoicePath_impl(voice_hash, lang)
 
 

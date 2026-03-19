@@ -286,6 +286,44 @@ def _normalize_text_map_content(content: str | None, lang_code: int):
     return placeholderHandler.replace(content, config.getIsMale(), lang_code)
 
 
+def _normalize_preview_text(content: str | None) -> str | None:
+    if content is None:
+        return None
+    text = str(content).replace("\\n", "\n")
+    text = re.sub(r"\s+", " ", text).strip()
+    return text or None
+
+
+def _build_keyword_preview(
+    content: str | None,
+    keyword: str | None,
+    *,
+    radius: int = 28,
+    fallback_limit: int = 72,
+) -> str | None:
+    text = _normalize_preview_text(content)
+    if not text:
+        return None
+
+    keyword_text = _normalize_preview_text(keyword)
+    if keyword_text:
+        start_idx = text.lower().find(keyword_text.lower())
+        if start_idx >= 0:
+            end_idx = start_idx + len(keyword_text)
+            snippet_start = max(0, start_idx - radius)
+            snippet_end = min(len(text), end_idx + radius)
+            snippet = text[snippet_start:snippet_end].strip()
+            if snippet_start > 0:
+                snippet = "..." + snippet
+            if snippet_end < len(text):
+                snippet = snippet + "..."
+            return snippet
+
+    if len(text) <= fallback_limit:
+        return text
+    return text[: max(0, fallback_limit - 3)].rstrip() + "..."
+
+
 def _get_text_map_content_with_fallback(
     text_hash: int | None,
     preferred_lang: int | None = None,
@@ -1324,6 +1362,10 @@ def searchNameEntries(
         if chapter_num:
             return chapter_num
         return None
+
+    def build_preview(content: str | None):
+        return _build_keyword_preview(content, keyword_trim)
+
     quest_map = {}
     if keyword_trim:
         questMatches = databaseHelper.selectQuestByTitleKeyword(
@@ -1376,6 +1418,35 @@ def searchNameEntries(
                 "chapterName": chapterName,
                 **_build_version_fields(created_raw, updated_raw),
             }
+        questContentMatches = databaseHelper.selectQuestByContentKeyword(
+            keyword_trim,
+            langCode,
+            created_version_filter,
+            updated_version_filter,
+            quest_source_type_filter,
+        )
+        for questId, title_hash, questTitle, matched_text, created_raw, updated_raw, best_rank in questContentMatches:
+            preview = build_preview(_normalize_text_map_content(matched_text, langCode))
+            if questId in quest_map:
+                if preview and not quest_map[questId].get("contentPreview"):
+                    quest_map[questId]["contentPreview"] = preview
+                if not quest_map[questId].get("contentMatchType"):
+                    quest_map[questId]["contentMatchType"] = "description" if best_rank == 0 else "dialogue"
+                continue
+            chapterName = databaseHelper.getQuestChapterName(questId, langCode)
+            resolved_title = questTitle or _get_text_map_content_with_fallback(
+                title_hash,
+                langCode,
+                [config.getSourceLanguage()],
+            )
+            quest_map[questId] = {
+                "questId": questId,
+                "title": resolved_title or str(questId),
+                "chapterName": chapterName,
+                "contentPreview": preview,
+                "contentMatchType": "description" if best_rank == 0 else "dialogue",
+                **_build_version_fields(created_raw, updated_raw),
+            }
     else:
         questMatches = databaseHelper.selectQuestByVersion(
             langCode,
@@ -1398,6 +1469,7 @@ def searchNameEntries(
     if langCode in langMap and (keyword_trim or created_version_filter or updated_version_filter):
         langStr = langMap[langCode]
         readable_seen = set()
+        readable_entry_map = {}
         if keyword_trim:
             readableMatches = databaseHelper.selectReadableByTitleKeyword(
                 keyword_trim,
@@ -1415,13 +1487,15 @@ def searchNameEntries(
                     langCode,
                     [config.getSourceLanguage()],
                 )
-                readables.append({
+                entry = {
                     "fileName": fileName,
                     "readableId": readableId,
                     "title": resolved_title or fileName,
                     "titleTextMapHash": resolved_hash,
                     **_build_version_fields(created_raw, updated_raw),
-                })
+                }
+                readables.append(entry)
+                readable_entry_map[(readableId, fileName)] = entry
                 readable_seen.add((readableId, fileName))
             readableFileMatches = databaseHelper.selectReadableByFileNameContains(
                 keyword_trim,
@@ -1443,13 +1517,15 @@ def searchNameEntries(
                     langCode,
                     [config.getSourceLanguage()],
                 )
-                readables.append({
+                entry = {
                     "fileName": fileName,
                     "readableId": readableId,
                     "title": resolved_title or fileName,
                     "titleTextMapHash": resolved_hash,
                     **_build_version_fields(created_raw, updated_raw),
-                })
+                }
+                readables.append(entry)
+                readable_entry_map[key] = entry
             readableContentMatches = databaseHelper.selectReadableFromKeyword(
                 keyword_trim,
                 langCode,
@@ -1459,9 +1535,12 @@ def searchNameEntries(
                 created_version=created_version_filter,
                 updated_version=updated_version_filter,
             )
-            for fileName, _content, titleTextMapHash, readableId, created_raw, updated_raw in readableContentMatches:
+            for fileName, content, titleTextMapHash, readableId, created_raw, updated_raw in readableContentMatches:
                 key = (readableId, fileName)
+                preview = build_preview(content)
                 if key in readable_seen:
+                    if preview and key in readable_entry_map and not readable_entry_map[key].get("contentPreview"):
+                        readable_entry_map[key]["contentPreview"] = preview
                     continue
                 readable_seen.add(key)
                 resolved_hash = titleTextMapHash
@@ -1472,13 +1551,16 @@ def searchNameEntries(
                     langCode,
                     [config.getSourceLanguage()],
                 )
-                readables.append({
+                entry = {
                     "fileName": fileName,
                     "readableId": readableId,
                     "title": title or fileName,
                     "titleTextMapHash": resolved_hash,
+                    "contentPreview": preview,
                     **_build_version_fields(created_raw, updated_raw),
-                })
+                }
+                readables.append(entry)
+                readable_entry_map[key] = entry
         else:
             readableMatches = databaseHelper.selectReadableByVersion(
                 langCode,
@@ -1495,13 +1577,15 @@ def searchNameEntries(
                     langCode,
                     [config.getSourceLanguage()],
                 )
-                readables.append({
+                entry = {
                     "fileName": fileName,
                     "readableId": readableId,
                     "title": resolved_title or fileName,
                     "titleTextMapHash": resolved_hash,
                     **_build_version_fields(created_raw, updated_raw),
-                })
+                }
+                readables.append(entry)
+                readable_entry_map[(readableId, fileName)] = entry
 
     _sort_entries_by_match_with_exact_id(
         quests,
@@ -1510,6 +1594,7 @@ def searchNameEntries(
         lambda entry: [
             entry.get("title"),
             entry.get("chapterName"),
+            entry.get("contentPreview"),
             str(entry.get("questId", "")),
         ],
         lambda entry: entry.get("questId"),
@@ -1519,7 +1604,7 @@ def searchNameEntries(
         readables,
         keyword_trim,
         langCode,
-        lambda entry: [entry.get("title"), entry.get("fileName")],
+        lambda entry: [entry.get("title"), entry.get("fileName"), entry.get("contentPreview")],
         lambda entry: entry.get("readableId"),
         lambda entry: str(entry.get("fileName", "")),
     )
@@ -1549,7 +1634,7 @@ def searchAvatarEntries(keyword: str, langCode: int):
     }
 
 
-def getAvatarVoices(avatarId: int, searchLang: int | None = None):
+def _legacy_getAvatarVoices(avatarId: int, searchLang: int | None = None):
     langs, sourceLangCode, _keywordLangCode = _resolve_avatar_query_langs(searchLang)
 
     avatarName = databaseHelper.getCharterName(avatarId, sourceLangCode)
@@ -1678,7 +1763,7 @@ def getAvatarStories(avatarId: int, searchLang: int | None = None):
 
 
 
-def searchAvatarVoicesByFilters(
+def _legacy_searchAvatarVoicesByFilters(
     title_keyword: str | None = None,
     searchLang: int | None = None,
     created_version: str | None = None,
