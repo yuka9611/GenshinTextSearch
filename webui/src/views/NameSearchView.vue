@@ -205,6 +205,9 @@ setupVersionWatchers(onSearchClicked)
           <div class="cardTitle">
             <StylizedText :text="quest.title" :keyword="keywordLast" />
           </div>
+          <div v-if="quest.contentPreview" class="cardPreview">
+            <StylizedText :text="quest.contentPreview" :keyword="keywordLast" />
+          </div>
           <div v-if="quest.chapterName" class="cardMeta">{{ uiText.chapter }}: {{ quest.chapterName }}</div>
           <div class="cardMeta">{{ uiText.questId }}: {{ quest.questId }}</div>
           <div class="versionTags">
@@ -223,6 +226,9 @@ setupVersionWatchers(onSearchClicked)
         <el-card v-for="readable in filteredReadableResults" :key="`${readable.readableId}-${readable.fileName}`" class="resultCard">
           <div class="cardTitle">
             <StylizedText :text="readable.title" :keyword="keywordLast" />
+          </div>
+          <div v-if="readable.contentPreview" class="cardPreview">
+            <StylizedText :text="readable.contentPreview" :keyword="keywordLast" />
           </div>
           <div class="versionTags">
             <el-tag size="small" effect="plain">{{ uiText.created }}: {{ displayVersion(readable, 'created') }}</el-tag>
@@ -317,6 +323,16 @@ setupVersionWatchers(onSearchClicked)
 
 .cardTitle {
   font-weight: 600;
+}
+
+.cardPreview {
+  color: #666;
+  font-size: 13px;
+  line-height: 1.6;
+}
+
+.cardPreview:deep(p) {
+  margin: 0;
 }
 
 .cardTitle :deep(p) {
