@@ -8,6 +8,7 @@ from import_utils import (
     BufferedExecutemany,
     build_versioned_upsert_sql,
     drop_temp_table,
+    print_summary as _print_summary,
     reset_temp_table,
 )
 from localization_utils import (
@@ -18,19 +19,6 @@ from localization_utils import (
 from version_control import assign_readable_versions_by_text, should_update_version
 from version_control import ensure_version_schema, get_current_version, get_or_create_version_id
 from textmap_name_utils import analyze_readable_exceptions, report_exceptions, delete_empty_readable_entries
-
-
-def _print_summary(title: str, items: list[str], sample_size: int = 10):
-    if not items:
-        return
-    samples = items[: max(1, sample_size)]
-    sample_text = ", ".join(samples)
-    remaining = len(items) - len(samples)
-    if remaining > 0:
-        sample_text += f", ...(+{remaining})"
-    print(f"[SUMMARY] {title}: {len(items)}. samples: {sample_text}")
-
-
 def _load_readable_filename_map() -> dict:
     print("Loading document and localization configs...")
     loc_id_to_title_hash = load_document_loc_title_hash(DATA_PATH)

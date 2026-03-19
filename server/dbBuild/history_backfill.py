@@ -11,10 +11,12 @@ import time
 
 
 from DBConfig import conn, DATA_PATH
+from git_utils import resolve_commit as _resolve_commit_impl, run_git as _run_git_impl
 from import_utils import (
     DEFAULT_BATCH_SIZE,
     executemany_batched,
     fast_import_pragmas,
+    normalize_unique_ints,
     to_hash_value as _to_hash_value,
 )
 from lang_constants import LANG_CODE_MAP
@@ -23,7 +25,12 @@ from quest_hash_map_utils import (
     refresh_all_quest_hash_map as _refresh_all_quest_hash_map,
     unresolved_created_quest_ids as _unresolved_created_quest_ids,
 )
-from questImport import SOURCE_TYPE_ANECDOTE, SOURCE_TYPE_HANGOUT
+from quest_source_utils import (
+    SOURCE_TYPE_ANECDOTE,
+    SOURCE_TYPE_HANGOUT,
+    extract_main_coop_ids,
+    extract_storyboard_group_talk_ids,
+)
 from quest_utils import extract_quest_row as _extract_quest_row
 from version_control import backfill_quest_created_version_from_textmap as _backfill_quest_created_version_from_textmap
 from subtitle_utils import parse_srt_rows as _parse_srt_rows
@@ -190,6 +197,14 @@ def _run_history_stage(stage_name, fn, *args, skip_asking=False, **kwargs):
         raise
 
 def _run_git(repo_path: str, args: list[str], check: bool = True) -> str:
+    return _run_git_impl(
+        repo_path,
+        args,
+        check=check,
+        cache=_git_cache,
+        logger=logger,
+        low_priority=True,
+    )
     """执行 Git 命令并缓存结果。"""
     cache_key = (repo_path, tuple(args))
 
@@ -229,6 +244,13 @@ def _run_git(repo_path: str, args: list[str], check: bool = True) -> str:
 
 
 def _resolve_commit(repo_path: str, rev: str) -> str:
+    return _resolve_commit_impl(
+        repo_path,
+        rev,
+        cache=_git_cache,
+        logger=logger,
+        low_priority=True,
+    )
     """解析提交引用。"""
     return _run_git(repo_path, ["rev-parse", rev], check=True)
 
@@ -773,7 +795,7 @@ def _extract_anecdote_history_row(row: dict) -> tuple[int, int | None, int | Non
     desc_hash = row.get("JKNBFACAMCF")
     if not isinstance(desc_hash, int) or desc_hash == 0:
         desc_hash = None
-    group_ids = _normalize_anecdote_int_list(row.get("LIIPHELCPKJ"))
+    group_ids = normalize_unique_ints(row.get("LIIPHELCPKJ"), positive_only=True)
     return anecdote_id, title_hash, desc_hash, group_ids
 
 
@@ -799,7 +821,7 @@ def _load_anecdote_history_payload(repo_path: str, commit_sha: str, anecdote_id:
         group_obj = _git_show_json(repo_path, commit_sha, f"BinOutput/Talk/StoryboardGroup/{group_id}.json")
         if not isinstance(group_obj, dict):
             continue
-        for talk_id in _extract_storyboard_group_talk_ids_from_history(group_obj):
+        for talk_id in extract_storyboard_group_talk_ids(group_obj):
             if talk_id in seen:
                 continue
             seen.add(talk_id)
@@ -834,7 +856,7 @@ def _extract_hangout_history_main_coop_ids(rows, quest_id: int) -> list[int]:
 
 def _load_hangout_history_payload(repo_path: str, commit_sha: str, quest_id: int) -> dict | None:
     rows = _git_show_json(repo_path, commit_sha, MAIN_COOP_CONFIG_PATH)
-    main_coop_ids = _extract_hangout_history_main_coop_ids(rows, quest_id)
+    main_coop_ids = extract_main_coop_ids(rows, quest_id)
     if not main_coop_ids:
         return None
     existing_main_coop_ids: list[int] = []

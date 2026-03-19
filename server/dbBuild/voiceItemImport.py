@@ -4,7 +4,7 @@ import sys
 from lightweight_progress import LightweightProgress
 
 from DBConfig import conn, DATA_PATH
-from import_utils import DEFAULT_BATCH_SIZE, executemany_batched
+from import_utils import DEFAULT_BATCH_SIZE, executemany_batched, print_summary as _print_summary
 from version_control import ensure_version_schema
 
 
@@ -33,20 +33,6 @@ AVATAR_NAME_KEYS = (
     "IEPAMKPOOII",
     "switchName",
 )
-
-
-def _print_summary(title: str, items: list[str] | set[str], sample_size: int = 10):
-    values = list(items)
-    if not values:
-        return
-    samples = values[: max(1, sample_size)]
-    sample_text = ", ".join(samples)
-    remaining = len(values) - len(samples)
-    if remaining > 0:
-        sample_text += f", ...(+{remaining})"
-    print(f"[SUMMARY] {title}: {len(values)}. samples: {sample_text}")
-
-
 def _collect_switch_names(config_node, output: set):
     if isinstance(config_node, dict):
         for value in config_node.values():

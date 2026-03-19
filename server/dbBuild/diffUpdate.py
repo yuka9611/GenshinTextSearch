@@ -12,6 +12,8 @@ import voiceItemImport
 import readableImport
 import subtitleImport
 import textMapImport
+from git_utils import resolve_commit as _resolve_commit, run_git as _run_git
+from import_utils import print_skip_summary as _print_skip_summary
 from textmap_name_utils import parse_textmap_file_name, textmap_file_sort_key, analyze_textmap_version_exceptions, analyze_readable_version_exceptions, analyze_subtitle_version_exceptions, report_version_exceptions
 from version_control import (
     ensure_version_schema,
@@ -25,19 +27,6 @@ from versioning import resolve_version_label
 SOURCE_REPO_URL = "https://gitlab.com/Dimbreath/AnimeGameData.git"
 DIFF_RESUME_RANGE_KEY = "db_diffupdate_resume_range"
 DIFF_RESUME_STAGE_KEY = "db_diffupdate_resume_stage"
-
-
-def _print_skip_summary(title: str, skipped_files: list[str], sample_size: int = 10):
-    if not skipped_files:
-        return
-    samples = skipped_files[: max(1, sample_size)]
-    sample_text = ", ".join(samples)
-    remaining = len(skipped_files) - len(samples)
-    if remaining > 0:
-        sample_text += f", ...(+{remaining})"
-    print(f"[SKIP] {title}: {len(skipped_files)} files skipped. samples: {sample_text}")
-
-
 def _print_anomaly_summary(anomalies: list[str]):
     if not anomalies:
         print("[ANOMALY] no non-fatal anomalies detected.")
@@ -49,30 +38,6 @@ def _print_anomaly_summary(anomalies: list[str]):
 
 def _utc_now_iso() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-
-
-def _run_git(repo_path: str, args: list[str], check: bool = True) -> str:
-    cmd = ["git", "-C", repo_path] + args
-    try:
-        proc = subprocess.run(
-            cmd,
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-        )
-        if check and proc.returncode != 0:
-            error_msg = proc.stderr.strip() or "git command failed"
-            raise RuntimeError(f"Git command failed: {' '.join(cmd)}\nError: {error_msg}")
-        return (proc.stdout or "").strip()
-    except Exception as e:
-        raise RuntimeError(f"Error executing git command {' '.join(cmd)}: {str(e)}")
-
-
-def _resolve_commit(repo_path: str, rev: str) -> str:
-    return _run_git(repo_path, ["rev-parse", rev], check=True).strip()
-
-
 def _list_remotes(repo_path: str) -> set[str]:
     out = _run_git(repo_path, ["remote"], check=False)
     remotes = {line.strip() for line in out.splitlines() if line.strip()}

@@ -8,6 +8,7 @@ from import_utils import (
     BufferedExecutemany,
     build_versioned_upsert_sql,
     drop_temp_table,
+    print_summary as _print_summary,
     reset_temp_table,
 )
 from lang_constants import LANG_CODE_MAP
@@ -16,19 +17,6 @@ from subtitle_utils import iter_srt_entries, subtitle_key
 from version_control import assign_subtitle_versions_by_text, should_update_version
 from version_control import ensure_version_schema, get_current_version, get_or_create_version_id
 from textmap_name_utils import analyze_subtitle_exceptions, report_exceptions, delete_empty_subtitle_entries
-
-
-def _print_summary(title: str, items: list[str], sample_size: int = 10):
-    if not items:
-        return
-    samples = items[: max(1, sample_size)]
-    sample_text = ", ".join(samples)
-    remaining = len(items) - len(samples)
-    if remaining > 0:
-        sample_text += f", ...(+{remaining})"
-    print(f"[SUMMARY] {title}: {len(items)}. samples: {sample_text}")
-
-
 def _load_subtitle_filename_map() -> dict:
     print("Loading localization configs for subtitles...")
     localization_entries = load_localization_entries(DATA_PATH)
