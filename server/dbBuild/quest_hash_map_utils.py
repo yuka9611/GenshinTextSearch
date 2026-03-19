@@ -3,6 +3,13 @@ from __future__ import annotations
 from import_utils import DEFAULT_BATCH_SIZE, executemany_batched
 
 
+def _quest_talk_dialogue_join_condition(qt_alias: str = "qt", d_alias: str = "d") -> str:
+    return (
+        f"(({qt_alias}.coopQuestId IS NULL OR {qt_alias}.coopQuestId = 0) AND {d_alias}.coopQuestId IS NULL) "
+        f"OR ({qt_alias}.coopQuestId > 0 AND {d_alias}.coopQuestId = {qt_alias}.coopQuestId)"
+    )
+
+
 def ensure_quest_hash_map_schema(cursor):
     cursor.execute(
         """
@@ -125,6 +132,8 @@ def _refresh_quest_hash_map_by_target_table(cursor):
           AND q.titleTextMapHash <> 0
         """
     )
+    # Keep quest updated-version tracking scoped to title/dialogue text only.
+    # Quest description and step-title metadata are UI-only and must not affect quest_version.
     cursor.execute(
         """
         INSERT OR IGNORE INTO quest_hash_map(questId, hash, source_type)
@@ -132,6 +141,11 @@ def _refresh_quest_hash_map_by_target_table(cursor):
         FROM questTalk qt
         JOIN _qhm_target_quest_id t ON t.questId = qt.questId
         JOIN dialogue d ON d.talkId = qt.talkId
+           AND (
+               """
+        + _quest_talk_dialogue_join_condition("qt", "d")
+        + """
+           )
         WHERE d.textHash IS NOT NULL
           AND d.textHash <> 0
         """

@@ -67,7 +67,6 @@ watch(() => props.keyword, (newValue) => {
 
 watch(localSelectedLanguage, (newValue) => {
   emit('update:selectedLanguage', newValue)
-  emit('search')
 })
 
 watch(() => props.selectedLanguage, (newValue) => {

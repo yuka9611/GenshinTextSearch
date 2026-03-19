@@ -55,6 +55,7 @@ const isReadable = ref(false)
 const readableTitle = ref("")
 const readableFileName = ref("")
 const readableTranslates = ref({})
+const questDescription = ref("")
 const readableCreatedVersion = ref("")
 const readableUpdatedVersion = ref("")
 const readableCreatedVersionRaw = ref("")
@@ -67,9 +68,31 @@ const pageSize = ref(200)
 const currentPage = ref(1)
 const totalCount = ref(0)
 const totalPages = computed(() => Math.max(1, Math.ceil(totalCount.value / pageSize.value)))
+const currentTalkId = ref(null)
+const currentQuestId = ref(null)
 
 let playVoiceButtonDict = {}
 let playableDialogueIdList = []
+
+const toDisplayId = (value) => {
+    if (value === null || value === undefined) return null
+    const text = String(value).trim()
+    if (!text || text === "0" || text === "NaN") return null
+    return text
+}
+
+const displayMetaIds = computed(() => {
+    const items = []
+    const talkIdValue = toDisplayId(currentTalkId.value)
+    const questIdValue = toDisplayId(currentQuestId.value)
+    if (talkIdValue) {
+        items.push({ label: "Talk ID", value: talkIdValue })
+    }
+    if (questIdValue) {
+        items.push({ label: "Quest ID", value: questIdValue })
+    }
+    return items
+})
 
 const updateContentScrollClass = () => {
     const content = document.querySelector(".content")
@@ -86,12 +109,17 @@ const reloadPage = () => {
     playVoiceButtonDict = {}
     playableDialogueIdList = []
     totalCount.value = 0
+    questDescription.value = ""
+    currentTalkId.value = null
+    currentQuestId.value = null
     const isSubtitle = !!route.query.isSubtitle
     const readableId = route.query.readableId
     const fileName = route.query.fileName
     const questId = route.query.questId
     if ((readableId || fileName) && !isSubtitle) {
         isReadable.value = true
+        totalCount.value = 0
+        currentPage.value = 1
         subtitleCreatedVersion.value = ""
         subtitleUpdatedVersion.value = ""
         subtitleCreatedVersionRaw.value = ""
@@ -103,6 +131,7 @@ const reloadPage = () => {
     }
     if (questId) {
         isReadable.value = false
+        currentQuestId.value = questId
         readableCreatedVersion.value = ""
         readableUpdatedVersion.value = ""
         readableCreatedVersionRaw.value = ""
@@ -127,12 +156,13 @@ const reloadPage = () => {
     subtitleCreatedVersionRaw.value = ""
     subtitleUpdatedVersionRaw.value = ""
     textHash.value = parseInt(route.query.textHash)
+    currentPage.value = 1
     updateContentScrollClass()
-    reloadTalk()
+    reloadTalk(false)
 }
 
 
-const reloadTalk = () => {
+const reloadTalk = (useCurrentPage = true) => {
     if (route.query.isSubtitle) {
         api.getSubtitleContext(route.query.fileName, route.query.subtitleId, route.query.searchLang).then(res => {
             let resJson = res.json
@@ -140,6 +170,11 @@ const reloadTalk = () => {
             let talkContents = resJson.contents
             questName.value = talkContents.talkQuestName
             dialogues.value = talkContents.dialogues
+            questDescription.value = ""
+            currentTalkId.value = null
+            currentQuestId.value = null
+            totalCount.value = talkContents.dialogues?.length || 0
+            currentPage.value = 1
             subtitleCreatedVersion.value = talkContents.createdVersion || ""
             subtitleUpdatedVersion.value = talkContents.updatedVersion || ""
             subtitleCreatedVersionRaw.value = talkContents.createdVersionRaw || ""
@@ -155,12 +190,22 @@ const reloadTalk = () => {
     subtitleCreatedVersionRaw.value = ""
     subtitleUpdatedVersionRaw.value = ""
 
-    api.getTalkFromHash(textHash.value, route.query.searchLang).then(res => {
+    api.getTalkFromHash(
+        textHash.value,
+        route.query.searchLang,
+        useCurrentPage ? currentPage.value : null,
+        pageSize.value,
+    ).then(res => {
         let resJson = res.json
         queryTime.value = resJson.time.toFixed(2)
         let talkContents = resJson.contents
         questName.value = talkContents.talkQuestName
         dialogues.value = talkContents.dialogues
+        questDescription.value = ""
+        currentTalkId.value = talkContents.talkId ?? null
+        currentQuestId.value = talkContents.questId ?? null
+        totalCount.value = resJson.total || talkContents.total || talkContents.dialogues?.length || 0
+        currentPage.value = resJson.page || talkContents.page || 1
 
     }).catch(err => {
         if(!err.network) err.defaultHandler()
@@ -172,6 +217,7 @@ const reloadReadable = () => {
         let resJson = res.json
         queryTime.value = resJson.time.toFixed(2)
         let readableContents = resJson.contents
+        questDescription.value = ""
         readableTitle.value = readableContents.readableTitle || UI_TEXT.readableFallback
         readableFileName.value = readableContents.fileName || ""
         readableTranslates.value = readableContents.translates || {}
@@ -195,7 +241,10 @@ const reloadQuest = () => {
         queryTime.value = resJson.time.toFixed(2)
         let talkContents = resJson.contents
         questName.value = talkContents.talkQuestName
+        questDescription.value = talkContents.questDescription || ""
         dialogues.value = talkContents.dialogues
+        currentTalkId.value = talkContents.talkId ?? null
+        currentQuestId.value = talkContents.questId ?? route.query.questId ?? null
         totalCount.value = resJson.total || 0
         currentPage.value = resJson.page || currentPage.value
     }).catch(err => {
@@ -204,14 +253,19 @@ const reloadQuest = () => {
 }
 
 const goToPage = (page) => {
-    if (!route.query.questId) return
     if (page < 1) {
         page = 1
     } else if (page > totalPages.value) {
         page = totalPages.value
     }
     currentPage.value = page
-    reloadQuest()
+    if (route.query.questId) {
+        reloadQuest()
+        return
+    }
+    if (route.query.textHash && !route.query.isSubtitle) {
+        reloadTalk(true)
+    }
 }
 
 const normalizeCopyText = (text) => {
@@ -328,7 +382,7 @@ const dialogueGroups = computed(() => {
     }
     const hasTalkId = dialogues.value.some(item => item.talkId)
     if (!hasTalkId) {
-        return [{ talkId: null, rows: dialogues.value }]
+        return [{ talkId: null, stepTitle: '', rows: dialogues.value }]
     }
     const groups = []
     let currentTalkId = null
@@ -336,7 +390,11 @@ const dialogueGroups = computed(() => {
     dialogues.value.forEach((item) => {
         if (item.talkId !== currentTalkId) {
             if (currentRows.length > 0) {
-                groups.push({ talkId: currentTalkId, rows: currentRows })
+                groups.push({
+                    talkId: currentTalkId,
+                    stepTitle: currentRows[0]?.stepTitle || '',
+                    rows: currentRows
+                })
             }
             currentTalkId = item.talkId
             currentRows = [item]
@@ -345,7 +403,11 @@ const dialogueGroups = computed(() => {
         }
     })
     if (currentRows.length > 0) {
-        groups.push({ talkId: currentTalkId, rows: currentRows })
+        groups.push({
+            talkId: currentTalkId,
+            stepTitle: currentRows[0]?.stepTitle || '',
+            rows: currentRows
+        })
     }
     return groups
 })
@@ -488,10 +550,14 @@ const onPlay = () => {
 }
 
 const tableRowClassName = ({row, rowIndex}) => {
-    if(currentPlayingIndex.value >= 0 && row.dialogueId === playableDialogueIdList[currentPlayingIndex.value] ) {
-        return 'playingDialogue'
+    const classNames = []
+    if (row.isSelectedHash) {
+        classNames.push('selectedHashDialogue')
     }
-    return ''
+    if(currentPlayingIndex.value >= 0 && row.dialogueId === playableDialogueIdList[currentPlayingIndex.value] ) {
+        classNames.push('playingDialogue')
+    }
+    return classNames.join(' ')
 }
 
 onActivated(() => {
@@ -514,6 +580,20 @@ onDeactivated(() => {
             <p v-if="!isReadable">{{ UI_TEXT.source }}: {{ questName }}</p>
             <p v-else>{{ UI_TEXT.source }}: {{ readableTitle }}<span v-if="readableFileName"> ({{ readableFileName }})</span></p>
             <p>{{ UI_TEXT.queryTime }}: {{queryTime}} ms</p>
+            <div v-if="!isReadable && displayMetaIds.length" class="metaIdTags">
+                <el-tag
+                    v-for="item in displayMetaIds"
+                    :key="item.label"
+                    size="small"
+                    effect="plain"
+                >
+                    {{ item.label }}: {{ item.value }}
+                </el-tag>
+            </div>
+            <div v-if="!isReadable && questDescription" class="questDescriptionBlock">
+                <div class="questDescriptionLabel">任务描述</div>
+                <StylizedText :text="questDescription" :keyword="keyword" />
+            </div>
 
             <div v-if="isReadable" class="versionTags">
                 <el-tag size="small" effect="plain" :title="readableCreatedVersionRaw">{{ UI_TEXT.created }}: {{ formatVersionTag(readableCreatedVersion, readableCreatedVersionRaw) }}</el-tag>
@@ -573,7 +653,9 @@ onDeactivated(() => {
             </div>
             <div class="dialogueGroups">
                 <div v-for="group in dialogueGroups" :key="group.talkId || 'single'" class="dialogueGroup">
-                    <h3 v-if="group.talkId" class="dialogueGroupTitle">{{ UI_TEXT.talkId }}: {{ group.talkId }}</h3>
+                    <h3 v-if="group.talkId" class="dialogueGroupTitle">
+                        {{ group.stepTitle || `${UI_TEXT.talkId}: ${group.talkId}` }}
+                    </h3>
                     <el-table :data="group.rows" :row-class-name="tableRowClassName">
                         <el-table-column prop="talker" :label="UI_TEXT.speaker" width="110" />
                         <el-table-column v-if="showDialogueVersions" :label="UI_TEXT.version" width="110">
@@ -708,6 +790,27 @@ onDeactivated(() => {
     color: #999;
 }
 
+.metaIdTags {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    margin-top: 8px;
+}
+
+.questDescriptionBlock {
+    margin-top: 10px;
+    padding: 10px 12px;
+    border-left: 3px solid var(--el-color-primary-light-5);
+    background-color: var(--el-color-primary-light-9);
+    color: var(--el-text-color-regular);
+}
+
+.questDescriptionLabel {
+    margin-bottom: 6px;
+    font-weight: 600;
+    color: var(--el-text-color-primary);
+}
+
 .readableContent {
     display: flex;
     flex-direction: column;
@@ -827,6 +930,10 @@ onDeactivated(() => {
 
 :deep( .playingDialogue) {
     background-color: var(--el-color-primary-light-9);
+}
+
+:deep(.selectedHashDialogue:not(.playingDialogue)) {
+    background-color: #fff6dd;
 }
 
 .disabledPlayIcon {

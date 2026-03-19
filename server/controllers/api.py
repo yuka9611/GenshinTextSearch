@@ -451,12 +451,32 @@ def getTalkFromHash():
 
     textHash: int = request.json["textHash"]
     searchLang = request.json.get("searchLang")
+    page = request.json.get("page")
+    pageSize = request.json.get("pageSize", 200)
     if searchLang:
         searchLang = int(searchLang)
+    if page is not None and str(page).strip() != "":
+        try:
+            page = int(page)
+        except Exception:
+            page = None
+    else:
+        page = None
+    try:
+        pageSize = int(pageSize)
+    except Exception:
+        pageSize = 200
+    if pageSize < 1:
+        pageSize = 200
 
     try:
         start = time.time()
-        contents = controllers_module.getTalkFromHash(textHash, searchLang) # type: ignore
+        contents = controllers_module.getTalkFromHash( # type: ignore
+            textHash,
+            searchLang,
+            page=page,
+            page_size=pageSize,
+        )
         end = time.time()
     except Exception as e:
         return jsonify({"data": None, "code": 114, "msg": str(e)})
@@ -464,6 +484,9 @@ def getTalkFromHash():
     return jsonify({
         "data": {
             "contents": contents,
+            "total": contents.get("total", len(contents.get("dialogues", []))),
+            "page": contents.get("page", 1),
+            "pageSize": contents.get("pageSize", pageSize),
             "time": (end - start) * 1000
         },
         "code": 200,
@@ -505,11 +528,13 @@ def nameSearch():
     keyword: str = request.json.get("keyword", "")
     createdVersion = request.json.get("createdVersion")
     updatedVersion = request.json.get("updatedVersion")
+    questSourceType = request.json.get("questSourceType")
 
     has_keyword = keyword.strip() != ""
     has_created = createdVersion and str(createdVersion).strip() != ""
     has_updated = updatedVersion and str(updatedVersion).strip() != ""
-    if not has_keyword and not has_created and not has_updated:
+    has_source_type = questSourceType and str(questSourceType).strip() != ""
+    if not has_keyword and not has_created and not has_updated and not has_source_type:
         return jsonify({
             "data": {
                 "contents": {
@@ -528,6 +553,7 @@ def nameSearch():
         langCode,
         created_version=createdVersion,
         updated_version=updatedVersion,
+        quest_source_type=questSourceType,
     )
     end = time.time()
 

@@ -164,6 +164,10 @@ _FETTER_VOICE_TABLE = "fetterVoice"
 _FETTER_VOICE_SYNC_LOCK = threading.Lock()
 _FETTER_VOICE_SYNC_ATTEMPTED = False
 _FETTER_AVATAR_MAPPINGS: dict[str, int] | None = None
+_ANIME_GAME_DATA_JSON_CACHE: dict[str, object | None] = {}
+_MAIN_QUEST_ROWS_BY_ID: dict[int, dict] | None = None
+_QUEST_STEP_ROWS_BY_MAIN_ID: dict[int, list[dict]] | None = None
+_QUEST_STEP_TALK_MAP_CACHE: dict[tuple[int, int], dict[int, str]] = {}
 
 
 def _get_gender_cache_key() -> str:
@@ -723,7 +727,9 @@ def _build_textmap_query(
             "case when tm.hash = ? then 0 else 1 end, "
             f"{match_sort_sql}, "
             f"{_voice_order_expr('tm.hash')}, "
-            "case when exists (select 1 from dialogue d join questTalk qt on d.talkId = qt.talkId join quest q on qt.questId = q.questId where d.textHash = tm.hash limit 1) then 0 else 1 end, "
+            "case when exists (select 1 from dialogue d join questTalk qt on d.talkId = qt.talkId and ("
+            + _quest_talk_dialogue_join_condition("qt", "d")
+            + ") join quest q on qt.questId = q.questId where d.textHash = tm.hash limit 1) then 0 else 1 end, "
             f"{normalized_length_sql} "
         )
         params.append(hash_value)
@@ -733,7 +739,9 @@ def _build_textmap_query(
             "order by "
             f"{match_sort_sql}, "
             f"{_voice_order_expr('tm.hash')}, "
-            "case when exists (select 1 from dialogue d join questTalk qt on d.talkId = qt.talkId join quest q on qt.questId = q.questId where d.textHash = tm.hash limit 1) then 0 else 1 end, "
+            "case when exists (select 1 from dialogue d join questTalk qt on d.talkId = qt.talkId and ("
+            + _quest_talk_dialogue_join_condition("qt", "d")
+            + ") join quest q on qt.questId = q.questId where d.textHash = tm.hash limit 1) then 0 else 1 end, "
             f"{normalized_length_sql} "
         )
         params.extend(match_sort_params)
@@ -958,6 +966,248 @@ def _resolve_anime_game_data_root() -> Path | None:
         if (normalized / "BinOutput" / "Voice" / "Items").is_dir():
             return normalized
     return None
+
+
+def _read_anime_game_data_json(relative_path: str):
+    if relative_path in _ANIME_GAME_DATA_JSON_CACHE:
+        return _ANIME_GAME_DATA_JSON_CACHE[relative_path]
+
+    data_root = _resolve_anime_game_data_root()
+    if data_root is None:
+        _ANIME_GAME_DATA_JSON_CACHE[relative_path] = None
+        return None
+
+    file_path = data_root / relative_path
+    if not file_path.is_file():
+        _ANIME_GAME_DATA_JSON_CACHE[relative_path] = None
+        return None
+
+    try:
+        with open(file_path, encoding="utf-8-sig") as fp:
+            payload = json.load(fp)
+    except Exception:
+        payload = None
+
+    _ANIME_GAME_DATA_JSON_CACHE[relative_path] = payload
+    return payload
+
+
+def _load_main_quest_rows_by_id() -> dict[int, dict]:
+    global _MAIN_QUEST_ROWS_BY_ID
+    if _MAIN_QUEST_ROWS_BY_ID is not None:
+        return _MAIN_QUEST_ROWS_BY_ID
+
+    rows = _read_anime_game_data_json("ExcelBinOutput/MainQuestExcelConfigData.json")
+    mapping: dict[int, dict] = {}
+    if isinstance(rows, list):
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            quest_id = row.get("id")
+            if isinstance(quest_id, int):
+                mapping[quest_id] = row
+
+    _MAIN_QUEST_ROWS_BY_ID = mapping
+    return mapping
+
+
+def _load_quest_step_rows_by_main_id() -> dict[int, list[dict]]:
+    global _QUEST_STEP_ROWS_BY_MAIN_ID
+    if _QUEST_STEP_ROWS_BY_MAIN_ID is not None:
+        return _QUEST_STEP_ROWS_BY_MAIN_ID
+
+    rows = _read_anime_game_data_json("ExcelBinOutput/QuestExcelConfigData.json")
+    grouped: dict[int, list[dict]] = {}
+    if isinstance(rows, list):
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            main_id = row.get("mainId")
+            if not isinstance(main_id, int):
+                continue
+            grouped.setdefault(main_id, []).append(row)
+
+    for main_id, items in grouped.items():
+        items.sort(key=lambda item: (item.get("order", 10**9), item.get("subId", 10**9)))
+
+    _QUEST_STEP_ROWS_BY_MAIN_ID = grouped
+    return grouped
+
+
+def _get_quest_bin_output(questId: int) -> dict | None:
+    payload = _read_anime_game_data_json(f"BinOutput/Quest/{questId}.json")
+    return payload if isinstance(payload, dict) else None
+
+
+def _resolve_quest_step_text_hash(step_obj: dict) -> int | None:
+    keys = (
+        "stepDescTextMapHash",
+        "OCMKKHHNKJO",
+        "BMBANCMPPOM",
+        "NAEMBIJFJCA",
+        "HMLBMECMBGA",
+    )
+    for key in keys:
+        value = step_obj.get(key)
+        if isinstance(value, int) and value not in (0,):
+            return value
+    return None
+
+
+def _get_quest_bin_step_list(quest_bin: dict) -> list[dict]:
+    steps = quest_bin.get("NLCNGJKMAEN")
+    if not isinstance(steps, list):
+        steps = quest_bin.get("subQuests")
+    if not isinstance(steps, list):
+        steps = quest_bin.get("GFLHMKOOHHA")
+    if not isinstance(steps, list):
+        return []
+    return [item for item in steps if isinstance(item, dict)]
+
+
+def _extract_step_talk_ids_from_quest_bin(quest_bin: dict) -> dict[int, list[int]]:
+    result: dict[int, list[int]] = {}
+    for step in _get_quest_bin_step_list(quest_bin):
+        sub_id = step.get("MPKBGPAKIOA")
+        if not isinstance(sub_id, int):
+            sub_id = step.get("subId")
+        if not isinstance(sub_id, int):
+            continue
+
+        result.setdefault(sub_id, [])
+        conditions = step.get("AACKELGGJGC")
+        if not isinstance(conditions, list):
+            conditions = step.get("finishCond")
+        if not isinstance(conditions, list):
+            conditions = step.get("KBFJAAFDHKJ")
+        if not isinstance(conditions, list):
+            continue
+
+        for condition in conditions:
+            if not isinstance(condition, dict):
+                continue
+            cond_type = (
+                condition.get("DLPKMDPABFM")
+                or condition.get("type")
+                or condition.get("PAINLIBBLDK")
+            )
+            if cond_type != "QUEST_CONTENT_COMPLETE_TALK":
+                continue
+            params = (
+                condition.get("IEKGEJMAOCN")
+                or condition.get("param")
+                or condition.get("paramList")
+                or condition.get("LNHLPKELCAL")
+            )
+            if not isinstance(params, list) or not params:
+                continue
+            talk_id = params[0]
+            if isinstance(talk_id, int) and talk_id > 0 and talk_id not in result[sub_id]:
+                result[sub_id].append(talk_id)
+    return result
+
+
+def getQuestDescription(questId: int, langCode: int = 1) -> str:
+    if _table_has_column("quest", "descTextMapHash"):
+        with closing(conn.cursor()) as cursor:
+            row = cursor.execute(
+                "select content from quest join textMap on quest.descTextMapHash=textMap.hash "
+                "where quest.questId=? and textMap.lang=?",
+                (questId, langCode),
+            ).fetchone()
+        if row and row[0]:
+            return _normalize_output_text(row[0], langCode) or ""
+
+    row = _load_main_quest_rows_by_id().get(questId)
+    if not isinstance(row, dict):
+        return ""
+    desc_hash = row.get("descTextMapHash")
+    if not isinstance(desc_hash, int) or desc_hash == 0:
+        return ""
+    return getTextMapContent(desc_hash, langCode) or ""
+
+
+def getQuestStepTitleMap(questId: int, langCode: int = 1) -> dict[int, str]:
+    cache_key = (int(questId), int(langCode))
+    if cache_key in _QUEST_STEP_TALK_MAP_CACHE:
+        return _QUEST_STEP_TALK_MAP_CACHE[cache_key]
+
+    if _table_has_column("questTalk", "stepTitleTextMapHash"):
+        with closing(conn.cursor()) as cursor:
+            rows = cursor.execute(
+                "select questTalk.talkId, textMap.content "
+                "from questTalk join textMap on questTalk.stepTitleTextMapHash=textMap.hash "
+                "where questTalk.questId=? and textMap.lang=? "
+                "and coalesce(questTalk.coopQuestId, 0)=0 "
+                "and questTalk.stepTitleTextMapHash is not null and questTalk.stepTitleTextMapHash<>0 "
+                "order by questTalk.talkId",
+                (questId, langCode),
+            ).fetchall()
+        if rows:
+            talk_title_map = {
+                int(talk_id): _normalize_output_text(content, langCode) or ""
+                for talk_id, content in rows
+                if isinstance(talk_id, int) and content
+            }
+            _QUEST_STEP_TALK_MAP_CACHE[cache_key] = talk_title_map
+            return talk_title_map
+
+    title_by_sub_id: dict[int, str] = {}
+    order_by_sub_id: dict[int, int] = {}
+
+    for row in _load_quest_step_rows_by_main_id().get(questId, []):
+        if not isinstance(row, dict):
+            continue
+        sub_id = row.get("subId")
+        if not isinstance(sub_id, int):
+            continue
+        text_hash = row.get("stepDescTextMapHash")
+        if isinstance(text_hash, int) and text_hash != 0:
+            title = getTextMapContent(text_hash, langCode) or ""
+            if title:
+                title_by_sub_id[sub_id] = title
+        order = row.get("order")
+        if isinstance(order, int):
+            order_by_sub_id[sub_id] = order
+
+    quest_bin = _get_quest_bin_output(questId)
+    if isinstance(quest_bin, dict):
+        for step in _get_quest_bin_step_list(quest_bin):
+            sub_id = step.get("MPKBGPAKIOA")
+            if not isinstance(sub_id, int):
+                sub_id = step.get("subId")
+            if not isinstance(sub_id, int):
+                continue
+            if sub_id not in title_by_sub_id:
+                text_hash = _resolve_quest_step_text_hash(step)
+                if isinstance(text_hash, int):
+                    title = getTextMapContent(text_hash, langCode) or ""
+                    if title:
+                        title_by_sub_id[sub_id] = title
+            if sub_id not in order_by_sub_id:
+                order = step.get("EDICBFEMNNF")
+                if not isinstance(order, int):
+                    order = step.get("order")
+                if isinstance(order, int):
+                    order_by_sub_id[sub_id] = order
+
+    talk_ids_by_sub_id = _extract_step_talk_ids_from_quest_bin(quest_bin) if isinstance(quest_bin, dict) else {}
+    talk_title_map: dict[int, str] = {}
+
+    def sort_key(item: tuple[int, list[int]]) -> tuple[int, int]:
+        sub_id = item[0]
+        return (order_by_sub_id.get(sub_id, 10**9), sub_id)
+
+    for sub_id, talk_ids in sorted(talk_ids_by_sub_id.items(), key=sort_key):
+        title = title_by_sub_id.get(sub_id) or ""
+        if not title:
+            continue
+        for talk_id in talk_ids:
+            if isinstance(talk_id, int) and talk_id > 0:
+                talk_title_map.setdefault(talk_id, title)
+
+    _QUEST_STEP_TALK_MAP_CACHE[cache_key] = talk_title_map
+    return talk_title_map
 
 
 def _collect_fetter_switch_names(config_node, output: set[str]) -> None:
@@ -1420,6 +1670,54 @@ def _append_version_filter_clause(
         else:
             sql += "and 1=0 "
     return sql
+
+
+_QUEST_SOURCE_TYPE_FILTERS = {
+    "AQ",
+    "LQ",
+    "WQ",
+    "EQ",
+    "IQ",
+    "HANGOUT",
+    "ANECDOTE",
+    "UNKNOWN",
+}
+
+
+def _normalize_quest_source_type_filter(source_type: str | None) -> str | None:
+    if source_type is None:
+        return None
+    normalized = str(source_type).strip().upper()
+    if not normalized:
+        return None
+    if normalized in _QUEST_SOURCE_TYPE_FILTERS:
+        return normalized
+    return "__INVALID__"
+
+
+def _append_quest_source_type_filter_clause(
+    sql: str,
+    params: list,
+    table_alias: str,
+    source_type: str | None,
+) -> str:
+    normalized = _normalize_quest_source_type_filter(source_type)
+    if normalized is None:
+        return sql
+    if normalized == "__INVALID__":
+        return sql + "and 1=0 "
+    if not _table_has_column("quest", "source_type"):
+        return sql + "and 1=0 "
+    sql += f"and {table_alias}.source_type = ? "
+    params.append(normalized)
+    return sql
+
+
+def _quest_talk_dialogue_join_condition(qt_alias: str = "qt", d_alias: str = "d") -> str:
+    return (
+        f"(({qt_alias}.coopQuestId IS NULL OR {qt_alias}.coopQuestId = 0) AND {d_alias}.coopQuestId IS NULL) "
+        f"OR ({qt_alias}.coopQuestId > 0 AND {d_alias}.coopQuestId = {qt_alias}.coopQuestId)"
+    )
 
 
 def _append_textmap_exists_version_filter(
@@ -1968,7 +2266,7 @@ def getTalkerNameFromTextHash(textHash: int, langCode: int = 1):
 def getTalkQuestId(talkId: int):
     with closing(conn.cursor()) as cursor:
         sql2 = ('select quest.questId from questTalk, quest '
-                'where talkId=? and quest.questId=questTalk.questId')
+                'where talkId=? and coalesce(questTalk.coopQuestId, 0)=0 and quest.questId=questTalk.questId')
         cursor.execute(sql2, (talkId,))
         ans2 = cursor.fetchall()
         if len(ans2) == 0:
@@ -2240,6 +2538,102 @@ def getTalkContent(talkId: int, coopQuestId: int | None):
         return ans if len(ans) > 0 else None
 
 
+def countTalkContent(talkId: int, coopQuestId: int | None) -> int:
+    with closing(conn.cursor()) as cursor:
+        if coopQuestId is None:
+            cursor.execute(
+                "select count(*) from dialogue where talkId = ? and coopQuestId is null",
+                (talkId,),
+            )
+        else:
+            cursor.execute(
+                "select count(*) from dialogue where talkId = ? and coopQuestId = ?",
+                (talkId, coopQuestId),
+            )
+        row = cursor.fetchone()
+        return int(row[0]) if row else 0
+
+
+def selectTalkContentPaged(
+    talkId: int,
+    coopQuestId: int | None,
+    limit: int,
+    offset: int | None = None,
+):
+    with closing(conn.cursor()) as cursor:
+        params: list[int] = [talkId]
+        if coopQuestId is None:
+            sql = (
+                "select textHash, talkerType, talkerId, dialogueId "
+                "from dialogue where talkId = ? and coopQuestId is null "
+                "order by dialogueId"
+            )
+        else:
+            sql = (
+                "select textHash, talkerType, talkerId, dialogueId "
+                "from dialogue where talkId = ? and coopQuestId = ? "
+                "order by dialogueId"
+            )
+            params.append(coopQuestId)
+
+        if limit > 0:
+            sql += " limit ?"
+            params.append(int(limit))
+        if offset is not None and offset > 0:
+            sql += " offset ?"
+            params.append(int(offset))
+
+        cursor.execute(sql, params)
+        return cursor.fetchall()
+
+
+def getTalkContentPageForTextHash(
+    textHash: int,
+    talkId: int,
+    coopQuestId: int | None,
+    page_size: int,
+) -> int:
+    safe_page_size = max(1, int(page_size))
+    with closing(conn.cursor()) as cursor:
+        if coopQuestId is None:
+            cursor.execute(
+                """
+                select count(*)
+                from dialogue
+                where talkId = ?
+                  and coopQuestId is null
+                  and dialogueId < (
+                    select min(dialogueId)
+                    from dialogue
+                    where textHash = ?
+                      and talkId = ?
+                      and coopQuestId is null
+                  )
+                """,
+                (talkId, textHash, talkId),
+            )
+        else:
+            cursor.execute(
+                """
+                select count(*)
+                from dialogue
+                where talkId = ?
+                  and coopQuestId = ?
+                  and dialogueId < (
+                    select min(dialogueId)
+                    from dialogue
+                    where textHash = ?
+                      and talkId = ?
+                      and coopQuestId = ?
+                  )
+                """,
+                (talkId, coopQuestId, textHash, talkId, coopQuestId),
+            )
+        row = cursor.fetchone()
+        before_count = int(row[0]) if row and row[0] is not None else 0
+        return before_count // safe_page_size + 1
+
+
 def isTextHashFromQuest(textHash: int) -> bool:
     """
     检查文本哈希是否来自任务相关的对话
@@ -2460,6 +2854,7 @@ def selectQuestByTitleKeyword(
     langCode: int,
     created_version: str | None = None,
     updated_version: str | None = None,
+    source_type: str | None = None,
 ):
     with closing(conn.cursor()) as cursor:
         exact, fuzzy = _build_like_patterns(keyword, langCode)
@@ -2480,6 +2875,7 @@ def selectQuestByTitleKeyword(
             updated_version,
             "quest",
         )
+        sql = _append_quest_source_type_filter_clause(sql, params, "quest", source_type)
         sql += (
             f"order by {match_sort_sql}, {normalized_length_sql} "
             "limit 200"
@@ -2494,6 +2890,7 @@ def selectQuestByIdContains(
     langCode: int,
     created_version: str | None = None,
     updated_version: str | None = None,
+    source_type: str | None = None,
 ):
     with closing(conn.cursor()) as cursor:
         escaped = _escape_like(keyword)
@@ -2517,6 +2914,7 @@ def selectQuestByIdContains(
             "quest",
             langCode,
         )
+        sql = _append_quest_source_type_filter_clause(sql, params, "quest", source_type)
         sql += f"order by {match_sort_sql}, {normalized_length_sql} limit 200"
         params.extend(match_sort_params)
         cursor.execute(sql, params)
@@ -2746,6 +3144,7 @@ def selectQuestByChapterKeyword(
     langCode: int,
     created_version: str | None = None,
     updated_version: str | None = None,
+    source_type: str | None = None,
 ):
     with closing(conn.cursor()) as cursor:
         exact, fuzzy = _build_like_patterns(keyword, langCode)
@@ -2783,6 +3182,7 @@ def selectQuestByChapterKeyword(
             "quest",
             langCode,
         )
+        sql = _append_quest_source_type_filter_clause(sql, params, "quest", source_type)
         sql += (
             "order by case when (chapterTitle.content like ? escape '\\' or chapterNum.content like ? escape '\\') then 0 else 1 end, "
             "length(coalesce(chapterTitle.content, chapterNum.content)) "
@@ -2849,9 +3249,11 @@ def countQuestDialogues(questId: int) -> int:
     with closing(conn.cursor()) as cursor:
         sql = (
             "select count(*) from dialogue d "
-            "join (select distinct talkId from questTalk where questId=?) qt "
+            "join (select distinct talkId, coalesce(coopQuestId, 0) as coopQuestId from questTalk where questId=?) qt "
             "on qt.talkId = d.talkId "
-            "where d.coopQuestId is null"
+            "and ("
+            + _quest_talk_dialogue_join_condition("qt", "d")
+            + ")"
         )
         cursor.execute(sql, (questId,))
         row = cursor.fetchone()
@@ -2867,10 +3269,12 @@ def selectQuestDialoguesPaged(
         sql = (
             "select d.textHash, d.talkerType, d.talkerId, d.dialogueId, d.talkId "
             "from dialogue d "
-            "join (select distinct talkId from questTalk where questId=?) qt "
+            "join (select distinct talkId, coalesce(coopQuestId, 0) as coopQuestId from questTalk where questId=?) qt "
             "on qt.talkId = d.talkId "
-            "where d.coopQuestId is null "
-            "order by d.talkId, d.dialogueId"
+            "and ("
+            + _quest_talk_dialogue_join_condition("qt", "d")
+            + ") "
+            "order by qt.coopQuestId, d.talkId, d.dialogueId"
         )
         params = [questId]
         if limit is not None:
@@ -2972,6 +3376,7 @@ def selectQuestByVersion(
     langCode: int,
     created_version: str | None = None,
     updated_version: str | None = None,
+    source_type: str | None = None,
     limit: int | None = 2000,
 ):
     with closing(conn.cursor()) as cursor:
@@ -2992,6 +3397,7 @@ def selectQuestByVersion(
             "quest",
             langCode,
         )
+        sql = _append_quest_source_type_filter_clause(sql, params, "quest", source_type)
         sql += "order by quest.questId "
         if limit is not None:
             sql += "limit ?"
@@ -3161,7 +3567,7 @@ def selectDialogueByTalkerKeyword(
             "join textMap as dialogueText on dialogue.textHash = dialogueText.hash and dialogueText.lang=? "
             "where (npcName.content like ? escape '\\' or npcName.content like ? escape '\\') "
         )
-        params = [langCode, langCode, exact, fuzzy, exact]
+        params = [langCode, langCode, exact, fuzzy]
         sql = _append_version_filter_clause(
             sql + " ",
             params,
@@ -3240,7 +3646,6 @@ def selectDialogueByTalkerAndKeyword(
             keyword_fuzzy,
             speaker_exact,
             speaker_fuzzy,
-            keyword_exact,
         ]
         sql = _append_version_filter_clause(
             sql + " ",
@@ -3283,7 +3688,7 @@ def selectDialogueByTalkerTypeAndKeyword(
             "where dialogue.talkerType = ? "
             "and (dialogueText.content like ? escape '\\' or dialogueText.content like ? escape '\\') "
         )
-        params = [langCode, talkerType, exact, fuzzy, exact]
+        params = [langCode, talkerType, exact, fuzzy]
         sql = _append_version_filter_clause(
             sql + " ",
             params,
@@ -3336,7 +3741,6 @@ def selectFetterBySpeakerAndKeyword(
             keyword_fuzzy,
             speaker_exact,
             speaker_fuzzy,
-            keyword_exact,
         ]
         sql = _append_version_filter_clause(
             sql + " ",

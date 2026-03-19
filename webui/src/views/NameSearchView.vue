@@ -31,6 +31,19 @@ const uiText = {
   noReadableResults: '没有找到可读物结果',
 }
 
+const questSourceTypeFilter = ref('')
+const questSourceTypeOptions = [
+  { value: '', label: '全部' },
+  { value: 'AQ', label: '魔神任务' },
+  { value: 'LQ', label: '传说任务' },
+  { value: 'WQ', label: '世界任务' },
+  { value: 'EQ', label: '活动任务' },
+  { value: 'IQ', label: '委托任务' },
+  { value: 'HANGOUT', label: '邀约事件' },
+  { value: 'ANECDOTE', label: '游逸旅闻' },
+  { value: 'UNKNOWN', label: '未分类' },
+]
+
 const formatText = (template, values) => {
   return template.replace(/\{(\w+)\}/g, (_, key) => String(values[key] ?? ''))
 }
@@ -78,8 +91,9 @@ const onSearchClicked = async () => {
   const keywordText = keyword.value.trim()
   const createdText = createdVersionFilter.value.trim()
   const updatedText = updatedVersionFilter.value.trim()
+  const sourceTypeText = questSourceTypeFilter.value.trim()
 
-  if (!keywordText && !createdText && !updatedText) {
+  if (!keywordText && !createdText && !updatedText && !sourceTypeText) {
     searchSummary.value = uiText.emptyInput
     questResults.value = []
     readableResults.value = []
@@ -91,6 +105,7 @@ const onSearchClicked = async () => {
     selectedInputLanguage.value,
     createdVersionFilter.value,
     updatedVersionFilter.value,
+    questSourceTypeFilter.value,
   )).json
   const contents = ans.contents
   keywordLast.value = keyword.value
@@ -169,6 +184,14 @@ setupVersionWatchers(onSearchClicked)
       </el-select>
       <el-select v-model="updatedVersionFilter" :placeholder="uiText.updatedVersion" class="versionInput" clearable filterable>
         <el-option v-for="version in versionOptions" :key="`updated-${version}`" :label="version" :value="version" />
+      </el-select>
+      <el-select v-model="questSourceTypeFilter" placeholder="任务类别" class="versionInput" clearable>
+        <el-option
+          v-for="option in questSourceTypeOptions"
+          :key="`quest-type-${option.value || 'all'}`"
+          :label="option.label"
+          :value="option.value"
+        />
       </el-select>
     </div>
 

@@ -502,6 +502,28 @@ def _analyze_diff(diff_entries: list[dict]) -> dict:
             plan["quest_related"] = True
             return
 
+        if rel == "ExcelBinOutput/AnecdoteExcelConfigData.json":
+            plan["quest_related"] = True
+            return
+        if rel.startswith("ExcelBinOutput/TalkExcelConfigData") and rel.endswith(".json"):
+            plan["quest_related"] = True
+            return
+        if rel == "ExcelBinOutput/MainCoopExcelConfigData.json":
+            plan["quest_related"] = True
+            return
+        if rel == "ExcelBinOutput/CoopExcelConfigData.json":
+            plan["quest_related"] = True
+            return
+        if rel.startswith("BinOutput/Coop/") and rel.endswith(".json"):
+            plan["quest_related"] = True
+            return
+        if rel.startswith("BinOutput/Talk/Coop/") and rel.endswith(".json"):
+            plan["quest_related"] = True
+            return
+        if rel.startswith("BinOutput/Talk/StoryboardGroup/") and rel.endswith(".json"):
+            plan["quest_related"] = True
+            return
+
         # 处理Excel配置文件
         if rel == "ExcelBinOutput/AvatarExcelConfigData.json":
             plan["avatar"] = True
@@ -751,11 +773,25 @@ def _process_quest_stage(plan, target_version, prune_missing):
             sync_delete=prune_missing,
         ) or {}
         DBBuild.importQuestBriefs()
+        hangout_stats = DBBuild.importAllHangoutsForDiff(
+            current_version=target_version,
+            sync_delete=prune_missing,
+        ) or {}
+        anecdote_stats = DBBuild.importAllAnecdotesForDiff(
+            current_version=target_version,
+            sync_delete=prune_missing,
+        ) or {}
         quest_added_count = len(plan["quest_added"])
         new_quest_count = int(quest_stats.get("new_quest_count", 0) or 0)
         skipped_quest_count = int(quest_stats.get("skipped_file_count", 0) or 0)
         missing_title_count = int(quest_stats.get("missing_title_count", 0) or 0)
         no_talk_count = int(quest_stats.get("no_talk_count", 0) or 0)
+        hangout_missing_title_count = int(hangout_stats.get("missing_title_count", 0) or 0)
+        hangout_no_talk_count = int(hangout_stats.get("no_talk_count", 0) or 0)
+        hangout_missing_coop_count = int(hangout_stats.get("missing_coop_count", 0) or 0)
+        anecdote_missing_title_count = int(anecdote_stats.get("missing_title_count", 0) or 0)
+        anecdote_no_talk_count = int(anecdote_stats.get("no_talk_count", 0) or 0)
+        anecdote_missing_group_count = int(anecdote_stats.get("missing_group_count", 0) or 0)
 
         if skipped_quest_count > 0:
             anomalies.append(
@@ -768,6 +804,30 @@ def _process_quest_stage(plan, target_version, prune_missing):
         if no_talk_count > 0:
             anomalies.append(
                 f"Quest import found {no_talk_count} rows without talk ids."
+            )
+        if hangout_missing_title_count > 0:
+            anomalies.append(
+                f"Hangout import found {hangout_missing_title_count} rows without titleTextMapHash."
+            )
+        if hangout_no_talk_count > 0:
+            anomalies.append(
+                f"Hangout import found {hangout_no_talk_count} rows without coop talk ids."
+            )
+        if hangout_missing_coop_count > 0:
+            anomalies.append(
+                f"Hangout import found {hangout_missing_coop_count} missing coop config files."
+            )
+        if anecdote_missing_title_count > 0:
+            anomalies.append(
+                f"Anecdote import found {anecdote_missing_title_count} rows without titleTextMapHash."
+            )
+        if anecdote_no_talk_count > 0:
+            anomalies.append(
+                f"Anecdote import found {anecdote_no_talk_count} rows without storyboard talk ids."
+            )
+        if anecdote_missing_group_count > 0:
+            anomalies.append(
+                f"Anecdote import found {anecdote_missing_group_count} missing storyboard groups."
             )
         # Heuristic anomaly detection for possible mapping mismatch.
         if quest_added_count >= 3 and new_quest_count == 0:

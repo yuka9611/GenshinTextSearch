@@ -155,6 +155,7 @@ const useSearch = () => {
     // 状态
     queryResult,
     keyword,
+    keywordLast,
     speakerKeyword,
     voiceFilter,
     createdVersionFilter,
@@ -162,6 +163,7 @@ const useSearch = () => {
     versionOptions,
     selectedInputLanguage,
     supportedInputLanguage,
+    searchLangLast,
     searchSummary,
     currentPage,
     totalCount,
