@@ -1,4 +1,5 @@
 import io
+import math
 import re
 import zlib
 from functools import lru_cache
@@ -1301,13 +1302,15 @@ def searchNameEntries(
     langCode: int,
     created_version: str | None = None,
     updated_version: str | None = None,
+    quest_source_type: str | None = None,
 ):
     quests = []
     readables = []
     keyword_trim = (keyword or "").strip()
     created_version_filter = _normalize_version_filter(created_version)
     updated_version_filter = _normalize_version_filter(updated_version)
-    if not keyword_trim and not created_version_filter and not updated_version_filter:
+    quest_source_type_filter = (quest_source_type or "").strip().upper() or None
+    if not keyword_trim and not created_version_filter and not updated_version_filter and not quest_source_type_filter:
         return {
             "quests": [],
             "readables": []
@@ -1328,6 +1331,7 @@ def searchNameEntries(
             langCode,
             created_version_filter,
             updated_version_filter,
+            quest_source_type_filter,
         )
         for questId, questTitle, created_raw, updated_raw in questMatches:
             chapterName = databaseHelper.getQuestChapterName(questId, langCode)
@@ -1343,6 +1347,7 @@ def searchNameEntries(
             langCode,
             created_version_filter,
             updated_version_filter,
+            quest_source_type_filter,
         )
         for questId, questTitle, chapterTitle, chapterNum, created_raw, updated_raw in chapterMatches:
             if questId in quest_map:
@@ -1359,6 +1364,7 @@ def searchNameEntries(
             langCode,
             created_version_filter,
             updated_version_filter,
+            quest_source_type_filter,
         )
         for questId, questTitle, created_raw, updated_raw in questIdMatches:
             if questId in quest_map:
@@ -1375,6 +1381,7 @@ def searchNameEntries(
             langCode,
             created_version_filter,
             updated_version_filter,
+            quest_source_type_filter,
         )
         for questId, questTitle, created_raw, updated_raw in questMatches:
             chapterName = databaseHelper.getQuestChapterName(questId, langCode)
@@ -1388,7 +1395,7 @@ def searchNameEntries(
     quests.extend(quest_map.values())
 
     langMap = databaseHelper.getLangCodeMap()
-    if langCode in langMap:
+    if langCode in langMap and (keyword_trim or created_version_filter or updated_version_filter):
         langStr = langMap[langCode]
         readable_seen = set()
         if keyword_trim:
@@ -1873,6 +1880,8 @@ def getQuestDialogues(
     sourceLangCode = config.getSourceLanguage()
 
     questCompleteName = databaseHelper.getQuestName(questId, sourceLangCode)
+    questDescription = databaseHelper.getQuestDescription(questId, sourceLangCode)
+    stepTitleMap = databaseHelper.getQuestStepTitleMap(questId, sourceLangCode)
 
     if page < 1:
         page = 1
@@ -1889,17 +1898,26 @@ def getQuestDialogues(
         obj['talker'] = databaseHelper.getTalkerName(talkerType, talkerId, sourceLangCode)
         obj['dialogueId'] = dialogueId
         obj['talkId'] = talkId
+        obj['stepTitle'] = stepTitleMap.get(talkId) or ""
         dialogues.append(obj)
 
     return {
         "talkQuestName": questCompleteName,
+        "questId": questId,
+        "questDescription": questDescription,
         "talkId": 0,
         "dialogues": dialogues,
     }, total
 
 
 # 根据hash值查询整个对话的内容
-def getTalkFromHash(textHash: int, searchLang: int | None = None):
+def getTalkFromHash(
+    textHash: int,
+    searchLang: int | None = None,
+    page: int | None = None,
+    page_size: int = 200,
+):
+    requested_text_hash = textHash
     # 先查到文本所属的talk，然后查询对话所属的任务的标题，然后查询对话所有的内容，对于每一句话，查询多语言翻译、说话者
     langs = config.getResultLanguages().copy()
     if searchLang and searchLang not in langs:
@@ -1918,27 +1936,53 @@ def getTalkFromHash(textHash: int, searchLang: int | None = None):
         obj['dialogueId'] = textHash
         return {
             "talkQuestName": "文本详情",
+            "questId": None,
             "talkId": 0,
             "dialogues": [obj]
         }
 
     talkId, talkerType, talkerId, coopQuestId = talkInfo
     if coopQuestId is None:
+        questId = databaseHelper.getTalkQuestId(talkId)
         questCompleteName = databaseHelper.getTalkQuestName(talkId, sourceLangCode)
     else:
+        questId = coopQuestId // 100
         questCompleteName = databaseHelper.getCoopTalkQuestName(coopQuestId, sourceLangCode)
 
-    rawDialogues = databaseHelper.getTalkContent(talkId, coopQuestId)
+    safe_page_size = max(1, int(page_size) if page_size else 200)
+    total = databaseHelper.countTalkContent(talkId, coopQuestId)
+    if page is None:
+        safe_page = databaseHelper.getTalkContentPageForTextHash(
+            requested_text_hash,
+            talkId,
+            coopQuestId,
+            safe_page_size,
+        )
+    else:
+        safe_page = max(1, int(page))
+
+    total_pages = max(1, math.ceil(total / safe_page_size)) if total else 1
+    if safe_page > total_pages:
+        safe_page = total_pages
+
+    offset = (safe_page - 1) * safe_page_size
+    rawDialogues = databaseHelper.selectTalkContentPaged(
+        talkId,
+        coopQuestId,
+        safe_page_size,
+        offset,
+    )
     dialogues = []
 
     if rawDialogues is None:
         rawDialogues = []
 
     for rawDialogue in rawDialogues:
-        textHash, talkerType, talkerId, dialogueId = rawDialogue
-        obj = queryTextHashInfo(textHash, langs, sourceLangCode, False)
+        dialogue_text_hash, talkerType, talkerId, dialogueId = rawDialogue
+        obj = queryTextHashInfo(dialogue_text_hash, langs, sourceLangCode, False)
         obj['talker'] = databaseHelper.getTalkerName(talkerType, talkerId, sourceLangCode)
         obj['dialogueId'] = dialogueId
+        obj['isSelectedHash'] = obj.get('hash') == requested_text_hash
         dialogues.append(obj)
 
     # 获取版本信息
@@ -1951,8 +1995,12 @@ def getTalkFromHash(textHash: int, searchLang: int | None = None):
 
     ans = {
         "talkQuestName": questCompleteName,
+        "questId": questId,
         "talkId": talkId,
         "dialogues": dialogues,
+        "total": total,
+        "page": safe_page,
+        "pageSize": safe_page_size,
         **_build_version_fields(created_raw, updated_raw),
     }
 

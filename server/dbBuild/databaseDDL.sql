@@ -105,9 +105,12 @@ create table quest
             primary key autoincrement,
     questId          integer,
     titleTextMapHash integer,
+    descTextMapHash  integer,
     chapterId        integer,
     created_version_id INTEGER,
-    git_created_version_id INTEGER
+    git_created_version_id INTEGER,
+    source_type      TEXT,
+    source_code_raw  TEXT
 );
 
 create table quest_version
@@ -126,6 +129,8 @@ create index quest_questId_index
     on quest (questId);
 create unique index quest_questId_uindex
     on quest (questId);
+create index quest_source_type_index
+    on quest (source_type);
 
 create table questTalk
 (
@@ -133,11 +138,16 @@ create table questTalk
         constraint questTalk_pk
             primary key autoincrement,
     questId integer,
-    talkId  integer
+    talkId  integer,
+    stepTitleTextMapHash integer,
+    coopQuestId integer not null default 0
 );
 
-create index questTalk_talkId_index
-    on questTalk (talkId);
+create unique index questTalk_questId_talkId_coopQuestId_uindex
+    on questTalk (questId, talkId, coopQuestId);
+
+create index questTalk_talkId_coopQuestId_index
+    on questTalk (talkId, coopQuestId);
 
 create table quest_hash_map
 (

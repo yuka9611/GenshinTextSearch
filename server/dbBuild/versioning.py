@@ -920,6 +920,10 @@ def ensure_version_schema():
         _ensure_column(table_name, "updated_version_id", "INTEGER")
     # 为quest表只添加created_version_id列，updated_version_id现在存储在quest_version表中
     _ensure_column("quest", "created_version_id", "INTEGER")
+    _ensure_column("quest", "git_created_version_id", "INTEGER")
+    _ensure_column("quest", "source_type", "TEXT")
+    _ensure_column("quest", "source_code_raw", "TEXT")
+    _ensure_column("questTalk", "coopQuestId", "INTEGER NOT NULL DEFAULT 0")
 
     _ensure_column("subtitle", "subtitleKey", "TEXT")
 
@@ -929,7 +933,14 @@ def ensure_version_schema():
     _ensure_unique_index("chapter", "chapter_chapterId_uindex", ("chapterId",))
     _ensure_unique_index("fetters", "fetters_fetterId_uindex", ("fetterId",))
     _ensure_unique_index("fetterStory", "fetterStory_fetterId_uindex", ("fetterId",))
-    _ensure_unique_index("questTalk", "questTalk_questId_talkId_uindex", ("questId", "talkId"))
+    cur = conn.cursor()
+    try:
+        cur.execute("DROP INDEX IF EXISTS questTalk_questId_talkId_uindex")
+        cur.execute("UPDATE questTalk SET coopQuestId = 0 WHERE coopQuestId IS NULL")
+        conn.commit()
+    finally:
+        cur.close()
+    _ensure_unique_index("questTalk", "questTalk_questId_talkId_coopQuestId_uindex", ("questId", "talkId", "coopQuestId"))
     _ensure_unique_index("voice", "voice_dialogueId_voicePath_uindex", ("dialogueId", "voicePath"))
 
     _ensure_index("CREATE INDEX IF NOT EXISTS readable_lang_index ON readable(lang)")
@@ -940,6 +951,9 @@ def ensure_version_schema():
     _ensure_index("CREATE INDEX IF NOT EXISTS textMap_created_version_id_index ON textMap(created_version_id)")
     _ensure_index("CREATE INDEX IF NOT EXISTS textMap_updated_version_id_index ON textMap(updated_version_id)")
     _ensure_index("CREATE INDEX IF NOT EXISTS quest_created_version_id_index ON quest(created_version_id)")
+    _ensure_index("CREATE INDEX IF NOT EXISTS quest_git_created_version_id_index ON quest(git_created_version_id)")
+    _ensure_index("CREATE INDEX IF NOT EXISTS quest_source_type_index ON quest(source_type)")
+    _ensure_index("CREATE INDEX IF NOT EXISTS questTalk_talkId_coopQuestId_index ON questTalk(talkId, coopQuestId)")
     # 不再为quest表的updated_version_id列创建索引，因为它现在存储在quest_version表中
     _ensure_index("CREATE INDEX IF NOT EXISTS readable_created_version_id_index ON readable(created_version_id)")
     _ensure_index("CREATE INDEX IF NOT EXISTS readable_updated_version_id_index ON readable(updated_version_id)")

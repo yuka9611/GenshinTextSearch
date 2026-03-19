@@ -483,6 +483,13 @@ def _quest_hash_map_available(cursor) -> bool:
     return row is not None
 
 
+def _quest_talk_dialogue_join_condition(qt_alias: str = "qt", d_alias: str = "d") -> str:
+    return (
+        f"(({qt_alias}.coopQuestId IS NULL OR {qt_alias}.coopQuestId = 0) AND {d_alias}.coopQuestId IS NULL) "
+        f"OR ({qt_alias}.coopQuestId > 0 AND {d_alias}.coopQuestId = {qt_alias}.coopQuestId)"
+    )
+
+
 def _build_qh_source_sql(
     cursor,
     *,
@@ -530,6 +537,7 @@ def _build_qh_source_sql(
             FROM quest q
             JOIN questTalk qt ON qt.questId = q.questId
             JOIN dialogue d ON d.talkId = qt.talkId
+               AND ({_quest_talk_dialogue_join_condition('qt', 'd')})
             JOIN quest_version qv ON qv.questId = q.questId
             WHERE qv.updated_version_id=?
               AND d.textHash IS NOT NULL
@@ -547,6 +555,7 @@ def _build_qh_source_sql(
         SELECT qt.questId AS questId, d.textHash AS hash
         FROM questTalk qt
         JOIN dialogue d ON d.talkId = qt.talkId
+           AND ({_quest_talk_dialogue_join_condition('qt', 'd')})
         WHERE d.textHash IS NOT NULL
           {target_filter_qt}
     """

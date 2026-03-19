@@ -31,9 +31,9 @@
     "in",
     "on",
     "for",
-    "\u7684",
-    "\u4e86",
-    "\u662f"
+    "的",
+    "了",
+    "是"
   ],
   "ftsMinTokenLength": 2,
   "ftsMaxTokenLength": 24

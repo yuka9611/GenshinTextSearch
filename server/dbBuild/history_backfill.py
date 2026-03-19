@@ -23,6 +23,7 @@ from quest_hash_map_utils import (
     refresh_all_quest_hash_map as _refresh_all_quest_hash_map,
     unresolved_created_quest_ids as _unresolved_created_quest_ids,
 )
+from questImport import SOURCE_TYPE_ANECDOTE, SOURCE_TYPE_HANGOUT
 from quest_utils import extract_quest_row as _extract_quest_row
 from version_control import backfill_quest_created_version_from_textmap as _backfill_quest_created_version_from_textmap
 from subtitle_utils import parse_srt_rows as _parse_srt_rows
@@ -75,12 +76,20 @@ RELEVANT_PATHS = [
     "Readable",
     "Subtitle",
     "BinOutput/Quest",
+    "ExcelBinOutput/AnecdoteExcelConfigData.json",
+    "ExcelBinOutput/MainCoopExcelConfigData.json",
+    "ExcelBinOutput/CoopExcelConfigData.json",
+    "BinOutput/Coop",
+    "BinOutput/Talk/Coop",
+    "BinOutput/Talk/StoryboardGroup",
     "ExcelBinOutput/LocalizationExcelConfigData.json",
     "ExcelBinOutput/DocumentExcelConfigData.json",
 ]
 TEXTMAP_ONLY_PATHS = ["TextMap"]
 READABLE_ONLY_PATHS = ["Readable"]
 SUBTITLE_ONLY_PATHS = ["Subtitle"]
+ANECDOTE_CONFIG_PATH = "ExcelBinOutput/AnecdoteExcelConfigData.json"
+MAIN_COOP_CONFIG_PATH = "ExcelBinOutput/MainCoopExcelConfigData.json"
 
 
 
@@ -720,6 +729,200 @@ def _resolve_version_id(version_label: str) -> int | None:
     return get_or_create_version_id(normalize_version_label(version_label) or version_label)
 
 
+def _normalize_anecdote_int_list(values) -> list[int]:
+    result: list[int] = []
+    seen: set[int] = set()
+    if not isinstance(values, list):
+        return result
+    for value in values:
+        if not isinstance(value, int) or value <= 0 or value in seen:
+            continue
+        seen.add(value)
+        result.append(value)
+    return result
+
+
+def _extract_storyboard_group_talk_ids_from_history(obj: dict) -> list[int]:
+    if not isinstance(obj, dict):
+        return []
+    talks = obj.get("DGJMIPFDEOF")
+    if not isinstance(talks, list):
+        return []
+    result: list[int] = []
+    seen: set[int] = set()
+    for talk in talks:
+        if not isinstance(talk, dict):
+            continue
+        talk_id = talk.get("BLKKAMEMBBJ")
+        if not isinstance(talk_id, int) or talk_id <= 0 or talk_id in seen:
+            continue
+        seen.add(talk_id)
+        result.append(talk_id)
+    return result
+
+
+def _extract_anecdote_history_row(row: dict) -> tuple[int, int | None, int | None, list[int]] | None:
+    if not isinstance(row, dict):
+        return None
+    anecdote_id = row.get("DBGCFNMLHAJ")
+    if not isinstance(anecdote_id, int) or anecdote_id <= 0:
+        return None
+    title_hash = row.get("EJMLGHMLPLD")
+    if not isinstance(title_hash, int) or title_hash == 0:
+        title_hash = None
+    desc_hash = row.get("JKNBFACAMCF")
+    if not isinstance(desc_hash, int) or desc_hash == 0:
+        desc_hash = None
+    group_ids = _normalize_anecdote_int_list(row.get("LIIPHELCPKJ"))
+    return anecdote_id, title_hash, desc_hash, group_ids
+
+
+def _load_anecdote_history_payload(repo_path: str, commit_sha: str, anecdote_id: int) -> dict | None:
+    rows = _git_show_json(repo_path, commit_sha, ANECDOTE_CONFIG_PATH)
+    if not isinstance(rows, list):
+        return None
+    matched_row = None
+    for row in rows:
+        extracted = _extract_anecdote_history_row(row)
+        if extracted is None:
+            continue
+        if extracted[0] == anecdote_id:
+            matched_row = extracted
+            break
+    if matched_row is None:
+        return None
+
+    _quest_id, title_hash, desc_hash, group_ids = matched_row
+    talk_ids: list[int] = []
+    seen: set[int] = set()
+    for group_id in group_ids:
+        group_obj = _git_show_json(repo_path, commit_sha, f"BinOutput/Talk/StoryboardGroup/{group_id}.json")
+        if not isinstance(group_obj, dict):
+            continue
+        for talk_id in _extract_storyboard_group_talk_ids_from_history(group_obj):
+            if talk_id in seen:
+                continue
+            seen.add(talk_id)
+            talk_ids.append(talk_id)
+    return {
+        "quest_id": anecdote_id,
+        "title_hash": title_hash,
+        "desc_hash": desc_hash,
+        "talk_ids": talk_ids,
+    }
+
+
+def _extract_hangout_history_main_coop_ids(rows, quest_id: int) -> list[int]:
+    if not isinstance(rows, list):
+        return []
+    result: list[int] = []
+    seen: set[int] = set()
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        raw_id = row.get("id")
+        if not isinstance(raw_id, int) or raw_id <= 0:
+            raw_id = row.get("JLJFKNHFLJP")
+        if not isinstance(raw_id, int) or raw_id <= 0:
+            continue
+        if raw_id // 100 != quest_id or raw_id in seen:
+            continue
+        seen.add(raw_id)
+        result.append(raw_id)
+    return result
+
+
+def _load_hangout_history_payload(repo_path: str, commit_sha: str, quest_id: int) -> dict | None:
+    rows = _git_show_json(repo_path, commit_sha, MAIN_COOP_CONFIG_PATH)
+    main_coop_ids = _extract_hangout_history_main_coop_ids(rows, quest_id)
+    if not main_coop_ids:
+        return None
+    existing_main_coop_ids: list[int] = []
+    for main_coop_id in main_coop_ids:
+        coop_obj = _git_show_json(repo_path, commit_sha, f"BinOutput/Coop/Coop{main_coop_id}.json")
+        if isinstance(coop_obj, dict):
+            existing_main_coop_ids.append(main_coop_id)
+    if not existing_main_coop_ids:
+        return None
+    return {
+        "quest_id": quest_id,
+        "main_coop_ids": existing_main_coop_ids,
+    }
+
+
+def _get_quest_source_type(cursor, quest_id: int) -> str | None:
+    row = cursor.execute("SELECT source_type FROM quest WHERE questId = ?", (quest_id,)).fetchone()
+    if not row or row[0] is None:
+        return None
+    return str(row[0]).strip().upper() or None
+
+
+def _get_quest_source_fields(cursor, quest_id: int) -> tuple[str | None, str | None]:
+    row = cursor.execute(
+        "SELECT source_type, source_code_raw FROM quest WHERE questId = ?",
+        (quest_id,),
+    ).fetchone()
+    if not row:
+        return None, None
+    source_type = str(row[0]).strip().upper() if row[0] is not None else None
+    source_code_raw = str(row[1]).strip().upper() if row[1] is not None else None
+    return source_type or None, source_code_raw or None
+
+
+def _build_quest_history_include_paths(repo_path: str) -> list[str]:
+    include_paths = [
+        "BinOutput/Quest",
+        ANECDOTE_CONFIG_PATH,
+        MAIN_COOP_CONFIG_PATH,
+        "ExcelBinOutput/CoopExcelConfigData.json",
+        "BinOutput/Coop",
+        "BinOutput/Talk/Coop",
+        "BinOutput/Talk/StoryboardGroup",
+    ]
+    excel_dir = os.path.join(repo_path, "ExcelBinOutput")
+    if os.path.isdir(excel_dir):
+        for entry in sorted(os.listdir(excel_dir)):
+            if entry.startswith("TalkExcelConfigData") and entry.endswith(".json"):
+                include_paths.append(f"ExcelBinOutput/{entry}")
+    return include_paths
+
+
+def _find_anecdote_first_commit(repo_path: str, anecdote_id: int) -> str | None:
+    out = _run_git(
+        repo_path,
+        ["log", "--reverse", "--format=%H", "--", ANECDOTE_CONFIG_PATH],
+        check=False,
+    )
+    if not out:
+        return None
+    for commit_sha in out.splitlines():
+        commit_sha = commit_sha.strip()
+        if not commit_sha:
+            continue
+        payload = _load_anecdote_history_payload(repo_path, commit_sha, anecdote_id)
+        if payload is not None:
+            return commit_sha
+    return None
+
+
+def _find_hangout_first_commit(repo_path: str, quest_id: int) -> str | None:
+    out = _run_git(
+        repo_path,
+        ["log", "--reverse", "--format=%H", "--", MAIN_COOP_CONFIG_PATH, "BinOutput/Coop"],
+        check=False,
+    )
+    if not out:
+        return None
+    for commit_sha in out.splitlines():
+        commit_sha = commit_sha.strip()
+        if not commit_sha:
+            continue
+        payload = _load_hangout_history_payload(repo_path, commit_sha, quest_id)
+        if payload is not None:
+            return commit_sha
+    return None
+
+
 def _prepare_resume_for_commits(
     *,
     resume_target_key: str,
@@ -826,6 +1029,40 @@ def find_quest_first_commit(
         return None, None
 
 
+def _update_quest_created_git_versions(cursor, quest_id: int, version_id: int) -> tuple[bool, bool]:
+    cursor.execute(
+        "SELECT created_version_id, git_created_version_id FROM quest WHERE questId = ?",
+        (quest_id,),
+    )
+    version_info = cursor.fetchone()
+    existing_created_version = version_info[0] if version_info else None
+    existing_git_created_version = version_info[1] if version_info else None
+
+    created_updated = False
+    git_updated = False
+    if should_update_version(existing_created_version, version_id, is_created=True):
+        cursor.execute(
+            """
+            UPDATE quest
+            SET created_version_id=?
+            WHERE questId=?
+            """,
+            (version_id, quest_id),
+        )
+        created_updated = cursor.rowcount > 0
+    if should_update_version(existing_git_created_version, version_id, is_created=True):
+        cursor.execute(
+            """
+            UPDATE quest
+            SET git_created_version_id=?
+            WHERE questId=?
+            """,
+            (version_id, quest_id),
+        )
+        git_updated = cursor.rowcount > 0
+    return created_updated, git_updated
+
+
 def _backfill_quest_version_by_commit_entry(
     cursor,
     *,
@@ -843,6 +1080,66 @@ def _backfill_quest_version_by_commit_entry(
     old_path = entry.get("old_path")
     new_path = entry.get("new_path")
     rel_path = (new_path or old_path or "").replace("\\", "/")
+    if rel_path == ANECDOTE_CONFIG_PATH:
+        rows = _git_show_json(repo_path, commit_sha, rel_path)
+        if not isinstance(rows, list):
+            return 0
+        updated_total = 0
+        for row in rows:
+            extracted = _extract_anecdote_history_row(row)
+            if extracted is None:
+                continue
+            quest_id = extracted[0]
+            if target_quest_ids is not None and quest_id not in target_quest_ids:
+                continue
+            if version_id <= 0:
+                logger.warning(f"Invalid version ID {version_id} for anecdote {quest_id}, skipping")
+                continue
+            created_updated, git_updated = _update_quest_created_git_versions(cursor, quest_id, version_id)
+            if created_updated or git_updated:
+                updated_total += 1
+        return updated_total
+
+    if rel_path == MAIN_COOP_CONFIG_PATH:
+        rows = _git_show_json(repo_path, commit_sha, rel_path)
+        if not isinstance(rows, list):
+            return 0
+        updated_total = 0
+        seen_quest_ids: set[int] = set()
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            raw_id = row.get("id")
+            if not isinstance(raw_id, int) or raw_id <= 0:
+                raw_id = row.get("JLJFKNHFLJP")
+            if not isinstance(raw_id, int) or raw_id <= 0:
+                continue
+            quest_id = raw_id // 100
+            if quest_id in seen_quest_ids:
+                continue
+            seen_quest_ids.add(quest_id)
+            if target_quest_ids is not None and quest_id not in target_quest_ids:
+                continue
+            if _load_hangout_history_payload(repo_path, commit_sha, quest_id) is None:
+                continue
+            created_updated, git_updated = _update_quest_created_git_versions(cursor, quest_id, version_id)
+            if created_updated or git_updated:
+                updated_total += 1
+        return updated_total
+
+    if rel_path.startswith("BinOutput/Coop/Coop") and rel_path.endswith(".json"):
+        file_name = os.path.basename(rel_path)
+        match = re.match(r"^Coop(\d+)\.json$", file_name)
+        if not match:
+            return 0
+        quest_id = int(match.group(1)) // 100
+        if target_quest_ids is not None and quest_id not in target_quest_ids:
+            return 0
+        if _load_hangout_history_payload(repo_path, commit_sha, quest_id) is None:
+            return 0
+        created_updated, git_updated = _update_quest_created_git_versions(cursor, quest_id, version_id)
+        return 1 if (created_updated or git_updated) else 0
+
     if not (rel_path.startswith("BinOutput/Quest/") and rel_path.endswith(".json")):
         return 0
 
@@ -866,44 +1163,15 @@ def _backfill_quest_version_by_commit_entry(
         except Exception:
             return 0
 
-    cursor.execute("SELECT created_version_id, git_created_version_id FROM quest WHERE questId = ?", (new_row[0],))
-    version_info = cursor.fetchone()
-    existing_created_version = version_info[0] if version_info else None
-    existing_git_created_version = version_info[1] if version_info else None
-
     if version_id <= 0:
         logger.warning(f"Invalid version ID {version_id} for quest {new_row[0]}, skipping")
         return 0
 
-    if should_update_version(existing_created_version, version_id, is_created=True):
-        cursor.execute(
-            """
-            UPDATE quest
-            SET created_version_id=?
-            WHERE questId=?
-            """,
-            (version_id, new_row[0]),
-        )
-        created_updated = cursor.rowcount > 0
-        if created_updated:
-            logger.debug(f"Updated created_version_id for quest {new_row[0]} to {version_id}")
-    else:
-        created_updated = False
-
-    if should_update_version(existing_git_created_version, version_id, is_created=True):
-        cursor.execute(
-            """
-            UPDATE quest
-            SET git_created_version_id=?
-            WHERE questId=?
-            """,
-            (version_id, new_row[0]),
-        )
-        git_updated = cursor.rowcount > 0
-        if git_updated:
-            logger.debug(f"Updated git_created_version_id for quest {new_row[0]} to {version_id}")
-    else:
-        git_updated = False
+    created_updated, git_updated = _update_quest_created_git_versions(cursor, int(new_row[0]), version_id)
+    if created_updated:
+        logger.debug(f"Updated created_version_id for quest {new_row[0]} to {version_id}")
+    if git_updated:
+        logger.debug(f"Updated git_created_version_id for quest {new_row[0]} to {version_id}")
 
     return 1 if (created_updated or git_updated) else 0
 
@@ -957,12 +1225,12 @@ def apply_quest_version_delta_from_textmap(
                     (row for row in normalized_qids),
                     batch_size=batch_size,
                 )
-                quest_scope_filter = " AND questId IN (SELECT questId FROM _target_quest_id)"
+                quest_scope_filter = "q.questId IN (SELECT questId FROM _target_quest_id)"
             except Exception as e:
                 logger.error(f"Error processing quest scope: {e}")
-                quest_scope_filter = ""
+                quest_scope_filter = "1=1"
         else:
-            quest_scope_filter = ""
+            quest_scope_filter = "1=1"
 
         if changed_hashes is not None:
             try:
@@ -1069,6 +1337,10 @@ def apply_quest_version_delta_from_textmap(
                                 SELECT DISTINCT qt.questId
                                 FROM questTalk qt
                                 JOIN dialogue d ON d.talkId = qt.talkId
+                                   AND (
+                                       (coalesce(qt.coopQuestId, 0) = 0 AND d.coopQuestId IS NULL)
+                                       OR (coalesce(qt.coopQuestId, 0) > 0 AND d.coopQuestId = qt.coopQuestId)
+                                   )
                                 JOIN _changed_textmap_hash c ON c.hash = d.textHash
                             )
                         )
@@ -2121,6 +2393,22 @@ def validate_quest_versions(
                     _flush_fix_batch()
 
             def _resolve_quest_first_version_id(quest_id: int) -> int | None:
+                source_type, source_code_raw = _get_quest_source_fields(cursor, int(quest_id))
+                if source_type == SOURCE_TYPE_ANECDOTE:
+                    first_commit = _find_anecdote_first_commit(repo_path, int(quest_id))
+                elif source_type == SOURCE_TYPE_HANGOUT and source_code_raw == SOURCE_TYPE_HANGOUT:
+                    first_commit = _find_hangout_first_commit(repo_path, int(quest_id))
+                else:
+                    first_commit = None
+                if first_commit:
+                    _label, version_id = _resolve_commit_version(
+                        repo_path,
+                        first_commit,
+                        _resolve_commit_title(repo_path, first_commit),
+                    )
+                    return version_id
+                if source_type == SOURCE_TYPE_HANGOUT and source_code_raw == SOURCE_TYPE_HANGOUT:
+                    return None
                 _first_commit, version_id = _resolve_first_version_for_path(
                     repo_path,
                     f"BinOutput/Quest/{quest_id}.json",
@@ -2408,14 +2696,19 @@ def backfill_quest_versions_from_history(
                 for i, quest_id in enumerate(quest_ids_to_backfill):
                     postfix = f"Quest {quest_id}"
                     try:
-                        quest_file_path = f"BinOutput/Quest/{quest_id}.json"
-
-                        out = _run_git(
-                            repo_path,
-                            ["log", "--reverse", "--format=%H", "-n", "1", "--", quest_file_path],
-                            check=False
-                        )
-                        first_commit = out.strip() if out.strip() else None
+                        source_type, source_code_raw = _get_quest_source_fields(cursor, int(quest_id))
+                        if source_type == SOURCE_TYPE_ANECDOTE:
+                            first_commit = _find_anecdote_first_commit(repo_path, int(quest_id))
+                        elif source_type == SOURCE_TYPE_HANGOUT and source_code_raw == SOURCE_TYPE_HANGOUT:
+                            first_commit = _find_hangout_first_commit(repo_path, int(quest_id))
+                        else:
+                            quest_file_path = f"BinOutput/Quest/{quest_id}.json"
+                            out = _run_git(
+                                repo_path,
+                                ["log", "--reverse", "--format=%H", "-n", "1", "--", quest_file_path],
+                                check=False
+                            )
+                            first_commit = out.strip() if out.strip() else None
 
                         if first_commit:
                             first_commit_title = _run_git(
@@ -2456,14 +2749,25 @@ def backfill_quest_versions_from_history(
                                 )
 
                                 if update_git_created or update_created:
-                                    first_obj = _git_show_json(repo_path, first_commit, quest_file_path)
-                                    if not isinstance(first_obj, dict):
-                                        pbar.update(postfix=postfix)
-                                        continue
-                                    first_row = _extract_quest_row(first_obj)
-                                    if first_row is None:
-                                        pbar.update(postfix=postfix)
-                                        continue
+                                    if source_type == SOURCE_TYPE_ANECDOTE:
+                                        first_payload = _load_anecdote_history_payload(repo_path, first_commit, int(quest_id))
+                                        if first_payload is None:
+                                            pbar.update(postfix=postfix)
+                                            continue
+                                    elif source_type == SOURCE_TYPE_HANGOUT and source_code_raw == SOURCE_TYPE_HANGOUT:
+                                        first_payload = _load_hangout_history_payload(repo_path, first_commit, int(quest_id))
+                                        if first_payload is None:
+                                            pbar.update(postfix=postfix)
+                                            continue
+                                    else:
+                                        first_obj = _git_show_json(repo_path, first_commit, quest_file_path)
+                                        if not isinstance(first_obj, dict):
+                                            pbar.update(postfix=postfix)
+                                            continue
+                                        first_row = _extract_quest_row(first_obj)
+                                        if first_row is None:
+                                            pbar.update(postfix=postfix)
+                                            continue
 
                                     update_fields = []
                                     update_params = []
@@ -2539,6 +2843,7 @@ def backfill_quest_versions_from_history(
             print(f"正在以 {replay_mode} 模式处理 {total_commits} 个任务提交...")
             try:
                 target_quest_ids = unresolved_created_ids if replay_mode == "targeted" else None
+                quest_history_include_paths = _build_quest_history_include_paths(repo_path)
                 commit_batch_size = DEFAULT_HISTORY_COMMIT_BATCH_SIZE
                 processed_commits = 0
                 last_commit_sha = None
@@ -2558,9 +2863,9 @@ def backfill_quest_versions_from_history(
                             continue
 
                         entries = (
-                            _initial_entries(repo_path, commit_sha, include_paths=["BinOutput/Quest"])
+                            _initial_entries(repo_path, commit_sha, include_paths=quest_history_include_paths)
                             if parent_sha is None
-                            else _diff_entries(repo_path, parent_sha, commit_sha, include_paths=["BinOutput/Quest"])
+                            else _diff_entries(repo_path, parent_sha, commit_sha, include_paths=quest_history_include_paths)
                         )
 
                         for entry in entries:

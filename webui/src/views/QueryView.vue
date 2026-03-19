@@ -120,6 +120,7 @@ import useAudioPlayer from '@/composables/useAudioPlayer'
 const {
   queryResult,
   keyword,
+  keywordLast,
   speakerKeyword,
   voiceFilter,
   createdVersionFilter,
@@ -127,6 +128,7 @@ const {
   versionOptions,
   selectedInputLanguage,
   supportedInputLanguage,
+  searchLangLast,
   searchSummary,
   currentPage,
   totalCount,

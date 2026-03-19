@@ -20,6 +20,20 @@ GENERIC_SWITCH_NAMES = {
     "switch_other",
 }
 
+SOURCE_PATH_KEYS = (
+    "sourceFileName",
+    "MDOCAGOFPAP",
+    "DCIHFJLBLAP",
+    "BJDAJEKPCFP",
+)
+
+AVATAR_NAME_KEYS = (
+    "avatarName",
+    "GDIJGLOHHFM",
+    "IEPAMKPOOII",
+    "switchName",
+)
+
 
 def _print_summary(title: str, items: list[str] | set[str], sample_size: int = 10):
     values = list(items)
@@ -127,16 +141,100 @@ def getAvatarIdFromVoiceItemAvatarName(avatarNameFromVoiceItem: str):
     return 0
 
 
+def _pick_first_value(node: dict, keys: tuple[str, ...]):
+    for key in keys:
+        value = node.get(key)
+        if value is not None:
+            return value
+    return None
+
+
 def _resolve_voice_schema(content: dict):
     if "guid" in content:
-        return "gameTriggerArgs", "sourceNames", "sourceFileName", "gameTrigger", "guid"
+        return {
+            "entry_id_key": "gameTriggerArgs",
+            "source_list_key": "sourceNames",
+            "trigger_key": "gameTrigger",
+            "guid_key": "guid",
+            "voice_path_keys": SOURCE_PATH_KEYS,
+            "avatar_name_keys": AVATAR_NAME_KEYS,
+        }
     if "Guid" in content:
-        return "gameTriggerArgs", "SourceNames", "sourceFileName", "GameTrigger", "Guid"
+        return {
+            "entry_id_key": "gameTriggerArgs",
+            "source_list_key": "SourceNames",
+            "trigger_key": "GameTrigger",
+            "guid_key": "Guid",
+            "voice_path_keys": SOURCE_PATH_KEYS,
+            "avatar_name_keys": AVATAR_NAME_KEYS,
+        }
     if "ABAEBGLPCIK" in content:
-        return "MEDGFBMLDDK", "JKDJFGBGOEB", "DCIHFJLBLAP", "BHOKINENJBN", "ABAEBGLPCIK"
+        return {
+            "entry_id_key": "MEDGFBMLDDK",
+            "source_list_key": "JKDJFGBGOEB",
+            "trigger_key": "BHOKINENJBN",
+            "guid_key": "ABAEBGLPCIK",
+            "voice_path_keys": ("DCIHFJLBLAP",) + SOURCE_PATH_KEYS,
+            "avatar_name_keys": AVATAR_NAME_KEYS,
+        }
     if "NDLOFEPMEMO" in content:
-        return "HEKJMGHIJBM", "JKHGLBHOKIC", "BJDAJEKPCFP", "HPIPCKOOMLL", "NDLOFEPMEMO"
+        return {
+            "entry_id_key": "HEKJMGHIJBM",
+            "source_list_key": "JKHGLBHOKIC",
+            "trigger_key": "HPIPCKOOMLL",
+            "guid_key": "NDLOFEPMEMO",
+            "voice_path_keys": ("BJDAJEKPCFP",) + SOURCE_PATH_KEYS,
+            "avatar_name_keys": AVATAR_NAME_KEYS,
+        }
+    if "IACPGADBANJ" in content:
+        return {
+            "entry_id_key": "MGOMDNKKLCP",
+            "source_list_key": "OPGDOEDEJOJ",
+            "trigger_key": "IACPGADBANJ",
+            "guid_key": "ABNMMNPAKKP",
+            "voice_path_keys": ("MDOCAGOFPAP",) + SOURCE_PATH_KEYS,
+            "avatar_name_keys": AVATAR_NAME_KEYS,
+        }
     return None
+
+
+def _normalize_voice_item_content(content: dict):
+    if not isinstance(content, dict):
+        return None
+
+    schema = _resolve_voice_schema(content)
+    if schema is None:
+        return None
+
+    entry_id = content.get(schema["entry_id_key"])
+    source_list = content.get(schema["source_list_key"])
+    trigger = content.get(schema["trigger_key"])
+    if entry_id is None or trigger is None or not isinstance(source_list, list):
+        return None
+
+    entry_type = str(trigger or "").strip().lower()
+    if not entry_type:
+        return None
+
+    return {
+        "entry_type": entry_type,
+        "entry_id": entry_id,
+        "source_list": source_list,
+        "trigger": trigger,
+        "guid": content.get(schema["guid_key"]),
+        "voice_path_keys": schema["voice_path_keys"],
+        "avatar_name_keys": schema["avatar_name_keys"],
+    }
+
+
+def _extract_voice_path(source: dict, voice_path_keys: tuple[str, ...]) -> str:
+    value = _pick_first_value(source, voice_path_keys)
+    return str(value or "").strip()
+
+
+def _extract_avatar_name(source: dict, avatar_name_keys: tuple[str, ...]) -> str:
+    value = _pick_first_value(source, avatar_name_keys)
+    return str(value or "").strip()
 
 
 def _ensure_fetter_voice_schema(cursor):
@@ -171,44 +269,26 @@ def _ensure_fetter_voice_schema(cursor):
 
 
 def _extract_fetter_voice_rows(content: dict):
-    raw_type = content.get("IACPGADBANJ")
-    if raw_type is None:
-        raw_type = content.get("Type", content.get("type"))
-    if str(raw_type or "").strip().lower() != "fetter":
+    normalized = _normalize_voice_item_content(content)
+    if normalized is None or normalized["entry_type"] != "fetter":
         return []
 
-    raw_voice_file = content.get("MGOMDNKKLCP")
-    if raw_voice_file is None:
-        raw_voice_file = content.get("voiceFile", content.get("Id", content.get("id")))
+    raw_voice_file = normalized["entry_id"]
     try:
         voice_file = int(raw_voice_file)
     except (TypeError, ValueError):
         return []
 
-    source_names = content.get("OPGDOEDEJOJ")
-    if source_names is None:
-        source_names = content.get("SourceNames", content.get("sourceNames", []))
-    if not isinstance(source_names, list):
-        return []
-
     rows = []
     seen_rows = set()
-    for source in source_names:
+    for source in normalized["source_list"]:
         if not isinstance(source, dict):
             continue
-        avatar_name = (
-            source.get("IEPAMKPOOII")
-            or source.get("avatarName")
-            or source.get("GDIJGLOHHFM")
-            or source.get("switchName")
-        )
+        avatar_name = _extract_avatar_name(source, normalized["avatar_name_keys"])
         avatar_id = getAvatarIdFromVoiceItemAvatarName(str(avatar_name or ""))
         if avatar_id <= 0:
             continue
-        voice_path = source.get("MDOCAGOFPAP")
-        if voice_path is None:
-            voice_path = source.get("sourceFileName", source.get("DCIHFJLBLAP", source.get("BJDAJEKPCFP")))
-        voice_path_text = str(voice_path or "").strip()
+        voice_path_text = _extract_voice_path(source, normalized["voice_path_keys"])
         row_key = (avatar_id, voice_path_text)
         if not voice_path_text or row_key in seen_rows:
             continue
@@ -234,31 +314,27 @@ def importVoiceItem(fileName: str, cursor, *, batch_size: int = DEFAULT_BATCH_SI
 
     rows = []
     for content in textMap.values():
-        schema = _resolve_voice_schema(content)
-        if schema is None:
+        normalized = _normalize_voice_item_content(content)
+        if normalized is None or normalized["entry_type"] != "dialog":
             continue
 
-        p1, p2, p3, p4, guidKeyName = schema
-        if p2 not in content or p1 not in content or p4 not in content:
+        dialogueId = normalized["entry_id"]
+        gameTrigger = normalized["trigger"]
+        try:
+            dialogueId = int(dialogueId)
+        except (TypeError, ValueError):
             continue
 
-        dialogueId = content.get(p1)
-        gameTrigger = content.get(p4)
-        source_names = content.get(p2)
-
-        if dialogueId is None or gameTrigger is None or not isinstance(source_names, list):
-            continue
-
-        for voice in source_names:
+        for voice in normalized["source_list"]:
             if not isinstance(voice, dict):
                 continue
-            voicePath = voice.get(p3)
-            if voicePath is None:
+            voicePath = _extract_voice_path(voice, normalized["voice_path_keys"])
+            if not voicePath:
                 continue
 
             avatarId = 0
-            current_avatar_name = voice.get("avatarName") or voice.get("GDIJGLOHHFM", "")
-            if guidKeyName in content and current_avatar_name:
+            current_avatar_name = _extract_avatar_name(voice, normalized["avatar_name_keys"])
+            if normalized["guid"] is not None and current_avatar_name:
                 avatarId = getAvatarIdFromVoiceItemAvatarName(current_avatar_name)
 
             rows.append((dialogueId, voicePath, gameTrigger, avatarId))

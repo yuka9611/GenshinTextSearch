@@ -304,6 +304,61 @@ def importQuestBriefs(*, commit: bool = True, batch_size: int = DEFAULT_BATCH_SI
     )
 
 
+def importAllHangouts(
+    sync_delete: bool = False,
+    *,
+    batch_size: int = DEFAULT_BATCH_SIZE,
+):
+    return questImport.importAllHangouts(
+        sync_delete=sync_delete,
+        batch_size=batch_size,
+    )
+
+
+def importAllHangoutsForDiff(
+    current_version: str,
+    sync_delete: bool = False,
+    *,
+    batch_size: int = DEFAULT_BATCH_SIZE,
+):
+    return questImport.importAllHangoutsForDiff(
+        current_version=current_version,
+        sync_delete=sync_delete,
+        batch_size=batch_size,
+    )
+
+
+def importAllAnecdotes(
+    sync_delete: bool = False,
+    *,
+    batch_size: int = DEFAULT_BATCH_SIZE,
+):
+    return questImport.importAllAnecdotes(
+        sync_delete=sync_delete,
+        batch_size=batch_size,
+    )
+
+
+def importAllAnecdotesForDiff(
+    current_version: str,
+    sync_delete: bool = False,
+    *,
+    batch_size: int = DEFAULT_BATCH_SIZE,
+):
+    return questImport.importAllAnecdotesForDiff(
+        current_version=current_version,
+        sync_delete=sync_delete,
+        batch_size=batch_size,
+    )
+
+
+def backfillQuestMetadata(*, commit: bool = True, batch_size: int = DEFAULT_BATCH_SIZE):
+    return questImport.backfillQuestMetadata(
+        commit=commit,
+        batch_size=batch_size,
+    )
+
+
 def refreshQuestHashMapByTalkIds(
     talk_ids,
     *,
@@ -426,6 +481,8 @@ def main(
         "fetter_stories",
         "quests",
         "quest_briefs",
+        "hangouts",
+        "anecdotes",
         "chapters",
         "load_voice_avatars",
         "voices",
@@ -467,6 +524,22 @@ def main(
                 )
             elif stage == "quest_briefs":
                 _run_stage(stage_timer, stage, importQuestBriefs, skip_asking=True)
+            elif stage == "hangouts":
+                _run_stage(
+                    stage_timer,
+                    stage,
+                    importAllHangouts,
+                    sync_delete=prune_missing,
+                    skip_asking=True,
+                )
+            elif stage == "anecdotes":
+                _run_stage(
+                    stage_timer,
+                    stage,
+                    importAllAnecdotes,
+                    sync_delete=prune_missing,
+                    skip_asking=True,
+                )
             elif stage == "chapters":
                 _run_stage(stage_timer, stage, importChapters, skip_asking=True)
             elif stage == "load_voice_avatars":
@@ -648,6 +721,11 @@ if __name__ == "__main__":
         action="store_true",
         help="when used with --quest-only, skip importing Talk",
     )
+    parser.add_argument(
+        "--quest-metadata-only",
+        action="store_true",
+        help="backfill quest description/step-title hashes into existing quest tables only",
+    )
 
     parser.add_argument("--remote-ref", "--remote", type=str, default="origin/master", help="target remote ref for diff")
     parser.add_argument(
@@ -733,6 +811,18 @@ if __name__ == "__main__":
             file=sys.stderr,
         )
         sys.exit(2)
+    if args.quest_metadata_only and args.diff_update:
+        print(
+            "[ERROR] --quest-metadata-only and --diff-update cannot be used together.",
+            file=sys.stderr,
+        )
+        sys.exit(2)
+    if args.quest_metadata_only and args.quest_only:
+        print(
+            "[ERROR] --quest-metadata-only and --quest-only cannot be used together.",
+            file=sys.stderr,
+        )
+        sys.exit(2)
     if args.quest_only_skip_quests and not args.quest_only:
         print(
             "[ERROR] --quest-only-skip-quests can only be used with --quest-only.",
@@ -799,6 +889,19 @@ if __name__ == "__main__":
                 )
             except Exception as e:
                 print(f"[ERROR] quest-only import failed: {e}", file=sys.stderr)
+                sys.exit(2)
+        elif args.quest_metadata_only:
+            try:
+                stats = backfillQuestMetadata(commit=True, batch_size=DEFAULT_BATCH_SIZE)
+                print(
+                    "Quest metadata backfill done: "
+                    f"quest_files={stats.get('quest_file_count', 0)}, "
+                    f"quest_desc_rows={stats.get('quest_desc_row_count', 0)}, "
+                    f"quest_talk_rows={stats.get('quest_talk_row_count', 0)}, "
+                    f"quest_brief_rows={stats.get('quest_brief_row_count', 0)}"
+                )
+            except Exception as e:
+                print(f"[ERROR] quest metadata backfill failed: {e}", file=sys.stderr)
                 sys.exit(2)
         else:
             # 询问是否跳过导入

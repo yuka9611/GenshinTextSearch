@@ -63,10 +63,12 @@ const getVoiceOver = async (voicePath, langCode) => {
     return ans.data;
 };
 
-const getTalkFromHash = withCache((textHash, searchLang) => {
+const getTalkFromHash = withCache((textHash, searchLang, page = null, pageSize = 200) => {
     return request.post("/api/getTalkFromHash", {
         "textHash": textHash,
-        "searchLang": searchLang
+        "searchLang": searchLang,
+        "page": page,
+        "pageSize": pageSize,
     });
 });
 
@@ -78,12 +80,13 @@ const getSubtitleContext = withCache((fileName, subtitleId, searchLang) => {
     });
 });
 
-const searchByName = (keyword, langCode, createdVersion = "", updatedVersion = "") => {
+const searchByName = (keyword, langCode, createdVersion = "", updatedVersion = "", questSourceType = "") => {
     return request.post("/api/nameSearch", {
         keyword: keyword,
         langCode: langCode,
         createdVersion: createdVersion,
         updatedVersion: updatedVersion,
+        questSourceType: questSourceType,
     });
 };
 
