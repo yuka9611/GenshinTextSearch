@@ -1,6 +1,5 @@
 import os
 import json
-import sys
 from lightweight_progress import LightweightProgress
 
 from DBConfig import conn, DATA_PATH
