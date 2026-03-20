@@ -586,48 +586,60 @@ def set_db_version(conn, version: str):
 def ensure_breakpoint_schema():
     """创建断点表结构"""
     cur = conn.cursor()
-    cur.execute('''
-    CREATE TABLE IF NOT EXISTS breakpoint (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        stage_name TEXT UNIQUE,
-        status TEXT DEFAULT 'pending',
-        start_time TEXT,
-        end_time TEXT,
-        created_at TEXT DEFAULT CURRENT_TIMESTAMP
-    )
-    ''')
+    try:
+        cur.execute('''
+        CREATE TABLE IF NOT EXISTS breakpoint (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            stage_name TEXT UNIQUE,
+            status TEXT DEFAULT 'pending',
+            start_time TEXT,
+            end_time TEXT,
+            created_at TEXT DEFAULT CURRENT_TIMESTAMP
+        )
+        ''')
+    finally:
+        cur.close()
     conn.commit()
 
 
 def clear_breakpoints():
     """清理所有断点信息"""
     cur = conn.cursor()
-    cur.execute("DELETE FROM breakpoint")
+    try:
+        cur.execute("DELETE FROM breakpoint")
+    finally:
+        cur.close()
     conn.commit()
 
 
 def get_breakpoint_status(stage_name):
     """获取指定阶段的断点状态"""
     cur = conn.cursor()
-    cur.execute("SELECT status FROM breakpoint WHERE stage_name = ?", (stage_name,))
-    result = cur.fetchone()
+    try:
+        cur.execute("SELECT status FROM breakpoint WHERE stage_name = ?", (stage_name,))
+        result = cur.fetchone()
+    finally:
+        cur.close()
     return result[0] if result else 'pending'
 
 
 def update_breakpoint_status(stage_name, status, start_time=None, end_time=None):
     """更新断点状态"""
     cur = conn.cursor()
-    if status == 'in_progress':
-        cur.execute('''
-        INSERT OR REPLACE INTO breakpoint (stage_name, status, start_time, end_time)
-        VALUES (?, ?, ?, ?)
-        ''', (stage_name, status, start_time, end_time))
-    elif status == 'completed':
-        cur.execute('''
-        UPDATE breakpoint
-        SET status = ?, end_time = ?
-        WHERE stage_name = ?
-        ''', (status, end_time, stage_name))
+    try:
+        if status == 'in_progress':
+            cur.execute('''
+            INSERT OR REPLACE INTO breakpoint (stage_name, status, start_time, end_time)
+            VALUES (?, ?, ?, ?)
+            ''', (stage_name, status, start_time, end_time))
+        elif status == 'completed':
+            cur.execute('''
+            UPDATE breakpoint
+            SET status = ?, end_time = ?
+            WHERE stage_name = ?
+            ''', (status, end_time, stage_name))
+    finally:
+        cur.close()
     conn.commit()
 
 
