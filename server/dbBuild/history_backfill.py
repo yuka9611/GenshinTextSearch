@@ -1,6 +1,7 @@
 import json
 import os
 import logging
+import re
 import subprocess
 import sys
 import time
@@ -53,12 +54,13 @@ from versioning import (
 from lightweight_progress import LightweightProgress
 
 try:
-    if hasattr(sys.stderr, "reconfigure"):
-        sys.stderr.reconfigure(encoding="utf-8", errors="backslashreplace")
+    reconfigure = getattr(sys.stderr, "reconfigure", None)
+    if callable(reconfigure):
+        reconfigure(encoding="utf-8", errors="backslashreplace")
 except Exception:
     pass
 
-# 譌･蠢鈴・鄂ｮ
+# 日志配置
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(levelname)s - %(message)s',
@@ -74,7 +76,7 @@ DEFAULT_GIT_BACKFILL_CHECKPOINT_EVERY = 100
 DEFAULT_FIX_COMMIT_BATCH_SIZE = 1000
 _git_cache = {}
 
-# Git 蜻ｽ莉､郛灘ｭ・_git_cache = {}
+# Git 命令缓存
 
 
 # 历史回放涉及的路径
@@ -2718,6 +2720,7 @@ def backfill_quest_versions_from_history(
                 for i, quest_id in enumerate(quest_ids_to_backfill):
                     postfix = f"Quest {quest_id}"
                     try:
+                        quest_file_path: str | None = None
                         source_type, source_code_raw = _get_quest_source_fields(cursor, int(quest_id))
                         if source_type == SOURCE_TYPE_ANECDOTE:
                             first_commit = _find_anecdote_first_commit(repo_path, int(quest_id))
@@ -2782,6 +2785,9 @@ def backfill_quest_versions_from_history(
                                             pbar.update(postfix=postfix)
                                             continue
                                     else:
+                                        if quest_file_path is None:
+                                            pbar.update(postfix=postfix)
+                                            continue
                                         first_obj = _git_show_json(repo_path, first_commit, quest_file_path)
                                         if not isinstance(first_obj, dict):
                                             pbar.update(postfix=postfix)

@@ -1,16 +1,22 @@
 import os
 import sqlite3
 
-# Local AnimeGameData checkout path.
-DATA_PATH = r"C:\Users\yuka9\Downloads\AnimeGameData"
+_DBBUILD_DIR = os.path.abspath(os.path.dirname(__file__))
+_SERVER_DIR = os.path.abspath(os.path.join(_DBBUILD_DIR, ".."))
+_PROJECT_ROOT = os.path.abspath(os.path.join(_SERVER_DIR, ".."))
+
+# Local AnimeGameData checkout path. Defaults to a sibling folder next to this repo.
+_default_data_path = os.path.join(_PROJECT_ROOT, "..", "AnimeGameData")
+DATA_PATH = os.path.abspath(os.environ.get("GTS_DATA_PATH", _default_data_path))
 
 # TextMap language files path.
 LANG_PATH = os.path.join(DATA_PATH, "TextMap")
 
 # Default DB should be server/data.db (same DB used by runtime server).
-_default_db_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "data.db"))
+_default_db_path = os.path.join(_SERVER_DIR, "data.db")
 DB_PATH = _default_db_path
-# 添加 check_same_thread=False 参数，允许在不同线程中使用同一个连接
+
+# Allow shared use across threads in importer/runtime flows.
 conn = sqlite3.connect(DB_PATH, check_same_thread=False)
 
 # Readable files path.

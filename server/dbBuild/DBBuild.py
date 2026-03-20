@@ -4,6 +4,7 @@ import sys
 import subprocess
 import pstats
 import time
+from typing import Any, cast
 from contextlib import contextmanager
 from DBConfig import conn, DATA_PATH, DB_PATH
 import voiceItemImport
@@ -111,6 +112,13 @@ def _is_non_dialog_talk_obj(obj: dict) -> bool:
     return questImport._is_non_dialog_talk_obj(obj)
 
 
+def _load_json_rows(path: str) -> list[dict[str, Any]]:
+    data = load_json_file(path, default=[])
+    if not isinstance(data, list):
+        return []
+    return [cast(dict[str, Any], row) for row in data if isinstance(row, dict)]
+
+
 def importTalk(
     fileName: str,
     *,
@@ -147,7 +155,7 @@ def importAllTalkItems(
 
 def importAvatars(*, commit: bool = True, batch_size: int = DEFAULT_BATCH_SIZE):
     cursor = conn.cursor()
-    avatars = load_json_file(DATA_PATH + "\\ExcelBinOutput\\AvatarExcelConfigData.json")
+    avatars = _load_json_rows(DATA_PATH + "\\ExcelBinOutput\\AvatarExcelConfigData.json")
 
     sql1 = (
         "INSERT INTO avatar(avatarId, nameTextMapHash) VALUES (?,?) "
@@ -170,7 +178,7 @@ def importAvatars(*, commit: bool = True, batch_size: int = DEFAULT_BATCH_SIZE):
 
 def importFetters(*, commit: bool = True, batch_size: int = DEFAULT_BATCH_SIZE):
     cursor = conn.cursor()
-    fetters = load_json_file(DATA_PATH + "\\ExcelBinOutput\\FettersExcelConfigData.json")
+    fetters = _load_json_rows(DATA_PATH + "\\ExcelBinOutput\\FettersExcelConfigData.json")
     sql1 = (
         "INSERT INTO fetters(fetterId, avatarId, voiceTitleTextMapHash, voiceFileTextTextMapHash, voiceFile) "
         "VALUES (?,?,?,?,?) "
@@ -209,7 +217,7 @@ def importFetters(*, commit: bool = True, batch_size: int = DEFAULT_BATCH_SIZE):
 
 def importFetterStories(*, commit: bool = True, batch_size: int = DEFAULT_BATCH_SIZE):
     cursor = conn.cursor()
-    stories = load_json_file(DATA_PATH + "\\ExcelBinOutput\\FetterStoryExcelConfigData.json")
+    stories = _load_json_rows(DATA_PATH + "\\ExcelBinOutput\\FetterStoryExcelConfigData.json")
     sql1 = ("INSERT INTO fetterStory("
             "fetterId, avatarId, storyTitleTextMapHash, storyTitle2TextMapHash, "
             "storyTitleLockedTextMapHash, storyContextTextMapHash, storyContext2TextMapHash"
@@ -379,7 +387,7 @@ def refreshQuestHashMapByQuestIds(
 
 def importChapters(*, commit: bool = True, batch_size: int = DEFAULT_BATCH_SIZE):
     cursor = conn.cursor()
-    chapters = load_json_file(DATA_PATH + "\\ExcelBinOutput\\ChapterExcelConfigData.json")
+    chapters = _load_json_rows(DATA_PATH + "\\ExcelBinOutput\\ChapterExcelConfigData.json")
     sql1 = (
         "INSERT INTO chapter(chapterId, chapterTitleTextMapHash, chapterNumTextMapHash) VALUES (?,?,?) "
         "ON CONFLICT(chapterId) DO UPDATE SET "
@@ -404,7 +412,7 @@ def importChapters(*, commit: bool = True, batch_size: int = DEFAULT_BATCH_SIZE)
 
 def importNPCs(*, commit: bool = True, batch_size: int = DEFAULT_BATCH_SIZE):
     cursor = conn.cursor()
-    NPCs = load_json_file(DATA_PATH + "\\ExcelBinOutput\\NpcExcelConfigData.json")
+    NPCs = _load_json_rows(DATA_PATH + "\\ExcelBinOutput\\NpcExcelConfigData.json")
 
     sql1 = (
         "INSERT INTO npc(npcId, textHash) VALUES (?,?) "
@@ -427,7 +435,7 @@ def importNPCs(*, commit: bool = True, batch_size: int = DEFAULT_BATCH_SIZE):
 
 def importManualTextMap(*, commit: bool = True, batch_size: int = DEFAULT_BATCH_SIZE):
     cursor = conn.cursor()
-    placeholders = load_json_file(DATA_PATH + "\\ExcelBinOutput\\ManualTextMapConfigData.json")
+    placeholders = _load_json_rows(DATA_PATH + "\\ExcelBinOutput\\ManualTextMapConfigData.json")
     sql1 = (
         "INSERT INTO manualTextMap(textMapId, textHash) VALUES (?,?) "
         "ON CONFLICT(textMapId) DO UPDATE SET "
