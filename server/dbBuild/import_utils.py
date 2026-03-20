@@ -194,11 +194,13 @@ def fast_import_pragmas(conn, enabled: bool = True):
         cursor.execute("PRAGMA synchronous = NORMAL")
         cursor.execute("PRAGMA temp_store = MEMORY")
         cursor.execute("PRAGMA cache_size = -262144")  # Reserve about 256 MiB of page cache.
-        cursor.execute("PRAGMA journal_mode = WAL")  # Keep WAL enabled for safer bulk writes.
+        cursor.execute("PRAGMA journal_mode = WAL").fetchone()  # Consume the returned row so the statement does not stay active.
         yield
     finally:
         for name in pragma_names:
             old_value = old_settings.get(name)
             if old_value is not None:
-                cursor.execute(f"PRAGMA {name} = {old_value}")
+                pragma_result = cursor.execute(f"PRAGMA {name} = {old_value}")
+                if name == "journal_mode":
+                    pragma_result.fetchone()
         cursor.close()

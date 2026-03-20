@@ -109,6 +109,12 @@ def _ensure_index(index_sql: str):
     cur.close()
 
 
+def _ensure_index_for_table(table_name: str, index_sql: str):
+    if not _table_exists(table_name):
+        return
+    _ensure_index(index_sql)
+
+
 def _normalize_fts_tokenizer(tokenizer: str | None) -> str:
     text = str(tokenizer or "").strip()
     return text or "trigram"
@@ -933,32 +939,33 @@ def ensure_version_schema():
     _ensure_unique_index("chapter", "chapter_chapterId_uindex", ("chapterId",))
     _ensure_unique_index("fetters", "fetters_fetterId_uindex", ("fetterId",))
     _ensure_unique_index("fetterStory", "fetterStory_fetterId_uindex", ("fetterId",))
-    cur = conn.cursor()
-    try:
-        cur.execute("DROP INDEX IF EXISTS questTalk_questId_talkId_uindex")
-        cur.execute("UPDATE questTalk SET coopQuestId = 0 WHERE coopQuestId IS NULL")
-        conn.commit()
-    finally:
-        cur.close()
+    if _table_exists("questTalk"):
+        cur = conn.cursor()
+        try:
+            cur.execute("DROP INDEX IF EXISTS questTalk_questId_talkId_uindex")
+            cur.execute("UPDATE questTalk SET coopQuestId = 0 WHERE coopQuestId IS NULL")
+            conn.commit()
+        finally:
+            cur.close()
     _ensure_unique_index("questTalk", "questTalk_questId_talkId_coopQuestId_uindex", ("questId", "talkId", "coopQuestId"))
     _ensure_unique_index("voice", "voice_dialogueId_voicePath_uindex", ("dialogueId", "voicePath"))
 
-    _ensure_index("CREATE INDEX IF NOT EXISTS readable_lang_index ON readable(lang)")
-    _ensure_index("CREATE INDEX IF NOT EXISTS readable_lang_fileName_index ON readable(lang, fileName)")
-    _ensure_index("CREATE INDEX IF NOT EXISTS subtitle_lang_index ON subtitle(lang)")
-    _ensure_index("CREATE INDEX IF NOT EXISTS subtitle_fileName_lang_startTime_index ON subtitle(fileName, lang, startTime)")
-    _ensure_index("CREATE INDEX IF NOT EXISTS subtitle_lang_subtitleId_startTime_index ON subtitle(lang, subtitleId, startTime)")
-    _ensure_index("CREATE INDEX IF NOT EXISTS textMap_created_version_id_index ON textMap(created_version_id)")
-    _ensure_index("CREATE INDEX IF NOT EXISTS textMap_updated_version_id_index ON textMap(updated_version_id)")
-    _ensure_index("CREATE INDEX IF NOT EXISTS quest_created_version_id_index ON quest(created_version_id)")
-    _ensure_index("CREATE INDEX IF NOT EXISTS quest_git_created_version_id_index ON quest(git_created_version_id)")
-    _ensure_index("CREATE INDEX IF NOT EXISTS quest_source_type_index ON quest(source_type)")
-    _ensure_index("CREATE INDEX IF NOT EXISTS questTalk_talkId_coopQuestId_index ON questTalk(talkId, coopQuestId)")
+    _ensure_index_for_table("readable", "CREATE INDEX IF NOT EXISTS readable_lang_index ON readable(lang)")
+    _ensure_index_for_table("readable", "CREATE INDEX IF NOT EXISTS readable_lang_fileName_index ON readable(lang, fileName)")
+    _ensure_index_for_table("subtitle", "CREATE INDEX IF NOT EXISTS subtitle_lang_index ON subtitle(lang)")
+    _ensure_index_for_table("subtitle", "CREATE INDEX IF NOT EXISTS subtitle_fileName_lang_startTime_index ON subtitle(fileName, lang, startTime)")
+    _ensure_index_for_table("subtitle", "CREATE INDEX IF NOT EXISTS subtitle_lang_subtitleId_startTime_index ON subtitle(lang, subtitleId, startTime)")
+    _ensure_index_for_table("textMap", "CREATE INDEX IF NOT EXISTS textMap_created_version_id_index ON textMap(created_version_id)")
+    _ensure_index_for_table("textMap", "CREATE INDEX IF NOT EXISTS textMap_updated_version_id_index ON textMap(updated_version_id)")
+    _ensure_index_for_table("quest", "CREATE INDEX IF NOT EXISTS quest_created_version_id_index ON quest(created_version_id)")
+    _ensure_index_for_table("quest", "CREATE INDEX IF NOT EXISTS quest_git_created_version_id_index ON quest(git_created_version_id)")
+    _ensure_index_for_table("quest", "CREATE INDEX IF NOT EXISTS quest_source_type_index ON quest(source_type)")
+    _ensure_index_for_table("questTalk", "CREATE INDEX IF NOT EXISTS questTalk_talkId_coopQuestId_index ON questTalk(talkId, coopQuestId)")
     # 不再为quest表的updated_version_id列创建索引，因为它现在存储在quest_version表中
-    _ensure_index("CREATE INDEX IF NOT EXISTS readable_created_version_id_index ON readable(created_version_id)")
-    _ensure_index("CREATE INDEX IF NOT EXISTS readable_updated_version_id_index ON readable(updated_version_id)")
-    _ensure_index("CREATE INDEX IF NOT EXISTS subtitle_created_version_id_index ON subtitle(created_version_id)")
-    _ensure_index("CREATE INDEX IF NOT EXISTS subtitle_updated_version_id_index ON subtitle(updated_version_id)")
+    _ensure_index_for_table("readable", "CREATE INDEX IF NOT EXISTS readable_created_version_id_index ON readable(created_version_id)")
+    _ensure_index_for_table("readable", "CREATE INDEX IF NOT EXISTS readable_updated_version_id_index ON readable(updated_version_id)")
+    _ensure_index_for_table("subtitle", "CREATE INDEX IF NOT EXISTS subtitle_created_version_id_index ON subtitle(created_version_id)")
+    _ensure_index_for_table("subtitle", "CREATE INDEX IF NOT EXISTS subtitle_updated_version_id_index ON subtitle(updated_version_id)")
     _backfill_version_dim_and_ids()
     _ensure_updated_version_autofill_rules()
     _ensure_textmap_fts()

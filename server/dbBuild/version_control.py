@@ -1,6 +1,7 @@
 from collections import Counter, defaultdict
 from collections.abc import Mapping, Sequence
 from DBConfig import conn
+from DBInit import ensure_base_schema
 from import_utils import reset_temp_table
 from quest_hash_map_utils import _quest_talk_dialogue_join_condition
 from versioning import (
@@ -792,6 +793,7 @@ def backfill_quest_created_version_from_textmap(
 
 
 def ensure_version_schema():
+    ensure_base_schema()
     _ensure_version_schema_impl()
     _clear_version_sort_key_cache()
 
