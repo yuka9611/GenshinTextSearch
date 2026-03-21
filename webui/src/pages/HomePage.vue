@@ -70,6 +70,18 @@ const getSidebarPath = () => {
 const menu = ref();
 let contentDom = undefined;
 const loaded = ref(false)
+const initError = ref("")
+
+const getInitErrorMessage = (error) => {
+    const message = error?.response?.data?.msg
+    if (message) {
+        return message
+    }
+    if (error?.message) {
+        return error.message
+    }
+    return "Failed to load application data."
+}
 
 onMounted(async () => {
     (() => {
@@ -85,15 +97,26 @@ onMounted(async () => {
         contentDom = document.querySelector(".content")
     })()
 
-    global.languages = (await api.getImportedTextLanguages()).json
-    global.voiceLanguages = (await api.getImportedVoiceLanguages()).json
-    global.config = (await api.getConfig()).json
-
-    loaded.value = true
+    try {
+        global.languages = (await api.getImportedTextLanguages()).json
+        global.voiceLanguages = (await api.getImportedVoiceLanguages()).json
+        global.config = (await api.getConfig()).json
+    } catch (error) {
+        initError.value = getInitErrorMessage(error)
+        if (error?.defaultHandler) {
+            error.defaultHandler()
+        } else {
+            console.error("failed to initialize home page", error)
+        }
+    } finally {
+        loaded.value = true
+    }
 })
 
 watch(router.currentRoute, () => {
-    contentDom.scrollTo({ left: 0, top: 0 })
+    if (contentDom) {
+        contentDom.scrollTo({ left: 0, top: 0 })
+    }
 })
 
 </script>
@@ -131,7 +154,10 @@ watch(router.currentRoute, () => {
             </div>
 
             <div class="content">
-                <router-view v-slot="{ Component }"  v-if="loaded">
+                <div v-if="loaded && initError" class="initError">
+                    {{ initError }}
+                </div>
+                <router-view v-slot="{ Component }" v-else-if="loaded">
                     <keep-alive>
                         <component :is="Component" />
                     </keep-alive>
@@ -217,6 +243,16 @@ watch(router.currentRoute, () => {
 
 .content.dialogueContent {
     overflow-x: auto;
+}
+
+.initError {
+    margin: 24px;
+    padding: 16px 18px;
+    border: 1px solid var(--el-color-danger-light-5);
+    border-radius: 12px;
+    background-color: var(--el-color-danger-light-9);
+    color: var(--el-color-danger);
+    line-height: 1.6;
 }
 
 .sideBar {

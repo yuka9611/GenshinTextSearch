@@ -1,6 +1,7 @@
 import os
+import sqlite3
 import sys
-from flask import Blueprint, request, jsonify
+from flask import Blueprint, current_app, request, jsonify
 
 from databaseHelper import selectTextMapFromKeywordPaged, selectVoiceFromKeywordPaged, getVoicePath, getTextMapByHash, getVersionData, getLangCodeMap
 from utils.helpers import getLangFromRequest, normalizeSearchTerm, getLanguageName
@@ -40,6 +41,32 @@ else:
     sys.path.pop(0)
 
 api_bp = Blueprint('api', __name__)
+
+
+def _is_database_corruption_error(error: sqlite3.DatabaseError) -> bool:
+    message = str(error).lower()
+    return (
+        "database disk image is malformed" in message
+        or "malformed" in message
+        or "file is not a database" in message
+    )
+
+
+@api_bp.errorhandler(sqlite3.DatabaseError)
+def handle_sqlite_database_error(error: sqlite3.DatabaseError):
+    current_app.logger.exception("SQLite database error during API request")
+    if _is_database_corruption_error(error):
+        message = (
+            "server/data.db is corrupted. Rebuild or replace the database file, "
+            "then restart the server."
+        )
+    else:
+        message = "Database query failed. Check server/data.db and retry."
+    return jsonify({
+        "data": None,
+        "code": 500,
+        "msg": message,
+    })
 
 @api_bp.route('/api/search', methods=['GET'])
 def search_text():
