@@ -178,8 +178,10 @@ create table textMap
         unique (lang, hash)
 );
 
--- 由于textMap表已有(lang, hash)的唯一约束，单独的hash和lang索引是冗余的
--- 唯一约束会自动创建索引，因此删除这些冗余索引
+-- (lang, hash) 的唯一约束可覆盖 lang+hash 联合查询，但不能替代 hash 单列查找。
+-- 部分调用路径会按 hash 跨语言回查文本，因此仍需要保留 textMap_hash_index。
+create index textMap_hash_index
+    on textMap (hash);
 
 
 create table voice

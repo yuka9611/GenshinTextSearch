@@ -594,10 +594,33 @@ def _execute_with_fallback(
     """
     执行SQL查询，如果失败则使用备用查询
     """
+    def _should_use_fallback(exc: sqlite3.Error) -> bool:
+        if sql_fallback is None:
+            return False
+        if isinstance(exc, sqlite3.OperationalError):
+            return True
+        if not isinstance(exc, sqlite3.DatabaseError):
+            return False
+
+        sql_lower = sql_main.lower()
+        if _TEXTMAP_FTS_TABLE.lower() not in sql_lower and " match " not in sql_lower:
+            return False
+
+        message = str(exc).lower()
+        fallback_markers = (
+            "fts",
+            "match",
+            "unable to use function",
+            "no such module",
+            "no such table",
+            "no such column: fts",
+        )
+        return any(marker in message for marker in fallback_markers)
+
     try:
         cursor.execute(sql_main, params_main)
-    except sqlite3.OperationalError:
-        if sql_fallback is None:
+    except sqlite3.Error as exc:
+        if not _should_use_fallback(exc):
             raise
         cursor.execute(sql_fallback, params_fallback if params_fallback is not None else [])
 
@@ -695,8 +718,7 @@ def _build_textmap_query(
         # 使用FTS查询
         sql = (
             f"select tm.hash, tm.content, {version_select} from textMap tm "
-            f"join {_TEXTMAP_FTS_TABLE} fts on fts.rowid = tm.id "
-            f"where fts match ? and fts.lang=? "
+            f"where tm.id in (select rowid from {_TEXTMAP_FTS_TABLE} where {_TEXTMAP_FTS_TABLE} match ? and lang=?) "
             "and tm.lang=? "
             "and (tm.content like ? escape '\\' or tm.content like ? escape '\\') "
         )
@@ -785,8 +807,7 @@ def _build_textmap_count_query(
         # 使用FTS查询
         sql = (
             f"select count(*) from textMap tm "
-            f"join {_TEXTMAP_FTS_TABLE} fts on fts.rowid = tm.id "
-            f"where fts match ? and fts.lang=? "
+            f"where tm.id in (select rowid from {_TEXTMAP_FTS_TABLE} where {_TEXTMAP_FTS_TABLE} match ? and lang=?) "
             "and tm.lang=? "
             "and (tm.content like ? escape '\\' or tm.content like ? escape '\\') "
         )
@@ -2028,13 +2049,17 @@ def isTextMapHashInKeyword(textHash: int, keyword: str, langCode: int) -> bool:
 
 
 def selectTextMapFromTextHash(textHash: int, langs: list[int] | None = None):
+    safe_text_hash = _coerce_optional_int(textHash)
+    if safe_text_hash is None:
+        return []
+
     with closing(conn.cursor()) as cursor:
         if langs is not None and len(langs) > 0:
             langStr = ','.join([str(i) for i in langs])
             sql1 = f"select content, lang from textMap where hash=? and lang in ({langStr})"
         else:
             sql1 = "select content, lang from textMap where hash=?"
-        cursor.execute(sql1, (textHash,))
+        cursor.execute(sql1, (safe_text_hash,))
         return cursor.fetchall()
 
 
@@ -2239,7 +2264,7 @@ def getTalkerName(talkerType: str, talkerId: int, langCode: int = 1):
     with closing(conn.cursor()) as cursor:
         talkerName = None
         if talkerType == "TALK_ROLE_NPC":
-            sqlGetNpcName = 'select content from npc, textMap indexed by textMap_hash_index where npcId = ? and textHash = hash and lang = ?'
+            sqlGetNpcName = 'select content from npc, textMap where npcId = ? and textHash = hash and lang = ?'
             cursor.execute(sqlGetNpcName, (talkerId, langCode))
             ansNpcName = cursor.fetchall()
             if len(ansNpcName) > 0:
