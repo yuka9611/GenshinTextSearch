@@ -955,6 +955,7 @@ def ensure_version_schema():
     _ensure_index_for_table("subtitle", "CREATE INDEX IF NOT EXISTS subtitle_lang_index ON subtitle(lang)")
     _ensure_index_for_table("subtitle", "CREATE INDEX IF NOT EXISTS subtitle_fileName_lang_startTime_index ON subtitle(fileName, lang, startTime)")
     _ensure_index_for_table("subtitle", "CREATE INDEX IF NOT EXISTS subtitle_lang_subtitleId_startTime_index ON subtitle(lang, subtitleId, startTime)")
+    _ensure_index_for_table("textMap", "CREATE INDEX IF NOT EXISTS textMap_hash_index ON textMap(hash)")
     _ensure_index_for_table("textMap", "CREATE INDEX IF NOT EXISTS textMap_created_version_id_index ON textMap(created_version_id)")
     _ensure_index_for_table("textMap", "CREATE INDEX IF NOT EXISTS textMap_updated_version_id_index ON textMap(updated_version_id)")
     _ensure_index_for_table("quest", "CREATE INDEX IF NOT EXISTS quest_created_version_id_index ON quest(created_version_id)")
