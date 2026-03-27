@@ -1,7 +1,33 @@
 import os
+import pkgutil
+import sys
 import time
 import threading
 import webbrowser
+from importlib.util import find_spec
+
+# Python 3.14 移除了 pkgutil.get_loader，旧版 Flask 仍会调用它。
+if not hasattr(pkgutil, "get_loader"):
+    def _compat_get_loader(name: str):
+        module = sys.modules.get(name)
+        if module is not None:
+            loader = getattr(module, "__loader__", None)
+            if loader is not None:
+                return loader
+
+            spec = getattr(module, "__spec__", None)
+            if spec is not None:
+                return spec.loader
+
+            return None
+
+        try:
+            spec = find_spec(name)
+        except (ImportError, AttributeError, ValueError):
+            return None
+        return None if spec is None else spec.loader
+
+    pkgutil.get_loader = _compat_get_loader  # type: ignore[attr-defined]
 
 from flask import Flask, send_from_directory
 
