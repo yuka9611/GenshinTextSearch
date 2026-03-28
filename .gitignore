@@ -1,7 +1,7 @@
 data.db*
 *.zip
 vgm
-.idea
+.idea/
 .DS_Store
 *.pyc
 *.bat
@@ -24,11 +24,12 @@ AGENTS.md
 *.whl
 __pycache__/
 *.ipynb_checkpoints
-*.vscode/
+.vscode/
 *.sublime-project
 *.sublime-workspace
 *.code-workspace
 *.env
+server/config.json
 *.venv
 env/
 venv/
