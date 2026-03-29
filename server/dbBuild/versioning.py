@@ -13,7 +13,7 @@ _FTS_DETAIL_MODE = "none"
 _FTS_COLUMNSIZE = 0
 VERSION_CATALOG_TABLE = "version_catalog"
 VERSION_DIM_TABLE = "version_dim"
-VERSION_SOURCE_TABLES: tuple[str, ...] = ("textMap", "quest", "subtitle", "readable")
+VERSION_SOURCE_TABLES: tuple[str, ...] = ("textMap", "quest", "subtitle", "readable", "npc")
 _VERSION_TAG_RE = re.compile(r"(\d+)\.(\d+)(?:\.\d+)?")
 
 
@@ -684,8 +684,8 @@ def _backfill_version_dim_and_ids():
             if not _table_exists(table_name):
                 continue
             cols = _table_columns(table_name)
-            # 跳过quest表，因为它的更新版本存储在quest_version表中
-            if table_name != "quest" and "created_version_id" in cols and "updated_version_id" in cols:
+            # 跳过 quest/npc：quest 的更新版本存储在 quest_version，npc 仅维护创建版本。
+            if table_name not in ("quest", "npc") and "created_version_id" in cols and "updated_version_id" in cols:
                 cur.execute(
                     f"""
                     UPDATE {table_name}
@@ -838,30 +838,18 @@ def rebuild_version_catalog(
             cols = _table_columns(table_name)
 
             query_parts: list[str] = []
-            has_id_cols = "created_version_id" in cols and "updated_version_id" in cols
-            if (
-                has_id_cols
-                and _table_exists(VERSION_DIM_TABLE)
-            ):
-                # 只记录创建版本
+            has_created_only = "created_version_id" in cols
+            has_updated_inline = has_created_only and "updated_version_id" in cols
+            if has_created_only and _table_exists(VERSION_DIM_TABLE):
+                # 记录创建版本
                 query_parts.append(
                     f"SELECT vd.raw_version AS v FROM {table_name} t "
                     f"JOIN {VERSION_DIM_TABLE} vd ON vd.id = t.created_version_id "
                     f"WHERE t.created_version_id IS NOT NULL"
                 )
-                # 只记录与创建版本不同的更新版本
-                if table_name != "quest":
-                    # 对于非quest表，从表本身的updated_version_id列获取更新版本
-                    query_parts.append(
-                        f"SELECT vd_u.raw_version AS v FROM {table_name} t "
-                        f"JOIN {VERSION_DIM_TABLE} vd_c ON vd_c.id = t.created_version_id "
-                        f"JOIN {VERSION_DIM_TABLE} vd_u ON vd_u.id = t.updated_version_id "
-                        f"WHERE t.created_version_id IS NOT NULL "
-                        f"AND t.updated_version_id IS NOT NULL "
-                        f"AND vd_c.raw_version != vd_u.raw_version"
-                    )
-                else:
-                    # 对于quest表，从quest_version表获取更新版本
+                # 记录与创建版本不同的更新版本
+                if table_name == "quest":
+                    # quest 的更新版本位于 quest_version。
                     if _table_exists("quest_version"):
                         query_parts.append(
                             f"SELECT vd_u.raw_version AS v FROM quest_version qv "
@@ -872,6 +860,16 @@ def rebuild_version_catalog(
                             f"AND qv.updated_version_id IS NOT NULL "
                             f"AND vd_c.raw_version != vd_u.raw_version"
                         )
+                elif has_updated_inline:
+                    # 其他带 updated_version_id 的表直接从自身读取。
+                    query_parts.append(
+                        f"SELECT vd_u.raw_version AS v FROM {table_name} t "
+                        f"JOIN {VERSION_DIM_TABLE} vd_c ON vd_c.id = t.created_version_id "
+                        f"JOIN {VERSION_DIM_TABLE} vd_u ON vd_u.id = t.updated_version_id "
+                        f"WHERE t.created_version_id IS NOT NULL "
+                        f"AND t.updated_version_id IS NOT NULL "
+                        f"AND vd_c.raw_version != vd_u.raw_version"
+                    )
             if not query_parts:
                 stats[table_name] = 0
                 continue
@@ -924,9 +922,10 @@ def ensure_version_schema():
     for table_name in ("textMap", "readable", "subtitle"):
         _ensure_column(table_name, "created_version_id", "INTEGER")
         _ensure_column(table_name, "updated_version_id", "INTEGER")
-    # 为quest表只添加created_version_id列，updated_version_id现在存储在quest_version表中
+    # quest / npc 只维护创建版本；quest 的更新版本在 quest_version 中。
     _ensure_column("quest", "created_version_id", "INTEGER")
     _ensure_column("quest", "git_created_version_id", "INTEGER")
+    _ensure_column("npc", "created_version_id", "INTEGER")
     _ensure_column("quest", "source_type", "TEXT")
     _ensure_column("quest", "source_code_raw", "TEXT")
     _ensure_column("questTalk", "coopQuestId", "INTEGER NOT NULL DEFAULT 0")
@@ -958,8 +957,11 @@ def ensure_version_schema():
     _ensure_index_for_table("textMap", "CREATE INDEX IF NOT EXISTS textMap_hash_index ON textMap(hash)")
     _ensure_index_for_table("textMap", "CREATE INDEX IF NOT EXISTS textMap_created_version_id_index ON textMap(created_version_id)")
     _ensure_index_for_table("textMap", "CREATE INDEX IF NOT EXISTS textMap_updated_version_id_index ON textMap(updated_version_id)")
+    _ensure_index_for_table("dialogue", "CREATE INDEX IF NOT EXISTS dialogue_talkerType_talkerId_talkId_coopQuestId_dialogueId_index ON dialogue(talkerType, talkerId, talkId, coopQuestId, dialogueId)")
+    _ensure_index_for_table("dialogue", "CREATE INDEX IF NOT EXISTS dialogue_talkId_coopQuestId_dialogueId_index ON dialogue(talkId, coopQuestId, dialogueId)")
     _ensure_index_for_table("quest", "CREATE INDEX IF NOT EXISTS quest_created_version_id_index ON quest(created_version_id)")
     _ensure_index_for_table("quest", "CREATE INDEX IF NOT EXISTS quest_git_created_version_id_index ON quest(git_created_version_id)")
+    _ensure_index_for_table("npc", "CREATE INDEX IF NOT EXISTS npc_created_version_id_index ON npc(created_version_id)")
     _ensure_index_for_table("quest", "CREATE INDEX IF NOT EXISTS quest_source_type_index ON quest(source_type)")
     _ensure_index_for_table("questTalk", "CREATE INDEX IF NOT EXISTS questTalk_talkId_coopQuestId_index ON questTalk(talkId, coopQuestId)")
     # 不再为quest表的updated_version_id列创建索引，因为它现在存储在quest_version表中

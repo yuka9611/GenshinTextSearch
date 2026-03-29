@@ -84,6 +84,7 @@ RELEVANT_PATHS = [
     "TextMap",
     "Readable",
     "Subtitle",
+    "ExcelBinOutput/NpcExcelConfigData.json",
     "BinOutput/Quest",
     "ExcelBinOutput/AnecdoteExcelConfigData.json",
     "ExcelBinOutput/MainCoopExcelConfigData.json",
@@ -1504,6 +1505,13 @@ def _has_any_version_data(table_name: str) -> bool:
                 "SELECT 1 FROM quest_version WHERE updated_version_id IS NOT NULL LIMIT 1"
             ).fetchone()
             return quest_version_row is not None
+        if table_name == "npc":
+            if "created_version_id" not in cols:
+                return False
+            row = cursor.execute(
+                "SELECT 1 FROM npc WHERE created_version_id IS NOT NULL LIMIT 1"
+            ).fetchone()
+            return row is not None
 
         if not {"created_version_id", "updated_version_id"}.issubset(cols):
             return False
@@ -1739,7 +1747,7 @@ def backfill_versions_from_history(
 
     try:
         if not force and resolved_from is None and get_meta("db_history_versions_commit") == resolved_target:
-            version_tables = ("textMap", "readable", "subtitle", "quest")
+            version_tables = ("textMap", "readable", "subtitle", "quest", "npc")
             try:
                 if all(_has_any_version_data(t) for t in version_tables):
                     logger.info(f"历史回填已完成于 {resolved_target}，跳过。")
@@ -1756,6 +1764,7 @@ def backfill_versions_from_history(
         ("TextMap", backfill_textmap_versions_from_history),
         ("Readable", backfill_readable_versions_from_history),
         ("Subtitle", backfill_subtitle_versions_from_history),
+        ("Npc", backfill_npc_versions_from_history),
         ("Quest", backfill_quest_versions_from_history),
     ]
 
@@ -1781,7 +1790,7 @@ def backfill_versions_from_history(
             set_meta("db_history_versions_commit", resolved_target)
         set_meta(resume_target_key, "")
         set_meta(resume_done_key, "")
-        rebuild_version_catalog(["textMap", "quest", "subtitle", "readable"])
+        rebuild_version_catalog(["textMap", "quest", "subtitle", "readable", "npc"])
     except Exception as e:
         logger.error(f"Error finalizing metadata: {e}")
     logger.info("历史回填元数据已刷新，版本目录已重建")
@@ -2242,6 +2251,103 @@ def backfill_subtitle_versions_from_history(
             print(f"Subtitle 异常修复完成：更新 {fixed} 条。")
     finally:
         check_cursor.close()
+
+
+def backfill_npc_versions_from_history(
+    *,
+    target_commit: str = "HEAD",
+    from_commit: str | None = None,
+    force: bool = False,
+    batch_size: int = DEFAULT_BATCH_SIZE,
+    verbose: bool = False,
+):
+    """回填 NPC 在 NpcExcelConfigData.json 中首次出现的版本。"""
+    current_npc_ids: set[int] | None = None
+
+    def _get_current_npc_ids() -> set[int]:
+        nonlocal current_npc_ids
+        if current_npc_ids is not None:
+            return current_npc_ids
+        cursor = conn.cursor()
+        try:
+            rows = cursor.execute("SELECT npcId FROM npc").fetchall()
+        finally:
+            cursor.close()
+        current_npc_ids = {int(row[0]) for row in rows if row and row[0] is not None}
+        return current_npc_ids
+
+    def process_npc_entry(cursor, repo_path, commit_sha, parent_sha, entry, version_id, version_label, batch_size):
+        action = entry["action"]
+        if action == "D":
+            return
+        old_path = entry.get("old_path")
+        new_path = entry.get("new_path")
+        rel_path = (new_path or old_path or "").replace("\\", "/")
+        if rel_path != "ExcelBinOutput/NpcExcelConfigData.json":
+            return
+
+        history_rows = _git_show_json(repo_path, commit_sha, rel_path)
+        if not isinstance(history_rows, list):
+            return
+
+        valid_ids = _get_current_npc_ids()
+        if not valid_ids or version_id is None:
+            return
+
+        candidate_ids: list[int] = []
+        seen_ids: set[int] = set()
+        for row in history_rows:
+            if not isinstance(row, dict):
+                continue
+            try:
+                npc_id = int(row.get("id"))
+            except Exception:
+                continue
+            if npc_id not in valid_ids or npc_id in seen_ids:
+                continue
+            seen_ids.add(npc_id)
+            candidate_ids.append(npc_id)
+
+        if not candidate_ids:
+            return
+
+        chunk_size = max(1, int(batch_size))
+        update_rows: list[tuple[int, int]] = []
+        for idx in range(0, len(candidate_ids), chunk_size):
+            chunk = candidate_ids[idx : idx + chunk_size]
+            placeholders = ",".join(["?"] * len(chunk))
+            rows = cursor.execute(
+                f"SELECT npcId, created_version_id FROM npc WHERE npcId IN ({placeholders})",
+                chunk,
+            ).fetchall()
+            for npc_id, existing_created_version in rows:
+                if should_update_version(existing_created_version, version_id, is_created=True):
+                    update_rows.append((version_id, int(npc_id)))
+
+        if update_rows:
+            executemany_batched(
+                cursor,
+                "UPDATE npc SET created_version_id = ? WHERE npcId = ?",
+                update_rows,
+                batch_size=batch_size,
+            )
+
+    _backfill_versions_from_history(
+        target_commit=target_commit,
+        from_commit=from_commit,
+        force=force,
+        batch_size=batch_size,
+        verbose=verbose,
+        include_paths=["ExcelBinOutput/NpcExcelConfigData.json"],
+        table_name="npc",
+        meta_commit_key="db_history_versions_commit_npc",
+        meta_title_key="db_history_versions_commit_title_npc",
+        resume_target_key="db_history_versions_commit_npc_resume_target",
+        resume_done_key="db_history_versions_commit_npc_resume_done",
+        process_entry_fn=process_npc_entry,
+        pbar_desc="NPC backfill",
+        commit_batch_size=10,
+    )
 
 
 def fix_created_after_updated_versions(

@@ -34,6 +34,11 @@ const router = createRouter({
                     component: () => import("@/views/StorySearchView.vue"),
                 },
                 {
+                    path: "npc-dialogue-search",
+                    name: "npcDialogueSearchView",
+                    component: () => import("@/views/NpcDialogueSearchView.vue"),
+                },
+                {
                     path: "talk",
                     name: "talkView",
                     component: () => import("@/views/TalkView.vue"),

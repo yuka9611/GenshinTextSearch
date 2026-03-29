@@ -15,6 +15,8 @@ import questImport
 from import_utils import DEFAULT_BATCH_SIZE, executemany_batched, fast_import_pragmas, load_json_file
 from version_control import (
     ensure_version_schema,
+    get_current_version,
+    get_or_create_version_id,
     rebuild_version_catalog,
     set_current_version,
 )
@@ -410,21 +412,39 @@ def importChapters(*, commit: bool = True, batch_size: int = DEFAULT_BATCH_SIZE)
         conn.commit()
 
 
-def importNPCs(*, commit: bool = True, batch_size: int = DEFAULT_BATCH_SIZE):
+def importNPCs(
+    *,
+    current_version: str | None = None,
+    commit: bool = True,
+    batch_size: int = DEFAULT_BATCH_SIZE,
+):
     cursor = conn.cursor()
     NPCs = _load_json_rows(DATA_PATH + "\\ExcelBinOutput\\NpcExcelConfigData.json")
+    version_label = (current_version or get_current_version("")).strip()
+    created_version_id = get_or_create_version_id(version_label) if version_label else None
 
     sql1 = (
-        "INSERT INTO npc(npcId, textHash) VALUES (?,?) "
+        "INSERT INTO npc(npcId, textHash, created_version_id) VALUES (?,?,?) "
         "ON CONFLICT(npcId) DO UPDATE SET "
-        "textHash=excluded.textHash "
-        "WHERE NOT (npc.textHash IS excluded.textHash)"
+        "textHash=excluded.textHash, "
+        "created_version_id=CASE "
+        "WHEN npc.created_version_id IS NULL THEN excluded.created_version_id "
+        "WHEN excluded.created_version_id IS NULL THEN npc.created_version_id "
+        "WHEN COALESCE((SELECT version_sort_key FROM version_dim WHERE id=excluded.created_version_id), 2147483647) "
+        "< COALESCE((SELECT version_sort_key FROM version_dim WHERE id=npc.created_version_id), 2147483647) "
+        "THEN excluded.created_version_id "
+        "ELSE npc.created_version_id END "
+        "WHERE NOT (npc.textHash IS excluded.textHash) "
+        "OR npc.created_version_id IS NULL "
+        "OR (excluded.created_version_id IS NOT NULL AND "
+        "COALESCE((SELECT version_sort_key FROM version_dim WHERE id=excluded.created_version_id), 2147483647) "
+        "< COALESCE((SELECT version_sort_key FROM version_dim WHERE id=npc.created_version_id), 2147483647))"
     )
 
     executemany_batched(
         cursor,
         sql1,
-        ((npc['id'], npc['nameTextMapHash']) for npc in NPCs),
+        ((npc['id'], npc['nameTextMapHash'], created_version_id) for npc in NPCs),
         batch_size=batch_size,
     )
 

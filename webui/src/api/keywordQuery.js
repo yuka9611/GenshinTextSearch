@@ -72,6 +72,17 @@ const getTalkFromHash = withCache((textHash, searchLang, page = null, pageSize =
     });
 });
 
+const getDialogueGroup = withCache((talkId, coopQuestId, dialogueIdFallback, searchLang, page = 1, pageSize = 200) => {
+    return request.post("/api/getDialogueGroup", {
+        talkId: talkId,
+        coopQuestId: coopQuestId,
+        dialogueIdFallback: dialogueIdFallback,
+        searchLang: searchLang,
+        page: page,
+        pageSize: pageSize,
+    });
+});
+
 const getSubtitleContext = withCache((fileName, subtitleId, searchLang) => {
     return request.post("/api/getSubtitleContext", {
         "fileName": fileName,
@@ -80,13 +91,41 @@ const getSubtitleContext = withCache((fileName, subtitleId, searchLang) => {
     });
 });
 
-const searchByName = (keyword, langCode, createdVersion = "", updatedVersion = "", questSourceType = "") => {
+const searchByName = (
+    keyword,
+    langCode,
+    createdVersion = "",
+    updatedVersion = "",
+    questSourceType = "",
+    speakerKeyword = "",
+) => {
     return request.post("/api/nameSearch", {
         keyword: keyword,
         langCode: langCode,
         createdVersion: createdVersion,
         updatedVersion: updatedVersion,
         questSourceType: questSourceType,
+        speakerKeyword: speakerKeyword,
+    });
+};
+
+const searchNpcDialogues = (keyword, langCode, npcCreatedVersion = "", npcUpdatedVersion = "") => {
+    return request.post("/api/npcDialogueSearch", {
+        keyword: keyword,
+        langCode: langCode,
+        npcCreatedVersion: npcCreatedVersion,
+        npcUpdatedVersion: npcUpdatedVersion,
+    });
+};
+
+const getNpcDialogues = (npcIds, searchLang, dialogueCreatedVersion = "", dialogueUpdatedVersion = "", page = 1, pageSize = 20) => {
+    return request.post("/api/npcDialogues", {
+        npcIds: npcIds,
+        searchLang: searchLang,
+        dialogueCreatedVersion: dialogueCreatedVersion,
+        dialogueUpdatedVersion: dialogueUpdatedVersion,
+        page: page,
+        pageSize: pageSize,
     });
 };
 
@@ -151,8 +190,11 @@ export default {
     queryByKeyword,
     getVoiceOver,
     getTalkFromHash,
+    getDialogueGroup,
     getSubtitleContext,
     searchByName,
+    searchNpcDialogues,
+    getNpcDialogues,
     searchAvatar,
     getAvatarVoices,
     searchAvatarVoices,

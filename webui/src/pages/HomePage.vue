@@ -30,6 +30,7 @@ const menus = reactive({
     v: [
         { "title": "文本检索", "icon": "fi-rr-search", "path": "/" },
         { "title": "任务/阅读物查询", "icon": "fi-rr-book", "path": "/name-search" },
+        { "title": "NPC 对话查询", "icon": "fi-rr-comment", "path": "/npc-dialogue-search" },
         { "title": "角色语音查询", "icon": "fi-rr-volume", "path": "/voice-search" },
         { "title": "角色故事查询", "icon": "fi-rr-book-open-cover", "path": "/story-search" },
         { "title": "设置", "icon": "fi-rr-settings", "path": "/settings" },

@@ -122,12 +122,32 @@ def _apply_connection_pragmas(connection: sqlite3.Connection) -> None:
                 continue
 
 
+def _ensure_runtime_query_indexes(connection: sqlite3.Connection) -> None:
+    index_sqls = (
+        "CREATE INDEX IF NOT EXISTS dialogue_talkerType_talkerId_talkId_coopQuestId_dialogueId_index "
+        "ON dialogue(talkerType, talkerId, talkId, coopQuestId, dialogueId)",
+        "CREATE INDEX IF NOT EXISTS dialogue_talkId_coopQuestId_dialogueId_index "
+        "ON dialogue(talkId, coopQuestId, dialogueId)",
+    )
+    with closing(connection.cursor()) as cursor:
+        for sql in index_sqls:
+            try:
+                cursor.execute(sql)
+            except sqlite3.DatabaseError:
+                continue
+    try:
+        connection.commit()
+    except sqlite3.DatabaseError:
+        pass
+
+
 def _configure_connection(connection: sqlite3.Connection) -> None:
     """Register FTS helpers and apply default runtime PRAGMAs."""
     tokenizer, ext_path, ext_entry = _resolve_fts_settings()
     _register_fts_content_function(connection, tokenizer)
     _try_load_fts_extension(connection, ext_path, ext_entry)
     _apply_connection_pragmas(connection)
+    _ensure_runtime_query_indexes(connection)
 
 
 def get_connection() -> sqlite3.Connection:
@@ -226,7 +246,7 @@ def _table_has_column(table_name: str, column_name: str) -> bool:
 # 版本处理相关常量
 _VERSION_CATALOG_TABLE = "version_catalog"
 _VERSION_DIM_TABLE = "version_dim"
-_VERSION_SOURCE_TABLES = ("textMap", "quest", "subtitle", "readable")
+_VERSION_SOURCE_TABLES = ("textMap", "quest", "subtitle", "readable", "npc")
 _VERSION_TAG_RE = re.compile(r"(\d+)\.(\d+)(?:\.\d+)?")
 
 
@@ -260,6 +280,8 @@ def _has_version_id_columns(table_name: str) -> bool:
     """
     if table_name == 'quest':
         # For quest table, only check created_version_id since updated_version_id is in quest_version
+        return _table_has_column(table_name, "created_version_id")
+    if table_name == 'npc':
         return _table_has_column(table_name, "created_version_id")
     return (
         _table_has_column(table_name, "created_version_id")
@@ -307,6 +329,11 @@ def _version_select_expr(table_alias: str, table_name: str | None = None, lang_c
         else:
             updated_expr = "NULL"
         return f"{created_expr} as created_version, {updated_expr} as updated_version"
+    if table_name == 'npc':
+        if not _table_has_column(table_name, "created_version_id"):
+            return "NULL as created_version, NULL as updated_version"
+        created_expr = _version_value_expr(table_alias, "created", table_name)
+        return f"{created_expr} as created_version, NULL as updated_version"
     if not _has_version_id_columns(table_name):
         return "NULL as created_version, NULL as updated_version"
     created_expr = _version_value_expr(table_alias, "created", table_name)
@@ -359,8 +386,17 @@ def _rebuild_version_catalog(cursor: sqlite3.Cursor, source_tables: tuple[str, .
                     f"WHERE t.created_version_id IS NOT NULL",
                 ]
             )
-        if table_name != 'quest' and _has_version_id_columns(table_name) and _has_version_dim():
-            # For non-quest tables, also include updated_version_id
+        if table_name == 'quest' and _has_version_id_columns(table_name) and _has_version_dim():
+            if _table_has_column("quest_version", "updated_version_id"):
+                query_parts.extend(
+                    [
+                        f"SELECT vd.raw_version AS v FROM quest_version qv "
+                        f"JOIN {_VERSION_DIM_TABLE} vd ON vd.id = qv.updated_version_id "
+                        f"WHERE qv.updated_version_id IS NOT NULL",
+                    ]
+                )
+        elif table_name != 'npc' and _has_version_id_columns(table_name) and _has_version_dim():
+            # For non-quest, non-npc tables, also include updated_version_id.
             query_parts.extend(
                 [
                     f"SELECT vd.raw_version AS v FROM {table_name} t "
@@ -1626,6 +1662,12 @@ def _append_version_filter_clause(
                 sql += "and 1=0 "
             return sql
         has_id_mode = bool(_table_has_column(table_name, "created_version_id") and _has_version_dim())
+    elif table_name == 'npc':
+        if not _table_has_column(table_name, "created_version_id"):
+            if created or updated:
+                sql += "and 1=0 "
+            return sql
+        has_id_mode = bool(_table_has_column(table_name, "created_version_id") and _has_version_dim())
     else:
         if table_name and not _has_version_id_columns(table_name):
             if created or updated:
@@ -1674,6 +1716,8 @@ def _append_version_filter_clause(
                     f"limit 1) "
                 )
                 params.append(lang_code)
+            elif table_name == 'npc':
+                sql += "and 1=0 "
             else:
                 # For other tables, updated version is in the same table
                 sql += (
@@ -2158,7 +2202,7 @@ def getAllVersionValues() -> list[str]:
             return list(values)
 
         # Fallback for old DBs where version_catalog creation failed.
-        for table_name in ("quest", "readable", "subtitle", "textMap"):
+        for table_name in ("npc", "quest", "readable", "subtitle", "textMap"):
             if not _has_version_id_columns(table_name):
                 continue
             query_parts: list[str] = []
@@ -2170,8 +2214,17 @@ def getAllVersionValues() -> list[str]:
                         f"WHERE t.created_version_id IS NOT NULL",
                     ]
                 )
-            if table_name != 'quest' and _has_version_id_columns(table_name) and _has_version_dim():
-                # For non-quest tables, also include updated_version_id
+            if table_name == 'quest' and _has_version_id_columns(table_name) and _has_version_dim():
+                if _table_has_column("quest_version", "updated_version_id"):
+                    query_parts.extend(
+                        [
+                            f"SELECT vd.raw_version AS v FROM quest_version qv "
+                            f"JOIN {_VERSION_DIM_TABLE} vd ON vd.id = qv.updated_version_id "
+                            f"WHERE qv.updated_version_id IS NOT NULL",
+                        ]
+                    )
+            elif table_name != 'npc' and _has_version_id_columns(table_name) and _has_version_dim():
+                # For non-quest, non-npc tables, also include updated_version_id.
                 query_parts.extend(
                     [
                         f"SELECT vd.raw_version AS v FROM {table_name} t "
@@ -2587,6 +2640,31 @@ def countTalkContent(talkId: int, coopQuestId: int | None) -> int:
         return int(row[0]) if row else 0
 
 
+def getDialogueInfoById(dialogueId: int):
+    with closing(conn.cursor()) as cursor:
+        row = cursor.execute(
+            "select textHash, talkerType, talkerId, dialogueId, talkId, coopQuestId "
+            "from dialogue where dialogueId = ? limit 1",
+            (dialogueId,),
+        ).fetchone()
+        return row
+
+
+def countDialogueGroupContent(
+    talkId: int,
+    coopQuestId: int | None,
+    dialogueIdFallback: int | None = None,
+) -> int:
+    if dialogueIdFallback is not None:
+        with closing(conn.cursor()) as cursor:
+            row = cursor.execute(
+                "select count(*) from dialogue where dialogueId = ?",
+                (dialogueIdFallback,),
+            ).fetchone()
+            return int(row[0]) if row else 0
+    return countTalkContent(talkId, coopQuestId)
+
+
 def selectTalkContentPaged(
     talkId: int,
     coopQuestId: int | None,
@@ -2618,6 +2696,78 @@ def selectTalkContentPaged(
 
         cursor.execute(sql, params)
         return cursor.fetchall()
+
+
+def selectDialogueGroupContentPaged(
+    talkId: int,
+    coopQuestId: int | None,
+    dialogueIdFallback: int | None,
+    limit: int,
+    offset: int | None = None,
+):
+    if dialogueIdFallback is not None:
+        with closing(conn.cursor()) as cursor:
+            params: list[int] = [int(dialogueIdFallback)]
+            sql = (
+                "select textHash, talkerType, talkerId, dialogueId "
+                "from dialogue where dialogueId = ? "
+                "order by dialogueId"
+            )
+            if limit > 0:
+                sql += " limit ?"
+                params.append(int(limit))
+            if offset is not None and offset > 0:
+                sql += " offset ?"
+                params.append(int(offset))
+            cursor.execute(sql, params)
+            return cursor.fetchall()
+    return selectTalkContentPaged(talkId, coopQuestId, limit, offset)
+
+
+def getDialogueGroupVersionInfo(
+    talkId: int,
+    coopQuestId: int | None,
+    dialogueIdFallback: int | None = None,
+    langCode: int | None = None,
+) -> tuple[str | None, str | None]:
+    source_lang_code = config.getSourceLanguage() if langCode is None else langCode
+    with closing(conn.cursor()) as cursor:
+        if dialogueIdFallback is not None:
+            where_sql = "dg.dialogueId = ?"
+            params: list[object] = [source_lang_code, dialogueIdFallback]
+            updated_params: list[object] = [source_lang_code, dialogueIdFallback]
+        elif coopQuestId is None:
+            where_sql = "dg.talkId = ? and dg.coopQuestId is null"
+            params = [source_lang_code, talkId]
+            updated_params = [source_lang_code, talkId]
+        else:
+            where_sql = "dg.talkId = ? and dg.coopQuestId = ?"
+            params = [source_lang_code, talkId, coopQuestId]
+            updated_params = [source_lang_code, talkId, coopQuestId]
+
+        created_row = cursor.execute(
+            "select vd.raw_version "
+            "from dialogue dg "
+            "join textMap tm on tm.hash = dg.textHash and tm.lang = ? "
+            "join version_dim vd on vd.id = tm.created_version_id "
+            f"where {where_sql} and tm.created_version_id is not null "
+            "order by coalesce(vd.version_sort_key, 2147483647) asc, vd.id asc "
+            "limit 1",
+            params,
+        ).fetchone()
+        updated_row = cursor.execute(
+            "select vd.raw_version "
+            "from dialogue dg "
+            "join textMap tm on tm.hash = dg.textHash and tm.lang = ? "
+            "join version_dim vd on vd.id = tm.updated_version_id "
+            f"where {where_sql} and tm.updated_version_id is not null "
+            "order by coalesce(vd.version_sort_key, -1) desc, vd.id desc "
+            "limit 1",
+            updated_params,
+        ).fetchone()
+        created_raw = str(created_row[0]) if created_row and created_row[0] is not None else None
+        updated_raw = str(updated_row[0]) if updated_row and updated_row[0] is not None else None
+        return created_raw, updated_raw
 
 
 def getTalkContentPageForTextHash(
@@ -3016,6 +3166,613 @@ def selectQuestByContentKeyword(
         )
         sql = _append_quest_source_type_filter_clause(sql, params, "quest", source_type)
         sql += "order by ranked.best_rank, quest.questId limit 200"
+        cursor.execute(sql, params)
+        return cursor.fetchall()
+
+
+def selectQuestByNpcSpeakerKeyword(
+    keyword: str,
+    langCode: int,
+    created_version: str | None = None,
+    updated_version: str | None = None,
+    source_type: str | None = None,
+):
+    with closing(conn.cursor()) as cursor:
+        exact, fuzzy = _build_like_patterns(keyword, langCode)
+        version_select = _version_select_expr("quest", "quest", langCode)
+        sql = (
+            "select distinct quest.questId, titleText.content, "
+            f"{version_select} "
+            "from quest "
+            "join questTalk qt on qt.questId = quest.questId "
+            "join dialogue d on d.talkId = qt.talkId and ("
+            + _quest_talk_dialogue_join_condition("qt", "d")
+            + ") "
+            "join npc on d.talkerType = 'TALK_ROLE_NPC' and d.talkerId = npc.npcId "
+            "join textMap npcName on npc.textHash = npcName.hash and npcName.lang = ? "
+            "left join textMap titleText on quest.titleTextMapHash = titleText.hash and titleText.lang = ? "
+            "where (npcName.content like ? escape '\\' or npcName.content like ? escape '\\') "
+        )
+        params: list[object] = [langCode, langCode, exact, fuzzy]
+        sql = _append_version_filter_clause(
+            sql,
+            params,
+            "quest",
+            created_version,
+            updated_version,
+            "quest",
+            langCode,
+        )
+        sql = _append_quest_source_type_filter_clause(sql, params, "quest", source_type)
+        sql += "order by quest.questId limit 200"
+        cursor.execute(sql, params)
+        return cursor.fetchall()
+
+
+def selectQuestByTalkerType(
+    talkerType: str,
+    langCode: int,
+    created_version: str | None = None,
+    updated_version: str | None = None,
+    source_type: str | None = None,
+):
+    with closing(conn.cursor()) as cursor:
+        version_select = _version_select_expr("quest", "quest", langCode)
+        sql = (
+            "select distinct quest.questId, titleText.content, "
+            f"{version_select} "
+            "from quest "
+            "join questTalk qt on qt.questId = quest.questId "
+            "join dialogue d on d.talkId = qt.talkId and ("
+            + _quest_talk_dialogue_join_condition("qt", "d")
+            + ") "
+            "left join textMap titleText on quest.titleTextMapHash = titleText.hash and titleText.lang = ? "
+            "where d.talkerType = ? "
+        )
+        params: list[object] = [langCode, talkerType]
+        sql = _append_version_filter_clause(
+            sql,
+            params,
+            "quest",
+            created_version,
+            updated_version,
+            "quest",
+            langCode,
+        )
+        sql = _append_quest_source_type_filter_clause(sql, params, "quest", source_type)
+        sql += "order by quest.questId limit 200"
+        cursor.execute(sql, params)
+        return cursor.fetchall()
+
+
+def selectNpcDialogueSearchEntries(
+    keyword: str | None,
+    langCode: int,
+    created_version: str | None = None,
+    updated_version: str | None = None,
+    limit: int | None = 200,
+):
+    with closing(conn.cursor()) as cursor:
+        keyword_text = (keyword or "").strip()
+        source_lang_code = config.getSourceLanguage()
+        sql = (
+            "with base_npc as ("
+            "select npc.npcId as npcId, npcName.content as npcName, "
+            "vd_created.raw_version as created_version, "
+            "coalesce(vd_created.version_tag, '') as created_version_tag, "
+            "coalesce(vd_created.version_sort_key, 2147483647) as created_version_sort_key "
+            "from npc "
+            "join textMap npcName on npc.textHash = npcName.hash and npcName.lang = ? "
+            "left join version_dim vd_created on vd_created.id = npc.created_version_id "
+            "where 1=1 "
+        )
+        params: list[object] = [langCode]
+        if keyword_text:
+            exact, fuzzy = _build_like_patterns(keyword_text, langCode)
+            sql += "and (npcName.content like ? escape '\\' or npcName.content like ? escape '\\') "
+            params.extend([exact, fuzzy])
+        sql += (
+            "), visible_npc as ("
+            "select distinct base.npcId, base.npcName, base.created_version, "
+            "base.created_version_tag, base.created_version_sort_key "
+            "from base_npc base "
+            "join dialogue d on d.talkerType = 'TALK_ROLE_NPC' and d.talkerId = base.npcId "
+            "left join questTalk qt on qt.talkId = d.talkId and ("
+            + _quest_talk_dialogue_join_condition("qt", "d")
+            + ") "
+            "where qt.questId is null"
+            "), npc_updated_ranked as ("
+            "select visible.npcId as npcId, visible.npcName as npcName, vd.raw_version as dialogue_updated_version, "
+            "coalesce(vd.version_tag, '') as dialogue_updated_tag, "
+            "coalesce(vd.version_sort_key, -1) as dialogue_updated_sort_key, "
+            "row_number() over ("
+            "partition by visible.npcId "
+            "order by coalesce(vd.version_sort_key, -1) desc, vd.id desc"
+            ") as row_num "
+            "from dialogue d "
+            "join visible_npc visible on visible.npcId = d.talkerId "
+            "join textMap tm on tm.hash = d.textHash and tm.lang = ? "
+            "join version_dim vd on vd.id = tm.updated_version_id "
+            "where d.talkerType = 'TALK_ROLE_NPC' "
+            "and tm.updated_version_id is not null"
+            "), npc_updated as ("
+            "select npcId, npcName, dialogue_updated_version, dialogue_updated_tag, dialogue_updated_sort_key "
+            "from npc_updated_ranked "
+            "where row_num = 1"
+            "), group_created_ranked as ("
+            "select visible.npcName as npcName, visible.created_version as created_version, "
+            "visible.created_version_tag as created_version_tag, "
+            "row_number() over ("
+            "partition by visible.npcName "
+            "order by visible.created_version_sort_key asc, visible.npcId asc"
+            ") as row_num "
+            "from visible_npc visible "
+            "where visible.created_version is not null"
+            "), group_created as ("
+            "select npcName, created_version, created_version_tag "
+            "from group_created_ranked "
+            "where row_num = 1"
+            "), group_updated_ranked as ("
+            "select visible.npcName as npcName, npc_updated.dialogue_updated_version as dialogue_updated_version, "
+            "npc_updated.dialogue_updated_tag as dialogue_updated_tag, "
+            "row_number() over ("
+            "partition by visible.npcName "
+            "order by coalesce(npc_updated.dialogue_updated_sort_key, -1) desc, visible.npcId asc"
+            ") as row_num "
+            "from visible_npc visible "
+            "join npc_updated on npc_updated.npcId = visible.npcId "
+            "), group_updated as ("
+            "select npcName, dialogue_updated_version, dialogue_updated_tag "
+            "from group_updated_ranked "
+            "where row_num = 1"
+            "), grouped_npc as ("
+            "select visible.npcName as npcName, group_concat(visible.npcId) as npc_ids, min(visible.npcId) as sort_npc_id "
+            "from visible_npc visible "
+            "group by visible.npcName"
+            ") "
+            "select grouped.npcName, grouped.npc_ids, group_created.created_version, group_updated.dialogue_updated_version "
+            "from grouped_npc grouped "
+            "left join group_created on group_created.npcName = grouped.npcName "
+            "left join group_updated on group_updated.npcName = grouped.npcName "
+            "where 1=1 "
+        )
+        params.append(source_lang_code)
+        created_version_tag = _normalize_version_filter(created_version)
+        if created_version_tag:
+            sql += "and coalesce(group_created.created_version_tag, '') = ? "
+            params.append(created_version_tag)
+        updated_version_tag = _normalize_version_filter(updated_version)
+        if updated_version_tag:
+            sql += "and coalesce(group_updated.dialogue_updated_tag, '') = ? "
+            params.append(updated_version_tag)
+
+        if keyword_text:
+            match_sort_sql, match_sort_params = _build_match_sort_case("grouped.npcName", keyword_text, langCode)
+            normalized_length_sql = f"length({_build_normalized_match_expr('grouped.npcName', langCode)})"
+            sql += f"order by {match_sort_sql}, {normalized_length_sql}, grouped.sort_npc_id "
+            params.extend(match_sort_params)
+        else:
+            sql += "order by grouped.sort_npc_id "
+        if limit is not None:
+            sql += "limit ?"
+            params.append(int(limit))
+        cursor.execute(sql, params)
+        return cursor.fetchall()
+
+
+def getNpcSpeakerUpdatedVersionRaw(npcId: int, langCode: int | None = None) -> str | None:
+    source_lang_code = config.getSourceLanguage() if langCode is None else langCode
+    with closing(conn.cursor()) as cursor:
+        row = cursor.execute(
+            "select vd.raw_version "
+            "from dialogue d "
+            "join textMap tm on tm.hash = d.textHash and tm.lang = ? "
+            "join version_dim vd on vd.id = tm.updated_version_id "
+            "where d.talkerType = 'TALK_ROLE_NPC' "
+            "and d.talkerId = ? "
+            "and tm.updated_version_id is not null "
+            "order by coalesce(vd.version_sort_key, -1) desc, vd.id desc "
+            "limit 1",
+            (source_lang_code, npcId),
+        ).fetchone()
+        return str(row[0]) if row and row[0] is not None else None
+
+
+def getNpcNonTaskDialogueStats(npcId: int) -> tuple[int, int]:
+    with closing(conn.cursor()) as cursor:
+        group_join = (
+            "((mg.dialogueIdFallback is not null and dg.dialogueId = mg.dialogueIdFallback) "
+            "or (mg.dialogueIdFallback is null and dg.talkId = mg.talkId "
+            "and ((mg.coopQuestId is null and dg.coopQuestId is null) "
+            "or dg.coopQuestId = mg.coopQuestId)))"
+        )
+        row = cursor.execute(
+            "with matching_groups as ("
+            "select d.talkId as talkId, "
+            "d.coopQuestId as coopQuestId, "
+            "case when d.talkId = 0 and d.coopQuestId is null then d.dialogueId else null end as dialogueIdFallback, "
+            "min(d.dialogueId) as sortDialogueId "
+            "from dialogue d "
+            "left join questTalk qt on qt.talkId = d.talkId and ("
+            + _quest_talk_dialogue_join_condition("qt", "d")
+            + ") "
+            "where d.talkerType = 'TALK_ROLE_NPC' and d.talkerId = ? and qt.questId is null "
+            "group by d.talkId, d.coopQuestId, case when d.talkId = 0 and d.coopQuestId is null then d.dialogueId else null end"
+            "), group_line_counts as ("
+            "select mg.talkId, mg.coopQuestId, mg.dialogueIdFallback, count(dg.dialogueId) as lineCount "
+            "from matching_groups mg "
+            f"join dialogue dg on {group_join} "
+            "group by mg.talkId, mg.coopQuestId, mg.dialogueIdFallback"
+            ") "
+            "select count(*), coalesce(sum(lineCount), 0) from group_line_counts",
+            (npcId,),
+        ).fetchone()
+        if not row:
+            return 0, 0
+        return int(row[0] or 0), int(row[1] or 0)
+
+
+def countNpcNonTaskDialogueGroups(npcId: int) -> int:
+    with closing(conn.cursor()) as cursor:
+        row = cursor.execute(
+            "with matching_groups as ("
+            "select d.talkId as talkId, "
+            "d.coopQuestId as coopQuestId, "
+            "case when d.talkId = 0 and d.coopQuestId is null then d.dialogueId else null end as dialogueIdFallback "
+            "from dialogue d "
+            "left join questTalk qt on qt.talkId = d.talkId and ("
+            + _quest_talk_dialogue_join_condition("qt", "d")
+            + ") "
+            "where d.talkerType = 'TALK_ROLE_NPC' and d.talkerId = ? and qt.questId is null "
+            "group by d.talkId, d.coopQuestId, case when d.talkId = 0 and d.coopQuestId is null then d.dialogueId else null end"
+            ") "
+            "select count(*) from matching_groups",
+            (npcId,),
+        ).fetchone()
+        return int(row[0] or 0) if row else 0
+
+
+def countNpcNonTaskDialogueGroupsForNpcIds(npcIds: list[int]) -> int:
+    normalized_ids = []
+    for value in npcIds:
+        try:
+            npc_id = int(value)
+        except Exception:
+            continue
+        if npc_id <= 0 or npc_id in normalized_ids:
+            continue
+        normalized_ids.append(npc_id)
+    if not normalized_ids:
+        return 0
+
+    with closing(conn.cursor()) as cursor:
+        placeholders = ",".join("?" for _ in normalized_ids)
+        row = cursor.execute(
+            "with matching_groups as ("
+            "select d.talkId as talkId, "
+            "d.coopQuestId as coopQuestId, "
+            "case when d.talkId = 0 and d.coopQuestId is null then d.dialogueId else null end as dialogueIdFallback "
+            "from dialogue d "
+            "left join questTalk qt on qt.talkId = d.talkId and ("
+            + _quest_talk_dialogue_join_condition("qt", "d")
+            + ") "
+            f"where d.talkerType = 'TALK_ROLE_NPC' and d.talkerId in ({placeholders}) and qt.questId is null "
+            "group by d.talkId, d.coopQuestId, case when d.talkId = 0 and d.coopQuestId is null then d.dialogueId else null end"
+            ") "
+            "select count(*) from matching_groups",
+            normalized_ids,
+        ).fetchone()
+        return int(row[0] or 0) if row else 0
+
+
+def selectNpcNonTaskDialogueGroupPage(
+    npcId: int,
+    limit: int,
+    offset: int = 0,
+):
+    source_lang_code = config.getSourceLanguage()
+    with closing(conn.cursor()) as cursor:
+        group_join = (
+            "((mg.dialogueIdFallback is not null and dg.dialogueId = mg.dialogueIdFallback) "
+            "or (mg.dialogueIdFallback is null and dg.talkId = mg.talkId "
+            "and ((mg.coopQuestId is null and dg.coopQuestId is null) "
+            "or dg.coopQuestId = mg.coopQuestId)))"
+        )
+        created_sort_key_expr = (
+            "select coalesce(vd.version_sort_key, 2147483647) "
+            "from dialogue dg "
+            "join textMap tm on tm.hash = dg.textHash and tm.lang = ? "
+            "join version_dim vd on vd.id = tm.created_version_id "
+            f"where {group_join} and tm.created_version_id is not null "
+            "order by coalesce(vd.version_sort_key, 2147483647) asc, vd.id asc "
+            "limit 1"
+        )
+        params: list[object] = [npcId, source_lang_code, max(1, int(limit))]
+        sql = (
+            "with matching_groups as ("
+            "select d.talkId as talkId, "
+            "d.coopQuestId as coopQuestId, "
+            "case when d.talkId = 0 and d.coopQuestId is null then d.dialogueId else null end as dialogueIdFallback, "
+            "min(d.dialogueId) as sortDialogueId "
+            "from dialogue d "
+            "left join questTalk qt on qt.talkId = d.talkId and ("
+            + _quest_talk_dialogue_join_condition("qt", "d")
+            + ") "
+            "where d.talkerType = 'TALK_ROLE_NPC' and d.talkerId = ? and qt.questId is null "
+            "group by d.talkId, d.coopQuestId, case when d.talkId = 0 and d.coopQuestId is null then d.dialogueId else null end"
+            ") "
+            "select mg.talkId, mg.coopQuestId, mg.dialogueIdFallback, mg.sortDialogueId, count(dg.dialogueId) as lineCount "
+            "from matching_groups mg "
+            f"join dialogue dg on {group_join} "
+            "group by mg.talkId, mg.coopQuestId, mg.dialogueIdFallback, mg.sortDialogueId "
+            f"order by coalesce(({created_sort_key_expr}), 2147483647), mg.sortDialogueId "
+            "limit ?"
+        )
+        if offset and int(offset) > 0:
+            sql += " offset ?"
+            params.append(int(offset))
+        cursor.execute(sql, params)
+        return cursor.fetchall()
+
+
+def selectNpcNonTaskDialogueGroupPageForNpcIds(
+    npcIds: list[int],
+    limit: int,
+    offset: int = 0,
+):
+    normalized_ids = []
+    for value in npcIds:
+        try:
+            npc_id = int(value)
+        except Exception:
+            continue
+        if npc_id <= 0 or npc_id in normalized_ids:
+            continue
+        normalized_ids.append(npc_id)
+    if not normalized_ids:
+        return []
+
+    source_lang_code = config.getSourceLanguage()
+    with closing(conn.cursor()) as cursor:
+        group_join = (
+            "((mg.dialogueIdFallback is not null and dg.dialogueId = mg.dialogueIdFallback) "
+            "or (mg.dialogueIdFallback is null and dg.talkId = mg.talkId "
+            "and ((mg.coopQuestId is null and dg.coopQuestId is null) "
+            "or dg.coopQuestId = mg.coopQuestId)))"
+        )
+        created_sort_key_expr = (
+            "select coalesce(vd.version_sort_key, 2147483647) "
+            "from dialogue dg "
+            "join textMap tm on tm.hash = dg.textHash and tm.lang = ? "
+            "join version_dim vd on vd.id = tm.created_version_id "
+            f"where {group_join} and tm.created_version_id is not null "
+            "order by coalesce(vd.version_sort_key, 2147483647) asc, vd.id asc "
+            "limit 1"
+        )
+        placeholders = ",".join("?" for _ in normalized_ids)
+        params: list[object] = [*normalized_ids, source_lang_code, max(1, int(limit))]
+        sql = (
+            "with matching_groups as ("
+            "select d.talkId as talkId, "
+            "d.coopQuestId as coopQuestId, "
+            "case when d.talkId = 0 and d.coopQuestId is null then d.dialogueId else null end as dialogueIdFallback, "
+            "min(d.dialogueId) as sortDialogueId "
+            "from dialogue d "
+            "left join questTalk qt on qt.talkId = d.talkId and ("
+            + _quest_talk_dialogue_join_condition("qt", "d")
+            + ") "
+            f"where d.talkerType = 'TALK_ROLE_NPC' and d.talkerId in ({placeholders}) and qt.questId is null "
+            "group by d.talkId, d.coopQuestId, case when d.talkId = 0 and d.coopQuestId is null then d.dialogueId else null end"
+            ") "
+            "select mg.talkId, mg.coopQuestId, mg.dialogueIdFallback, mg.sortDialogueId, count(dg.dialogueId) as lineCount "
+            "from matching_groups mg "
+            f"join dialogue dg on {group_join} "
+            "group by mg.talkId, mg.coopQuestId, mg.dialogueIdFallback, mg.sortDialogueId "
+            f"order by coalesce(({created_sort_key_expr}), 2147483647), mg.sortDialogueId "
+            "limit ?"
+        )
+        if offset and int(offset) > 0:
+            sql += " offset ?"
+            params.append(int(offset))
+        cursor.execute(sql, params)
+        return cursor.fetchall()
+
+
+def selectNpcNonTaskDialogueGroupSummaries(
+    npcId: int,
+    created_version: str | None = None,
+    updated_version: str | None = None,
+):
+    source_lang_code = config.getSourceLanguage()
+    with closing(conn.cursor()) as cursor:
+        group_join = (
+            "((mg.dialogueIdFallback is not null and dg.dialogueId = mg.dialogueIdFallback) "
+            "or (mg.dialogueIdFallback is null and dg.talkId = mg.talkId "
+            "and ((mg.coopQuestId is null and dg.coopQuestId is null) "
+            "or dg.coopQuestId = mg.coopQuestId)))"
+        )
+        created_raw_expr = (
+            "select vd.raw_version "
+            "from dialogue dg "
+            "join textMap tm on tm.hash = dg.textHash and tm.lang = ? "
+            "join version_dim vd on vd.id = tm.created_version_id "
+            f"where {group_join} and tm.created_version_id is not null "
+            "order by coalesce(vd.version_sort_key, 2147483647) asc, vd.id asc "
+            "limit 1"
+        )
+        created_tag_expr = (
+            "select coalesce(vd.version_tag, '') "
+            "from dialogue dg "
+            "join textMap tm on tm.hash = dg.textHash and tm.lang = ? "
+            "join version_dim vd on vd.id = tm.created_version_id "
+            f"where {group_join} and tm.created_version_id is not null "
+            "order by coalesce(vd.version_sort_key, 2147483647) asc, vd.id asc "
+            "limit 1"
+        )
+        created_sort_key_expr = (
+            "select coalesce(vd.version_sort_key, 2147483647) "
+            "from dialogue dg "
+            "join textMap tm on tm.hash = dg.textHash and tm.lang = ? "
+            "join version_dim vd on vd.id = tm.created_version_id "
+            f"where {group_join} and tm.created_version_id is not null "
+            "order by coalesce(vd.version_sort_key, 2147483647) asc, vd.id asc "
+            "limit 1"
+        )
+        updated_raw_expr = (
+            "select vd.raw_version "
+            "from dialogue dg "
+            "join textMap tm on tm.hash = dg.textHash and tm.lang = ? "
+            "join version_dim vd on vd.id = tm.updated_version_id "
+            f"where {group_join} and tm.updated_version_id is not null "
+            "order by coalesce(vd.version_sort_key, -1) desc, vd.id desc "
+            "limit 1"
+        )
+        updated_tag_expr = (
+            "select coalesce(vd.version_tag, '') "
+            "from dialogue dg "
+            "join textMap tm on tm.hash = dg.textHash and tm.lang = ? "
+            "join version_dim vd on vd.id = tm.updated_version_id "
+            f"where {group_join} and tm.updated_version_id is not null "
+            "order by coalesce(vd.version_sort_key, -1) desc, vd.id desc "
+            "limit 1"
+        )
+        sql = (
+            "with matching_groups as ("
+            "select d.talkId as talkId, "
+            "d.coopQuestId as coopQuestId, "
+            "case when d.talkId = 0 and d.coopQuestId is null then d.dialogueId else null end as dialogueIdFallback, "
+            "min(d.dialogueId) as sortDialogueId "
+            "from dialogue d "
+            "left join questTalk qt on qt.talkId = d.talkId and ("
+            + _quest_talk_dialogue_join_condition("qt", "d")
+            + ") "
+            "where d.talkerType = 'TALK_ROLE_NPC' and d.talkerId = ? and qt.questId is null "
+            "group by d.talkId, d.coopQuestId, case when d.talkId = 0 and d.coopQuestId is null then d.dialogueId else null end"
+            ") "
+            "select mg.talkId, mg.coopQuestId, mg.dialogueIdFallback, mg.sortDialogueId, "
+            f"(select count(*) from dialogue dg where {group_join}) as lineCount, "
+            f"({created_raw_expr}) as created_version, "
+            f"({updated_raw_expr}) as updated_version "
+            "from matching_groups mg "
+            "where 1=1 "
+        )
+        params: list[object] = [npcId, source_lang_code, source_lang_code]
+        created_tag = _normalize_version_filter(created_version)
+        updated_tag = _normalize_version_filter(updated_version)
+        if created_tag:
+            sql += f"and coalesce(({created_tag_expr}), '') = ? "
+            params.extend([source_lang_code, created_tag])
+        if updated_tag:
+            sql += f"and coalesce(({updated_tag_expr}), '') = ? "
+            params.extend([source_lang_code, updated_tag])
+        sql += f"order by coalesce(({created_sort_key_expr}), 2147483647), mg.sortDialogueId"
+        params.append(source_lang_code)
+        cursor.execute(sql, params)
+        return cursor.fetchall()
+
+
+def selectNpcNonTaskDialogueGroupSummariesForNpcIds(
+    npcIds: list[int],
+    created_version: str | None = None,
+    updated_version: str | None = None,
+):
+    normalized_ids = []
+    for value in npcIds:
+        try:
+            npc_id = int(value)
+        except Exception:
+            continue
+        if npc_id <= 0 or npc_id in normalized_ids:
+            continue
+        normalized_ids.append(npc_id)
+    if not normalized_ids:
+        return []
+
+    source_lang_code = config.getSourceLanguage()
+    with closing(conn.cursor()) as cursor:
+        group_join = (
+            "((mg.dialogueIdFallback is not null and dg.dialogueId = mg.dialogueIdFallback) "
+            "or (mg.dialogueIdFallback is null and dg.talkId = mg.talkId "
+            "and ((mg.coopQuestId is null and dg.coopQuestId is null) "
+            "or dg.coopQuestId = mg.coopQuestId)))"
+        )
+        created_raw_expr = (
+            "select vd.raw_version "
+            "from dialogue dg "
+            "join textMap tm on tm.hash = dg.textHash and tm.lang = ? "
+            "join version_dim vd on vd.id = tm.created_version_id "
+            f"where {group_join} and tm.created_version_id is not null "
+            "order by coalesce(vd.version_sort_key, 2147483647) asc, vd.id asc "
+            "limit 1"
+        )
+        created_tag_expr = (
+            "select coalesce(vd.version_tag, '') "
+            "from dialogue dg "
+            "join textMap tm on tm.hash = dg.textHash and tm.lang = ? "
+            "join version_dim vd on vd.id = tm.created_version_id "
+            f"where {group_join} and tm.created_version_id is not null "
+            "order by coalesce(vd.version_sort_key, 2147483647) asc, vd.id asc "
+            "limit 1"
+        )
+        created_sort_key_expr = (
+            "select coalesce(vd.version_sort_key, 2147483647) "
+            "from dialogue dg "
+            "join textMap tm on tm.hash = dg.textHash and tm.lang = ? "
+            "join version_dim vd on vd.id = tm.created_version_id "
+            f"where {group_join} and tm.created_version_id is not null "
+            "order by coalesce(vd.version_sort_key, 2147483647) asc, vd.id asc "
+            "limit 1"
+        )
+        updated_raw_expr = (
+            "select vd.raw_version "
+            "from dialogue dg "
+            "join textMap tm on tm.hash = dg.textHash and tm.lang = ? "
+            "join version_dim vd on vd.id = tm.updated_version_id "
+            f"where {group_join} and tm.updated_version_id is not null "
+            "order by coalesce(vd.version_sort_key, -1) desc, vd.id desc "
+            "limit 1"
+        )
+        updated_tag_expr = (
+            "select coalesce(vd.version_tag, '') "
+            "from dialogue dg "
+            "join textMap tm on tm.hash = dg.textHash and tm.lang = ? "
+            "join version_dim vd on vd.id = tm.updated_version_id "
+            f"where {group_join} and tm.updated_version_id is not null "
+            "order by coalesce(vd.version_sort_key, -1) desc, vd.id desc "
+            "limit 1"
+        )
+        placeholders = ",".join("?" for _ in normalized_ids)
+        sql = (
+            "with matching_groups as ("
+            "select d.talkId as talkId, "
+            "d.coopQuestId as coopQuestId, "
+            "case when d.talkId = 0 and d.coopQuestId is null then d.dialogueId else null end as dialogueIdFallback, "
+            "min(d.dialogueId) as sortDialogueId "
+            "from dialogue d "
+            "left join questTalk qt on qt.talkId = d.talkId and ("
+            + _quest_talk_dialogue_join_condition("qt", "d")
+            + ") "
+            f"where d.talkerType = 'TALK_ROLE_NPC' and d.talkerId in ({placeholders}) and qt.questId is null "
+            "group by d.talkId, d.coopQuestId, case when d.talkId = 0 and d.coopQuestId is null then d.dialogueId else null end"
+            ") "
+            "select mg.talkId, mg.coopQuestId, mg.dialogueIdFallback, mg.sortDialogueId, "
+            f"(select count(*) from dialogue dg where {group_join}) as lineCount, "
+            f"({created_raw_expr}) as created_version, "
+            f"({updated_raw_expr}) as updated_version "
+            "from matching_groups mg "
+            "where 1=1 "
+        )
+        params: list[object] = [*normalized_ids, source_lang_code, source_lang_code]
+        created_tag = _normalize_version_filter(created_version)
+        updated_tag = _normalize_version_filter(updated_version)
+        if created_tag:
+            sql += f"and coalesce(({created_tag_expr}), '') = ? "
+            params.extend([source_lang_code, created_tag])
+        if updated_tag:
+            sql += f"and coalesce(({updated_tag_expr}), '') = ? "
+            params.extend([source_lang_code, updated_tag])
+        sql += f"order by coalesce(({created_sort_key_expr}), 2147483647), mg.sortDialogueId"
+        params.append(source_lang_code)
         cursor.execute(sql, params)
         return cursor.fetchall()
 

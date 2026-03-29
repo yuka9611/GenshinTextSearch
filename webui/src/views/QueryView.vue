@@ -250,6 +250,8 @@ onBeforeMount(async () => {
     align-items: flex-start;
     flex-wrap: wrap;
     gap: 8px;
+    width: 100%;
+    max-width: 960px;
 }
 
 .speakerInput {
