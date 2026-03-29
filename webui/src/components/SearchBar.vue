@@ -80,10 +80,6 @@ const onSearch = () => {
 
 <style scoped>
 .searchBar {
-  position: sticky;
-  top: 0;
-  z-index: 3;
-  background-color: #fff;
   padding-bottom: 8px;
   box-sizing: border-box;
 }

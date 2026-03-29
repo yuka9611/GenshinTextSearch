@@ -442,38 +442,38 @@ setupVersionWatchers(onSearchClicked)
       <p>{{ uiText.helpLine2 }}</p>
     </div>
 
-    <div class="searchBar">
-      <el-input
-        v-model="keyword"
-        style="max-width: 600px;"
-        :placeholder="uiText.avatarPlaceholder"
-        class="input-with-select"
-        @keyup.enter.native="onSearchClicked"
-        clearable
-      >
-        <template #prepend>
-          <el-select v-model="selectedInputLanguage" :placeholder="uiText.searchLanguage" class="languageSelector">
-            <el-option v-for="(v, k) in supportedInputLanguage" :key="k" :label="v" :value="k" />
-          </el-select>
-        </template>
-        <template #append>
-          <el-button :icon="Search" @click="onSearchClicked" />
-        </template>
-      </el-input>
-      <span class="searchSummary">{{ searchSummary }}</span>
-    </div>
+    <div class="stickySearchSection">
+      <div class="searchBar">
+        <el-input
+          v-model="keyword"
+          style="max-width: 600px;"
+          :placeholder="uiText.avatarPlaceholder"
+          class="input-with-select"
+          @keyup.enter.native="onSearchClicked"
+          clearable
+        >
+          <template #prepend>
+            <el-select v-model="selectedInputLanguage" :placeholder="uiText.searchLanguage" class="languageSelector">
+              <el-option v-for="(v, k) in supportedInputLanguage" :key="k" :label="v" :value="k" />
+            </el-select>
+          </template>
+          <template #append>
+            <el-button :icon="Search" @click="onSearchClicked" />
+          </template>
+        </el-input>
+        <span class="searchSummary">{{ searchSummary }}</span>
+      </div>
 
-    <div class="filterBar topFilterBar">
-      <el-input v-model="textFilter" :placeholder="uiText.titlePlaceholder" class="filterInput" clearable @keyup.enter.native="onSearchClicked" />
-      <el-select v-model="createdVersionFilter" :placeholder="uiText.createdVersion" class="versionInput" clearable filterable>
-        <el-option v-for="version in versionOptions" :key="`created-${version}`" :label="version" :value="version" />
-      </el-select>
-      <el-select v-model="updatedVersionFilter" :placeholder="uiText.updatedVersion" class="versionInput" clearable filterable>
-        <el-option v-for="version in versionOptions" :key="`updated-${version}`" :label="version" :value="version" />
-      </el-select>
+      <div class="filterBar topFilterBar">
+        <el-input v-model="textFilter" :placeholder="uiText.titlePlaceholder" class="filterInput" clearable @keyup.enter.native="onSearchClicked" />
+        <el-select v-model="createdVersionFilter" :placeholder="uiText.createdVersion" class="versionInput" clearable filterable>
+          <el-option v-for="version in versionOptions" :key="`created-${version}`" :label="version" :value="version" />
+        </el-select>
+        <el-select v-model="updatedVersionFilter" :placeholder="uiText.updatedVersion" class="versionInput" clearable filterable>
+          <el-option v-for="version in versionOptions" :key="`updated-${version}`" :label="version" :value="version" />
+        </el-select>
+      </div>
     </div>
-
-    <div class="searchSpacer"></div>
 
     <div v-if="keyword.trim() || textFilter.trim() || createdVersionFilter.trim() || updatedVersionFilter.trim()" class="resultSection">
       <h2>{{ uiText.avatarResults }}</h2>
@@ -581,10 +581,6 @@ setupVersionWatchers(onSearchClicked)
 }
 
 .searchBar {
-  position: sticky;
-  top: 0;
-  z-index: 3;
-  background-color: #fff;
   padding-bottom: 8px;
   box-sizing: border-box;
 }
@@ -601,10 +597,6 @@ setupVersionWatchers(onSearchClicked)
   margin-left: 10px;
   color: var(--el-input-text-color, var(--el-text-color-regular));
   font-size: 14px;
-}
-
-.searchSpacer {
-  display: none;
 }
 
 .resultSection {
@@ -718,11 +710,6 @@ setupVersionWatchers(onSearchClicked)
     display: block;
     margin-left: 0;
     margin-top: 8px;
-  }
-
-  .searchSpacer {
-    display: none;
-    height: 0;
   }
 
   .voicePlayerContainer {

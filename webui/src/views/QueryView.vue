@@ -6,43 +6,43 @@
             <p>当关键词留空时，只要填写了版本或说话人也可以查询。</p>
         </div>
 
-        <SearchBar
-            v-model:keyword="keyword"
-            v-model:selectedLanguage="selectedInputLanguage"
-            :supportedLanguages="supportedInputLanguage"
-            :summary="searchSummary"
-            @search="onQueryButtonClicked"
-        />
-
-        <div class="searchBarAdditional">
-            <el-input
-                v-model="speakerKeyword"
-                placeholder="说话人（可选）"
-                class="speakerInput"
-                @keyup.enter.native="onQueryButtonClicked"
-                clearable
-            />
-
-            <el-select
-                v-model="voiceFilter"
-                class="voiceFilter"
-                placeholder="语音筛选"
-                @change="onQueryButtonClicked"
-            >
-                <el-option label="全部(语音)" value="all" />
-                <el-option label="有语音" value="with" />
-                <el-option label="无语音" value="without" />
-            </el-select>
-
-            <VersionFilter
-                v-model:createdVersion="createdVersionFilter"
-                v-model:updatedVersion="updatedVersionFilter"
-                :versionOptions="versionOptions"
+        <div class="stickySearchSection">
+            <SearchBar
+                v-model:keyword="keyword"
+                v-model:selectedLanguage="selectedInputLanguage"
+                :supportedLanguages="supportedInputLanguage"
+                :summary="searchSummary"
                 @search="onQueryButtonClicked"
             />
-        </div>
 
-        <div class="searchSpacer"></div>
+            <div class="searchBarAdditional">
+                <el-input
+                    v-model="speakerKeyword"
+                    placeholder="说话人（可选）"
+                    class="speakerInput"
+                    @keyup.enter.native="onQueryButtonClicked"
+                    clearable
+                />
+
+                <el-select
+                    v-model="voiceFilter"
+                    class="voiceFilter"
+                    placeholder="语音筛选"
+                    @change="onQueryButtonClicked"
+                >
+                    <el-option label="全部(语音)" value="all" />
+                    <el-option label="有语音" value="with" />
+                    <el-option label="无语音" value="without" />
+                </el-select>
+
+                <VersionFilter
+                    v-model:createdVersion="createdVersionFilter"
+                    v-model:updatedVersion="updatedVersionFilter"
+                    :versionOptions="versionOptions"
+                    @search="onQueryButtonClicked"
+                />
+            </div>
+        </div>
 
         <div class="resultControls" v-if="totalCount > 0">
             <span class="resultCount">共 {{ totalCount }} 条，当前 {{ currentPage }} / {{ totalPages }} 页</span>
@@ -230,15 +230,6 @@ onBeforeMount(async () => {
     color: #999;
 }
 
-.searchBar {
-    position: sticky;
-    top: 0;
-    z-index: 3;
-    background-color: #fff;
-    padding-bottom: 8px;
-    box-sizing: border-box;
-}
-
 .searchSummary {
     margin-left: 10px;
     color: var(--el-input-text-color, var(--el-text-color-regular));
@@ -271,10 +262,6 @@ onBeforeMount(async () => {
     flex: 2 1 308px;
     min-width: 308px;
     margin-top: 0;
-}
-
-.searchSpacer {
-    display: none;
 }
 
 .resultControls {
@@ -316,11 +303,6 @@ onBeforeMount(async () => {
     :deep(.versionFilterGroup) {
         flex-basis: 100%;
         min-width: 0;
-    }
-
-    .searchSpacer {
-        display: none;
-        height: 0;
     }
 
     .voicePlayerContainer {
