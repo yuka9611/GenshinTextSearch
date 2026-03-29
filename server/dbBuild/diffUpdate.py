@@ -870,14 +870,14 @@ def _process_quest_by_textmap_stage(plan, target_version):
         )
 
 
-def _process_core_tables_stage(plan):
+def _process_core_tables_stage(plan, target_version):
     """
     处理核心表阶段
     """
     if plan["avatar"]:
         DBBuild.importAvatars()
     if plan["npc"]:
-        DBBuild.importNPCs()
+        DBBuild.importNPCs(current_version=target_version)
     if plan["manual"]:
         DBBuild.importManualTextMap()
     if plan["fetters"]:
@@ -1004,6 +1004,17 @@ def _process_version_catalog_stage(plan, target_commit, base_commit):
             history_backfill = history_backfill_module
 
         history_backfill.backfill_subtitle_versions_from_history(
+            target_commit=target_commit,
+            from_commit=base_commit,
+            force=False,
+        )
+    if plan["npc"]:
+        if history_backfill is None:
+            import history_backfill as history_backfill_module
+
+            history_backfill = history_backfill_module
+
+        history_backfill.backfill_npc_versions_from_history(
             target_commit=target_commit,
             from_commit=base_commit,
             force=False,
@@ -1165,6 +1176,8 @@ def _process_version_catalog_stage(plan, target_commit, base_commit):
         version_scopes.append("subtitle")
     if plan["readable_changed"] or plan["readable_deleted"]:
         version_scopes.append("readable")
+    if plan["npc"]:
+        version_scopes.append("npc")
 
     if version_scopes:
         catalog_stats = rebuild_version_catalog(version_scopes)
@@ -1277,7 +1290,7 @@ def run_diff_update(
         mark_stage("quest_by_textmap")
 
     if not stage_done("core_tables"):
-        _process_core_tables_stage(plan)
+        _process_core_tables_stage(plan, target_version)
         mark_stage("core_tables")
 
     if not stage_done("voice"):

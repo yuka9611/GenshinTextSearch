@@ -1341,14 +1341,22 @@ def searchNameEntries(
     created_version: str | None = None,
     updated_version: str | None = None,
     quest_source_type: str | None = None,
+    speaker_keyword: str | None = None,
 ):
     quests = []
     readables = []
     keyword_trim = (keyword or "").strip()
+    speaker_keyword_trim = (speaker_keyword or "").strip()
     created_version_filter = _normalize_version_filter(created_version)
     updated_version_filter = _normalize_version_filter(updated_version)
     quest_source_type_filter = (quest_source_type or "").strip().upper() or None
-    if not keyword_trim and not created_version_filter and not updated_version_filter and not quest_source_type_filter:
+    if (
+        not keyword_trim
+        and not created_version_filter
+        and not updated_version_filter
+        and not quest_source_type_filter
+        and not speaker_keyword_trim
+    ):
         return {
             "quests": [],
             "readables": []
@@ -1448,25 +1456,82 @@ def searchNameEntries(
                 **_build_version_fields(created_raw, updated_raw),
             }
     else:
-        questMatches = databaseHelper.selectQuestByVersion(
+        if created_version_filter or updated_version_filter or quest_source_type_filter:
+            questMatches = databaseHelper.selectQuestByVersion(
+                langCode,
+                created_version_filter,
+                updated_version_filter,
+                quest_source_type_filter,
+            )
+            for questId, questTitle, created_raw, updated_raw in questMatches:
+                chapterName = databaseHelper.getQuestChapterName(questId, langCode)
+                quest_map[questId] = {
+                    "questId": questId,
+                    "title": questTitle,
+                    "chapterName": chapterName,
+                    **_build_version_fields(created_raw, updated_raw),
+                }
+
+    if speaker_keyword_trim:
+        speaker_quest_map: dict[int, dict] = {}
+        speakerMatches = databaseHelper.selectQuestByNpcSpeakerKeyword(
+            speaker_keyword_trim,
             langCode,
             created_version_filter,
             updated_version_filter,
             quest_source_type_filter,
         )
-        for questId, questTitle, created_raw, updated_raw in questMatches:
+        for questId, questTitle, created_raw, updated_raw in speakerMatches:
             chapterName = databaseHelper.getQuestChapterName(questId, langCode)
-            quest_map[questId] = {
+            speaker_quest_map[questId] = {
                 "questId": questId,
                 "title": questTitle,
                 "chapterName": chapterName,
                 **_build_version_fields(created_raw, updated_raw),
             }
 
+        speaker_norm = _normalize_speaker(speaker_keyword_trim, langCode)
+        for talkerType in ("TALK_ROLE_PLAYER", "TALK_ROLE_MATE_AVATAR"):
+            talkerName = databaseHelper.getTalkerName(talkerType, 0, langCode)
+            if not talkerName:
+                continue
+            if speaker_norm not in _normalize_speaker(talkerName, langCode):
+                continue
+            specialMatches = databaseHelper.selectQuestByTalkerType(
+                talkerType,
+                langCode,
+                created_version_filter,
+                updated_version_filter,
+                quest_source_type_filter,
+            )
+            for questId, questTitle, created_raw, updated_raw in specialMatches:
+                if questId in speaker_quest_map:
+                    continue
+                chapterName = databaseHelper.getQuestChapterName(questId, langCode)
+                speaker_quest_map[questId] = {
+                    "questId": questId,
+                    "title": questTitle,
+                    "chapterName": chapterName,
+                    **_build_version_fields(created_raw, updated_raw),
+                }
+
+        if keyword_trim or created_version_filter or updated_version_filter or quest_source_type_filter:
+            quest_map = {
+                questId: entry
+                for questId, entry in quest_map.items()
+                if questId in speaker_quest_map
+            }
+        else:
+            quest_map = speaker_quest_map
+
     quests.extend(quest_map.values())
 
     langMap = databaseHelper.getLangCodeMap()
-    if langCode in langMap and (keyword_trim or created_version_filter or updated_version_filter):
+    if (
+        not speaker_keyword_trim
+        and langCode in langMap
+        and (keyword_trim or created_version_filter or updated_version_filter)
+    ):
         langStr = langMap[langCode]
         readable_seen = set()
         readable_entry_map = {}
@@ -1631,6 +1696,271 @@ def searchAvatarEntries(keyword: str, langCode: int):
     )
     return {
         "avatars": avatars
+    }
+
+
+def _build_dialogue_group_key(
+    talk_id: int | None,
+    coop_quest_id: int | None,
+    dialogue_id_fallback: int | None,
+) -> str:
+    if dialogue_id_fallback is not None:
+        return f"dialogue:{dialogue_id_fallback}"
+    coop_key = "null" if coop_quest_id is None else str(coop_quest_id)
+    return f"talk:{int(talk_id or 0)}:{coop_key}"
+
+
+def _build_dialogue_group_preview_lines(
+    raw_rows: list[tuple[int, str, int, int]],
+    source_lang_code: int,
+    *,
+    max_lines: int = 3,
+) -> list[str]:
+    preview_lines: list[str] = []
+    for text_hash, talker_type, talker_id, _dialogue_id in raw_rows[:max_lines]:
+        text = _normalize_text_map_content(
+            databaseHelper.getTextMapContent(text_hash, source_lang_code),
+            source_lang_code,
+        )
+        talker = databaseHelper.getTalkerName(talker_type, talker_id, source_lang_code)
+        if not text:
+            continue
+        line = f"{talker}: {text}" if talker else text
+        normalized = _normalize_preview_text(line)
+        if not normalized:
+            continue
+        if len(normalized) > 96:
+            normalized = normalized[:93].rstrip() + "..."
+        preview_lines.append(normalized)
+    return preview_lines
+
+
+def searchNpcDialogueEntries(
+    keyword: str,
+    langCode: int,
+    npc_created_version: str | None = None,
+    npc_updated_version: str | None = None,
+):
+    entries = []
+    matches = databaseHelper.selectNpcDialogueSearchEntries(
+        keyword,
+        langCode,
+        created_version=npc_created_version,
+        updated_version=npc_updated_version,
+        limit=200,
+    )
+    for npcName, npc_ids_raw, created_raw, dialogue_updated_raw in matches:
+        npc_ids = [
+            int(item)
+            for item in str(npc_ids_raw or "").split(",")
+            if str(item).strip()
+        ]
+        if not npc_ids:
+            continue
+        entries.append(
+            {
+                "npcIds": npc_ids,
+                "name": npcName or "",
+                **_build_version_fields(created_raw, dialogue_updated_raw),
+            }
+        )
+
+    _sort_entries_by_match(
+        entries,
+        keyword,
+        langCode,
+        lambda entry: [entry.get("name")],
+    )
+    return {"npcs": entries}
+
+
+def getNpcDialogues(
+    npcId: int | None = None,
+    npcIds: list[int] | None = None,
+    searchLang: int | None = None,
+    dialogue_created_version: str | None = None,
+    dialogue_updated_version: str | None = None,
+    page: int = 1,
+    page_size: int = 20,
+):
+    source_lang_code = config.getSourceLanguage()
+    resolved_npc_ids: list[int] = []
+    if npcIds:
+        for value in npcIds:
+            try:
+                resolved = int(value)
+            except Exception:
+                continue
+            if resolved <= 0 or resolved in resolved_npc_ids:
+                continue
+            resolved_npc_ids.append(resolved)
+    elif npcId is not None:
+        try:
+            resolved = int(npcId)
+        except Exception:
+            resolved = 0
+        if resolved > 0:
+            resolved_npc_ids.append(resolved)
+
+    if not resolved_npc_ids:
+        raise Exception("未找到对应的 NPC 名称组！")
+
+    npc_name = databaseHelper.getTalkerName("TALK_ROLE_NPC", resolved_npc_ids[0], source_lang_code)
+
+    safe_page_size = max(1, int(page_size) if page_size else 20)
+    safe_page = max(1, int(page) if page else 1)
+
+    created_filter = _normalize_version_filter(dialogue_created_version)
+    updated_filter = _normalize_version_filter(dialogue_updated_version)
+    use_merged_summary = len(resolved_npc_ids) > 1 or bool(created_filter or updated_filter)
+    use_version_summary = bool(created_filter or updated_filter)
+
+    if use_merged_summary:
+        if use_version_summary:
+            summaries = databaseHelper.selectNpcNonTaskDialogueGroupSummariesForNpcIds(
+                resolved_npc_ids,
+                created_version=dialogue_created_version,
+                updated_version=dialogue_updated_version,
+            )
+            total_groups = len(summaries)
+            total_pages = max(1, math.ceil(total_groups / safe_page_size)) if total_groups else 1
+            if safe_page > total_pages:
+                safe_page = total_pages
+            paged_summaries = summaries[(safe_page - 1) * safe_page_size : safe_page * safe_page_size]
+        else:
+            total_groups = databaseHelper.countNpcNonTaskDialogueGroupsForNpcIds(resolved_npc_ids)
+            total_pages = max(1, math.ceil(total_groups / safe_page_size)) if total_groups else 1
+            if safe_page > total_pages:
+                safe_page = total_pages
+            paged_summaries = databaseHelper.selectNpcNonTaskDialogueGroupPageForNpcIds(
+                resolved_npc_ids,
+                safe_page_size,
+                (safe_page - 1) * safe_page_size,
+            )
+    else:
+        single_npc_id = resolved_npc_ids[0]
+        total_groups = databaseHelper.countNpcNonTaskDialogueGroups(single_npc_id)
+        total_pages = max(1, math.ceil(total_groups / safe_page_size)) if total_groups else 1
+        if safe_page > total_pages:
+            safe_page = total_pages
+        paged_summaries = databaseHelper.selectNpcNonTaskDialogueGroupPage(
+            single_npc_id,
+            safe_page_size,
+            (safe_page - 1) * safe_page_size,
+        )
+
+    groups = []
+    for summary in paged_summaries:
+        if use_version_summary:
+            talkId, coopQuestId, dialogueIdFallback, sortDialogueId, lineCount, created_raw, updated_raw = summary
+        else:
+            talkId, coopQuestId, dialogueIdFallback, sortDialogueId, lineCount = summary
+            created_raw, updated_raw = databaseHelper.getDialogueGroupVersionInfo(
+                int(talkId or 0),
+                coopQuestId,
+                dialogueIdFallback,
+                source_lang_code,
+            )
+        preview_rows = databaseHelper.selectDialogueGroupContentPaged(
+            int(talkId or 0),
+            coopQuestId,
+            dialogueIdFallback,
+            3,
+            0,
+        )
+        groups.append(
+            {
+                "groupKey": _build_dialogue_group_key(talkId, coopQuestId, dialogueIdFallback),
+                "talkId": int(talkId or 0),
+                "coopQuestId": coopQuestId,
+                "dialogueIdFallback": dialogueIdFallback,
+                "firstDialogueId": int(sortDialogueId or 0),
+                "lineCount": int(lineCount or 0),
+                "previewLines": _build_dialogue_group_preview_lines(preview_rows, source_lang_code),
+                **_build_version_fields(created_raw, updated_raw),
+            }
+        )
+
+    return {
+        "npcId": int(resolved_npc_ids[0]),
+        "npcIds": resolved_npc_ids,
+        "npcName": npc_name,
+        "page": safe_page,
+        "pageSize": safe_page_size,
+        "totalGroups": total_groups,
+        "groups": groups,
+    }
+
+
+def getDialogueGroup(
+    talkId: int,
+    coopQuestId: int | None = None,
+    dialogueIdFallback: int | None = None,
+    searchLang: int | None = None,
+    page: int = 1,
+    page_size: int = 200,
+):
+    langs = config.getResultLanguages().copy()
+    if searchLang and searchLang not in langs:
+        langs.append(searchLang)
+    sourceLangCode = config.getSourceLanguage()
+    if sourceLangCode and sourceLangCode not in langs:
+        langs.append(sourceLangCode)
+
+    resolved_talk_id = int(talkId or 0)
+    resolved_coop_quest_id = coopQuestId
+    if dialogueIdFallback is not None:
+        dialogue_info = databaseHelper.getDialogueInfoById(int(dialogueIdFallback))
+        if dialogue_info is None:
+            raise Exception("未找到对应的非任务对话分组！")
+        _text_hash, _talker_type, _talker_id, _dialogue_id, resolved_talk_id, resolved_coop_quest_id = dialogue_info
+
+    safe_page_size = max(1, int(page_size) if page_size else 200)
+    total = databaseHelper.countDialogueGroupContent(
+        resolved_talk_id,
+        resolved_coop_quest_id,
+        dialogueIdFallback,
+    )
+    if total <= 0:
+        raise Exception("未找到对应的非任务对话分组！")
+
+    total_pages = max(1, math.ceil(total / safe_page_size))
+    safe_page = max(1, int(page) if page else 1)
+    if safe_page > total_pages:
+        safe_page = total_pages
+
+    raw_dialogues = databaseHelper.selectDialogueGroupContentPaged(
+        resolved_talk_id,
+        resolved_coop_quest_id,
+        dialogueIdFallback,
+        safe_page_size,
+        (safe_page - 1) * safe_page_size,
+    )
+    dialogues = []
+    for dialogue_text_hash, talkerType, talkerId, dialogueId in raw_dialogues:
+        obj = queryTextHashInfo(dialogue_text_hash, langs, sourceLangCode, False)
+        obj["talker"] = databaseHelper.getTalkerName(talkerType, talkerId, sourceLangCode)
+        obj["dialogueId"] = dialogueId
+        obj["talkId"] = resolved_talk_id
+        dialogues.append(obj)
+
+    created_raw, updated_raw = databaseHelper.getDialogueGroupVersionInfo(
+        resolved_talk_id,
+        resolved_coop_quest_id,
+        dialogueIdFallback,
+        sourceLangCode,
+    )
+    return {
+        "talkQuestName": "非任务对话",
+        "questId": None,
+        "talkId": resolved_talk_id,
+        "coopQuestId": resolved_coop_quest_id,
+        "dialogueIdFallback": dialogueIdFallback,
+        "dialogues": dialogues,
+        "total": total,
+        "page": safe_page,
+        "pageSize": safe_page_size,
+        **_build_version_fields(created_raw, updated_raw),
     }
 
 

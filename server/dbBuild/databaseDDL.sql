@@ -223,11 +223,14 @@ create table npc
     npcId    integer
         constraint npc_pk_2
             unique,
-    textHash integer
+    textHash integer,
+    created_version_id INTEGER
 );
 
 create index npc_npcId_index
     on npc (npcId);
+create index npc_created_version_id_index
+    on npc (created_version_id);
 
 
 create table manualTextMap
@@ -371,3 +374,7 @@ create index subtitle_created_version_id_index
     on subtitle (created_version_id);
 create index subtitle_updated_version_id_index
     on subtitle (updated_version_id);
+create index dialogue_talkerType_talkerId_talkId_coopQuestId_dialogueId_index
+    on dialogue (talkerType, talkerId, talkId, coopQuestId, dialogueId);
+create index dialogue_talkId_coopQuestId_dialogueId_index
+    on dialogue (talkId, coopQuestId, dialogueId);

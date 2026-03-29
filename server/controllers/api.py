@@ -520,6 +520,74 @@ def getTalkFromHash():
         "msg": "ok"
     })
 
+@api_bp.route("/api/getDialogueGroup", methods=["POST"])
+def getDialogueGroup():
+    import time
+
+    talkId = request.json.get("talkId", 0)
+    coopQuestId = request.json.get("coopQuestId")
+    dialogueIdFallback = request.json.get("dialogueIdFallback")
+    searchLang = request.json.get("searchLang")
+    page = request.json.get("page", 1)
+    pageSize = request.json.get("pageSize", 200)
+
+    try:
+        talkId = int(talkId or 0)
+    except Exception:
+        talkId = 0
+    if coopQuestId is not None and str(coopQuestId).strip() != "":
+        try:
+            coopQuestId = int(coopQuestId)
+        except Exception:
+            coopQuestId = None
+    else:
+        coopQuestId = None
+    if dialogueIdFallback is not None and str(dialogueIdFallback).strip() != "":
+        try:
+            dialogueIdFallback = int(dialogueIdFallback)
+        except Exception:
+            dialogueIdFallback = None
+    else:
+        dialogueIdFallback = None
+    if searchLang:
+        searchLang = int(searchLang)
+    try:
+        page = int(page)
+    except Exception:
+        page = 1
+    try:
+        pageSize = int(pageSize)
+    except Exception:
+        pageSize = 200
+    if pageSize < 1:
+        pageSize = 200
+
+    try:
+        start = time.time()
+        contents = controllers_module.getDialogueGroup(  # type: ignore
+            talkId,
+            coopQuestId=coopQuestId,
+            dialogueIdFallback=dialogueIdFallback,
+            searchLang=searchLang,
+            page=page,
+            page_size=pageSize,
+        )
+        end = time.time()
+    except Exception as e:
+        return jsonify({"data": None, "code": 114, "msg": str(e)})
+
+    return jsonify({
+        "data": {
+            "contents": contents,
+            "total": contents.get("total", len(contents.get("dialogues", []))),
+            "page": contents.get("page", 1),
+            "pageSize": contents.get("pageSize", pageSize),
+            "time": (end - start) * 1000
+        },
+        "code": 200,
+        "msg": "ok"
+    })
+
 @api_bp.route("/api/getSubtitleContext", methods=["POST"])
 def getSubtitleContext():
     import time
@@ -556,12 +624,14 @@ def nameSearch():
     createdVersion = request.json.get("createdVersion")
     updatedVersion = request.json.get("updatedVersion")
     questSourceType = request.json.get("questSourceType")
+    speakerKeyword = request.json.get("speakerKeyword", "")
 
     has_keyword = keyword.strip() != ""
     has_created = createdVersion and str(createdVersion).strip() != ""
     has_updated = updatedVersion and str(updatedVersion).strip() != ""
     has_source_type = questSourceType and str(questSourceType).strip() != ""
-    if not has_keyword and not has_created and not has_updated and not has_source_type:
+    has_speaker = speakerKeyword and str(speakerKeyword).strip() != ""
+    if not has_keyword and not has_created and not has_updated and not has_source_type and not has_speaker:
         return jsonify({
             "data": {
                 "contents": {
@@ -581,6 +651,106 @@ def nameSearch():
         created_version=createdVersion,
         updated_version=updatedVersion,
         quest_source_type=questSourceType,
+        speaker_keyword=speakerKeyword,
+    )
+    end = time.time()
+
+    return jsonify({
+        "data": {
+            "contents": contents,
+            "time": (end - start) * 1000
+        },
+        "code": 200,
+        "msg": "ok"
+    })
+
+@api_bp.route("/api/npcDialogueSearch", methods=["POST"])
+def npcDialogueSearch():
+    import time
+
+    langCode = int(request.json["langCode"])
+    keyword: str = request.json.get("keyword", "")
+    npcCreatedVersion = request.json.get("npcCreatedVersion")
+    npcUpdatedVersion = request.json.get("npcUpdatedVersion")
+
+    has_keyword = keyword.strip() != ""
+    has_created = npcCreatedVersion and str(npcCreatedVersion).strip() != ""
+    has_updated = npcUpdatedVersion and str(npcUpdatedVersion).strip() != ""
+    if not has_keyword and not has_created and not has_updated:
+        return jsonify({
+            "data": {
+                "contents": {
+                    "npcs": []
+                },
+                "time": 0
+            },
+            "code": 200,
+            "msg": "ok"
+        })
+
+    start = time.time()
+    contents = controllers_module.searchNpcDialogueEntries(  # type: ignore
+        keyword,
+        langCode,
+        npc_created_version=npcCreatedVersion,
+        npc_updated_version=npcUpdatedVersion,
+    )
+    end = time.time()
+
+    return jsonify({
+        "data": {
+            "contents": contents,
+            "time": (end - start) * 1000
+        },
+        "code": 200,
+        "msg": "ok"
+    })
+
+@api_bp.route("/api/npcDialogues", methods=["POST"])
+def npcDialogues():
+    import time
+
+    npc_ids_input = request.json.get("npcIds")
+    npcIds: list[int] = []
+    if isinstance(npc_ids_input, list):
+        for item in npc_ids_input:
+            try:
+                npc_value = int(item)
+            except Exception:
+                continue
+            if npc_value > 0 and npc_value not in npcIds:
+                npcIds.append(npc_value)
+
+    npcId_raw = request.json.get("npcId")
+    try:
+        npcId = int(npcId_raw) if npcId_raw is not None else None
+    except Exception:
+        npcId = None
+    searchLang = request.json.get("searchLang")
+    dialogueCreatedVersion = request.json.get("dialogueCreatedVersion")
+    dialogueUpdatedVersion = request.json.get("dialogueUpdatedVersion")
+    page = request.json.get("page", 1)
+    pageSize = request.json.get("pageSize", 20)
+    if searchLang:
+        searchLang = int(searchLang)
+    try:
+        page = int(page)
+    except Exception:
+        page = 1
+    try:
+        pageSize = int(pageSize)
+    except Exception:
+        pageSize = 20
+
+    start = time.time()
+    contents = controllers_module.getNpcDialogues(  # type: ignore
+        npcId,
+        npcIds=npcIds,
+        searchLang=searchLang,
+        dialogue_created_version=dialogueCreatedVersion,
+        dialogue_updated_version=dialogueUpdatedVersion,
+        page=page,
+        page_size=pageSize,
     )
     end = time.time()
 

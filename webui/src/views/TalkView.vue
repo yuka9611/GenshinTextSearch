@@ -17,7 +17,7 @@ const UI_TEXT = Object.freeze({
     copied: "已复制",
     copyFailed: "复制失败，请手动选择文本",
     pageTitleReadable: "阅读物内容",
-    pageTitleDialogue: "任务对话内容",
+    pageTitleDialogue: "对话内容",
     source: "来源",
     queryTime: "查询耗时",
     copy: "复制",
@@ -70,6 +70,7 @@ const totalCount = ref(0)
 const totalPages = computed(() => Math.max(1, Math.ceil(totalCount.value / pageSize.value)))
 const currentTalkId = ref(null)
 const currentQuestId = ref(null)
+const currentDialogueId = ref(null)
 
 let playVoiceButtonDict = {}
 let playableDialogueIdList = []
@@ -83,13 +84,19 @@ const toDisplayId = (value) => {
 
 const displayMetaIds = computed(() => {
     const items = []
-    const talkIdValue = toDisplayId(currentTalkId.value)
+    const talkIdValue = route.query.groupMode === 'npc'
+        ? (currentTalkId.value === null || currentTalkId.value === undefined ? null : String(currentTalkId.value))
+        : toDisplayId(currentTalkId.value)
     const questIdValue = toDisplayId(currentQuestId.value)
+    const dialogueIdValue = toDisplayId(currentDialogueId.value)
     if (talkIdValue) {
         items.push({ label: "Talk ID", value: talkIdValue })
     }
     if (questIdValue) {
         items.push({ label: "Quest ID", value: questIdValue })
+    }
+    if (dialogueIdValue) {
+        items.push({ label: "Dialogue ID", value: dialogueIdValue })
     }
     return items
 })
@@ -112,10 +119,12 @@ const reloadPage = () => {
     questDescription.value = ""
     currentTalkId.value = null
     currentQuestId.value = null
+    currentDialogueId.value = null
     const isSubtitle = !!route.query.isSubtitle
     const readableId = route.query.readableId
     const fileName = route.query.fileName
     const questId = route.query.questId
+    const isDialogueGroup = route.query.groupMode === 'npc'
     if ((readableId || fileName) && !isSubtitle) {
         isReadable.value = true
         totalCount.value = 0
@@ -146,6 +155,22 @@ const reloadPage = () => {
         reloadQuest()
         return
     }
+    if (isDialogueGroup) {
+        isReadable.value = false
+        readableCreatedVersion.value = ""
+        readableUpdatedVersion.value = ""
+        readableCreatedVersionRaw.value = ""
+        readableUpdatedVersionRaw.value = ""
+        subtitleCreatedVersion.value = ""
+        subtitleUpdatedVersion.value = ""
+        subtitleCreatedVersionRaw.value = ""
+        subtitleUpdatedVersionRaw.value = ""
+        showPlayer.value = false
+        updateContentScrollClass()
+        currentPage.value = 1
+        reloadDialogueGroup()
+        return
+    }
     isReadable.value = false
     readableCreatedVersion.value = ""
     readableUpdatedVersion.value = ""
@@ -159,6 +184,31 @@ const reloadPage = () => {
     currentPage.value = 1
     updateContentScrollClass()
     reloadTalk(false)
+}
+
+const reloadDialogueGroup = () => {
+    api.getDialogueGroup(
+        route.query.talkId,
+        route.query.coopQuestId,
+        route.query.dialogueIdFallback,
+        route.query.searchLang,
+        currentPage.value,
+        pageSize.value,
+    ).then(res => {
+        let resJson = res.json
+        queryTime.value = resJson.time.toFixed(2)
+        let talkContents = resJson.contents
+        questName.value = talkContents.talkQuestName
+        dialogues.value = talkContents.dialogues
+        questDescription.value = ""
+        currentTalkId.value = talkContents.talkId ?? route.query.talkId ?? null
+        currentQuestId.value = null
+        currentDialogueId.value = talkContents.dialogueIdFallback ?? route.query.dialogueIdFallback ?? null
+        totalCount.value = resJson.total || talkContents.total || talkContents.dialogues?.length || 0
+        currentPage.value = resJson.page || talkContents.page || currentPage.value
+    }).catch(err => {
+        if(!err.network) err.defaultHandler()
+    })
 }
 
 
@@ -204,6 +254,7 @@ const reloadTalk = (useCurrentPage = true) => {
         questDescription.value = ""
         currentTalkId.value = talkContents.talkId ?? null
         currentQuestId.value = talkContents.questId ?? null
+        currentDialogueId.value = null
         totalCount.value = resJson.total || talkContents.total || talkContents.dialogues?.length || 0
         currentPage.value = resJson.page || talkContents.page || 1
 
@@ -245,6 +296,7 @@ const reloadQuest = () => {
         dialogues.value = talkContents.dialogues
         currentTalkId.value = talkContents.talkId ?? null
         currentQuestId.value = talkContents.questId ?? route.query.questId ?? null
+        currentDialogueId.value = null
         totalCount.value = resJson.total || 0
         currentPage.value = resJson.page || currentPage.value
     }).catch(err => {
@@ -261,6 +313,10 @@ const goToPage = (page) => {
     currentPage.value = page
     if (route.query.questId) {
         reloadQuest()
+        return
+    }
+    if (route.query.groupMode === 'npc') {
+        reloadDialogueGroup()
         return
     }
     if (route.query.textHash && !route.query.isSubtitle) {

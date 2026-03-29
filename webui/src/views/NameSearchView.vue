@@ -15,11 +15,12 @@ const uiText = {
   helpText: '输入任务名称、可读物标题或版本号，支持仅按版本筛选；搜索结果可直接跳转到详情页面。',
   searchPlaceholder: '输入关键词或版本',
   searchLanguage: '搜索语言',
-  emptyInput: '请输入关键词或版本',
+  emptyInput: '请输入关键词、版本、出场角色或任务类别',
   versionOnlySummary: '搜索耗时: {time}ms，仅按版本筛选；任务 {questCount} 条，可读物 {readableCount} 条',
   summary: '搜索耗时: {time}ms，任务 {questCount} 条，可读物 {readableCount} 条',
   createdVersion: '创建版本',
   updatedVersion: '更新版本',
+  speakerKeyword: '出场角色（可选）',
   questResults: '任务结果',
   noQuestResults: '没有找到任务结果',
   chapter: '章节',
@@ -32,6 +33,7 @@ const uiText = {
 }
 
 const questSourceTypeFilter = ref('')
+const speakerKeyword = ref('')
 const questSourceTypeOptions = [
   { value: '', label: '全部' },
   { value: 'AQ', label: '魔神任务' },
@@ -92,8 +94,9 @@ const onSearchClicked = async () => {
   const createdText = createdVersionFilter.value.trim()
   const updatedText = updatedVersionFilter.value.trim()
   const sourceTypeText = questSourceTypeFilter.value.trim()
+  const speakerText = speakerKeyword.value.trim()
 
-  if (!keywordText && !createdText && !updatedText && !sourceTypeText) {
+  if (!keywordText && !createdText && !updatedText && !sourceTypeText && !speakerText) {
     searchSummary.value = uiText.emptyInput
     questResults.value = []
     readableResults.value = []
@@ -106,6 +109,7 @@ const onSearchClicked = async () => {
     createdVersionFilter.value,
     updatedVersionFilter.value,
     questSourceTypeFilter.value,
+    speakerKeyword.value,
   )).json
   const contents = ans.contents
   keywordLast.value = keyword.value
@@ -117,7 +121,7 @@ const onSearchClicked = async () => {
     questCount: questResults.value.length,
     readableCount: readableResults.value.length,
   }
-  if (!keywordText && (createdText || updatedText)) {
+  if (!keywordText && !speakerText && (createdText || updatedText)) {
     searchSummary.value = formatText(uiText.versionOnlySummary, summaryValues)
   } else {
     searchSummary.value = formatText(uiText.summary, summaryValues)
@@ -179,6 +183,13 @@ setupVersionWatchers(onSearchClicked)
     </div>
 
     <div class="filterBar">
+      <el-input
+        v-model="speakerKeyword"
+        :placeholder="uiText.speakerKeyword"
+        class="speakerInput"
+        clearable
+        @keyup.enter.native="onSearchClicked"
+      />
       <el-select v-model="createdVersionFilter" :placeholder="uiText.createdVersion" class="versionInput" clearable filterable>
         <el-option v-for="version in versionOptions" :key="`created-${version}`" :label="version" :value="version" />
       </el-select>
@@ -294,11 +305,18 @@ setupVersionWatchers(onSearchClicked)
   display: flex;
   flex-wrap: wrap;
   gap: 8px;
+  width: 100%;
+  max-width: 960px;
   margin: 10px 0 6px;
 }
 
 .versionInput {
   width: 180px;
+}
+
+.speakerInput {
+  width: 180px;
+  min-width: 180px;
 }
 
 .resultSection {
