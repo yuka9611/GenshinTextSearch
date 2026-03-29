@@ -222,34 +222,36 @@ const gotoDialogueDetail = (group) => {
       <p>{{ uiText.helpLine2 }}</p>
     </div>
 
-    <div class="searchBar">
-      <el-input
-        v-model="npcKeyword"
-        style="max-width: 600px;"
-        :placeholder="uiText.npcPlaceholder"
-        class="input-with-select"
-        @keyup.enter.native="onNpcSearchClicked"
-        clearable
-      >
-        <template #prepend>
-          <el-select v-model="selectedInputLanguage" :placeholder="uiText.searchLanguage" class="languageSelector">
-            <el-option v-for="(v, k) in supportedInputLanguage" :key="k" :label="v" :value="k" />
-          </el-select>
-        </template>
-        <template #append>
-          <el-button :icon="Search" @click="onNpcSearchClicked" />
-        </template>
-      </el-input>
-      <span class="searchSummary">{{ npcSummary }}</span>
-    </div>
+    <div class="stickySearchSection">
+      <div class="searchBar">
+        <el-input
+          v-model="npcKeyword"
+          style="max-width: 600px;"
+          :placeholder="uiText.npcPlaceholder"
+          class="input-with-select"
+          @keyup.enter.native="onNpcSearchClicked"
+          clearable
+        >
+          <template #prepend>
+            <el-select v-model="selectedInputLanguage" :placeholder="uiText.searchLanguage" class="languageSelector">
+              <el-option v-for="(v, k) in supportedInputLanguage" :key="k" :label="v" :value="k" />
+            </el-select>
+          </template>
+          <template #append>
+            <el-button :icon="Search" @click="onNpcSearchClicked" />
+          </template>
+        </el-input>
+        <span class="searchSummary">{{ npcSummary }}</span>
+      </div>
 
-    <div class="filterBar">
-      <el-select v-model="npcCreatedVersionFilter" :placeholder="uiText.npcCreatedVersion" class="versionInput" clearable filterable>
-        <el-option v-for="version in versionOptions" :key="`npc-created-${version}`" :label="version" :value="version" />
-      </el-select>
-      <el-select v-model="npcUpdatedVersionFilter" :placeholder="uiText.npcUpdatedVersion" class="versionInput" clearable filterable>
-        <el-option v-for="version in versionOptions" :key="`npc-updated-${version}`" :label="version" :value="version" />
-      </el-select>
+      <div class="filterBar">
+        <el-select v-model="npcCreatedVersionFilter" :placeholder="uiText.npcCreatedVersion" class="versionInput" clearable filterable>
+          <el-option v-for="version in versionOptions" :key="`npc-created-${version}`" :label="version" :value="version" />
+        </el-select>
+        <el-select v-model="npcUpdatedVersionFilter" :placeholder="uiText.npcUpdatedVersion" class="versionInput" clearable filterable>
+          <el-option v-for="version in versionOptions" :key="`npc-updated-${version}`" :label="version" :value="version" />
+        </el-select>
+      </div>
     </div>
 
     <div class="resultSection">
@@ -341,10 +343,6 @@ const gotoDialogueDetail = (group) => {
 }
 
 .searchBar {
-  position: sticky;
-  top: 0;
-  z-index: 3;
-  background-color: #fff;
   padding-bottom: 8px;
   box-sizing: border-box;
 }

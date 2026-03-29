@@ -2,7 +2,7 @@
 
 import { changeTheme } from "@/assets/changeTheme";
 import router from "@/router";
-import { onBeforeMount, onMounted, reactive, ref, watch } from "vue";
+import { nextTick, onBeforeMount, onMounted, reactive, ref, watch } from "vue";
 import UserInfoCard from "@/components/UserInfoCard.vue";
 import globalData from "@/global/global"
 import { ElMenuItem, ElSubMenu } from "element-plus";
@@ -72,6 +72,21 @@ const menu = ref();
 let contentDom = undefined;
 const loaded = ref(false)
 const initError = ref("")
+const scrollPositions = new Map()
+const talkOriginRouteKey = ref(null)
+
+const getContentDom = () => {
+    if (contentDom && document.body.contains(contentDom)) {
+        return contentDom
+    }
+    contentDom = document.querySelector(".content")
+    return contentDom
+}
+
+const waitForContentPaint = async () => {
+    await nextTick()
+    await new Promise((resolve) => requestAnimationFrame(resolve))
+}
 
 const getInitErrorMessage = (error) => {
     const message = error?.response?.data?.msg
@@ -114,10 +129,37 @@ onMounted(async () => {
     }
 })
 
-watch(router.currentRoute, () => {
-    if (contentDom) {
-        contentDom.scrollTo({ left: 0, top: 0 })
+watch(router.currentRoute, async (to, from) => {
+    const currentContent = getContentDom()
+    if (from?.fullPath && currentContent) {
+        scrollPositions.set(from.fullPath, currentContent.scrollTop)
     }
+
+    if (from?.name !== "talkView" && to?.name === "talkView") {
+        talkOriginRouteKey.value = from?.fullPath || null
+    }
+
+    await waitForContentPaint()
+
+    const nextContent = getContentDom()
+    if (!nextContent) {
+        talkOriginRouteKey.value = from?.name === "talkView" ? null : talkOriginRouteKey.value
+        return
+    }
+
+    if (from?.name === "talkView") {
+        const shouldRestoreScroll = !!talkOriginRouteKey.value && to?.fullPath === talkOriginRouteKey.value
+        if (shouldRestoreScroll) {
+            const savedTop = scrollPositions.get(to.fullPath) ?? 0
+            nextContent.scrollTo({ left: 0, top: savedTop, behavior: "auto" })
+        } else {
+            nextContent.scrollTo({ left: 0, top: 0, behavior: "auto" })
+        }
+        talkOriginRouteKey.value = null
+        return
+    }
+
+    nextContent.scrollTo({ left: 0, top: 0, behavior: "auto" })
 })
 
 </script>
