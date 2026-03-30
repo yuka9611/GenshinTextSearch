@@ -9,7 +9,7 @@
       clearable
     >
       <template #prepend>
-        <el-select v-model="localSelectedLanguage" placeholder="选择语言" class="languageSelector">
+        <el-select v-model="localSelectedLanguage" :placeholder="languagePlaceholder" class="languageSelector">
           <el-option v-for="(v, k) in supportedLanguages" :label="v" :value="k" :key="k" />
         </el-select>
       </template>
@@ -17,7 +17,7 @@
         <el-button :icon="Search" @click="onSearch" />
       </template>
     </el-input>
-    <span class="searchSummary">{{ summary }}</span>
+    <span v-if="summary" class="searchSummary">{{ summary }}</span>
   </div>
 </template>
 
@@ -27,11 +27,11 @@ import { Search } from '@element-plus/icons-vue'
 
 const props = defineProps({
   keyword: {
-    type: String,
+    type: [String, Number],
     default: ''
   },
   selectedLanguage: {
-    type: String,
+    type: [String, Number],
     default: ''
   },
   supportedLanguages: {
@@ -49,6 +49,10 @@ const props = defineProps({
   inputWidth: {
     type: String,
     default: '600px'
+  },
+  languagePlaceholder: {
+    type: String,
+    default: '选择语言'
   }
 })
 
@@ -80,12 +84,16 @@ const onSearch = () => {
 
 <style scoped>
 .searchBar {
-  position: sticky;
-  top: 0;
-  z-index: 3;
-  background-color: #fff;
-  padding-bottom: 8px;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 12px;
+  padding-bottom: 6px;
   box-sizing: border-box;
+}
+
+.searchBar :deep(.input-with-select) {
+  flex: 1 1 560px;
 }
 
 .languageSelector {
@@ -97,16 +105,26 @@ const onSearch = () => {
 }
 
 .searchSummary {
-  margin-left: 10px;
-  color: var(--el-input-text-color, var(--el-text-color-regular));
-  font-size: 14px;
+  display: inline-flex;
+  align-items: center;
+  min-height: 38px;
+  padding: 0 14px;
+  border-radius: 999px;
+  background: rgba(47, 105, 101, 0.08);
+  color: var(--theme-text-muted);
+  font-size: 13px;
+  border: 1px solid rgba(47, 105, 101, 0.12);
 }
 
 @media (max-width: 720px) {
+  .searchBar :deep(.input-with-select) {
+    flex-basis: 100%;
+  }
+
   .searchSummary {
-    display: block;
-    margin-left: 0;
-    margin-top: 8px;
+    width: 100%;
+    min-height: 34px;
+    padding: 8px 12px;
   }
 }
 </style>

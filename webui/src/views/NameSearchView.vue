@@ -1,26 +1,33 @@
 <script setup>
-import { onBeforeMount, ref, computed } from 'vue'
-import { Search } from '@element-plus/icons-vue'
+import { onBeforeMount, ref, computed, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import api from '@/api/keywordQuery'
+import SearchBar from '@/components/SearchBar.vue'
 import StylizedText from '@/components/StylizedText.vue'
 import useLanguage from '@/composables/useLanguage'
 import useVersion from '@/composables/useVersion'
 import useSearchCommon from '@/composables/useSearchCommon'
+import formatText from '@/utils/formatText'
 
 const router = useRouter()
 
 const uiText = {
   pageTitle: '任务 / 可读物搜索',
   helpText: '输入任务名称、可读物标题或版本号，支持仅按版本筛选；搜索结果可直接跳转到详情页面。',
-  searchPlaceholder: '输入关键词或版本',
+  questSearchPlaceholder: '输入任务名称或版本',
+  readableSearchPlaceholder: '输入阅读物标题或版本',
   searchLanguage: '搜索语言',
   emptyInput: '请输入关键词、版本、出场角色或任务类别',
-  versionOnlySummary: '搜索耗时: {time}ms，仅按版本筛选；任务 {questCount} 条，可读物 {readableCount} 条',
-  summary: '搜索耗时: {time}ms，任务 {questCount} 条，可读物 {readableCount} 条',
+  readableEmptyInput: '请输入关键词、版本或阅读物类别',
+  questVersionOnlySummary: '搜索耗时: {time}ms，仅按版本筛选；任务 {count} 条',
+  questSummary: '搜索耗时: {time}ms，任务 {count} 条',
+  readableVersionOnlySummary: '搜索耗时: {time}ms，仅按版本筛选；阅读物 {count} 条',
+  readableSummary: '搜索耗时: {time}ms，阅读物 {count} 条',
   createdVersion: '创建版本',
   updatedVersion: '更新版本',
   speakerKeyword: '出场角色（可选）',
+  modeQuest: '任务',
+  modeReadable: '阅读物',
   questResults: '任务结果',
   noQuestResults: '没有找到任务结果',
   chapter: '章节',
@@ -30,9 +37,14 @@ const uiText = {
   viewDetails: '查看详情',
   readableResults: '可读物结果',
   noReadableResults: '没有找到可读物结果',
+  waitingResults: '等待检索',
+  category: '类别',
+  readableCategory: '阅读物类别',
 }
 
+const mode = ref('quest')
 const questSourceTypeFilter = ref('')
+const readableCategoryFilter = ref('')
 const speakerKeyword = ref('')
 const questSourceTypeOptions = [
   { value: '', label: '全部' },
@@ -45,10 +57,15 @@ const questSourceTypeOptions = [
   { value: 'ANECDOTE', label: '游逸旅闻' },
   { value: 'UNKNOWN', label: '未分类' },
 ]
-
-const formatText = (template, values) => {
-  return template.replace(/\{(\w+)\}/g, (_, key) => String(values[key] ?? ''))
-}
+const readableCategoryOptions = [
+  { value: '', label: '全部' },
+  { value: 'BOOK', label: '书籍' },
+  { value: 'COSTUME', label: '衣装' },
+  { value: 'RELIC', label: '圣遗物' },
+  { value: 'WEAPON', label: '武器' },
+  { value: 'WINGS', label: '风之翼' },
+  { value: 'OTHER', label: '其他' },
+]
 
 const {
   selectedInputLanguage,
@@ -75,11 +92,25 @@ const {
 
 const questResults = ref([])
 const readableResults = ref([])
+const hasSearched = ref(false)
+const lastSearchTime = ref(null)
 
 onBeforeMount(async () => {
   await loadLanguages()
   await loadVersionOptions()
 })
+
+const currentResultsTitle = computed(() => (mode.value === 'quest' ? uiText.questResults : uiText.readableResults))
+const currentResults = computed(() => (mode.value === 'quest' ? filteredQuestResults.value : filteredReadableResults.value))
+const currentSearchPlaceholder = computed(() => (
+  mode.value === 'quest' ? uiText.questSearchPlaceholder : uiText.readableSearchPlaceholder
+))
+const currentEmptyDescription = computed(() => {
+  if (!hasSearched.value) return uiText.waitingResults
+  return mode.value === 'quest' ? uiText.noQuestResults : uiText.noReadableResults
+})
+const showQuestSpecificFilters = computed(() => mode.value === 'quest')
+const showReadableSpecificFilters = computed(() => mode.value === 'readable')
 
 const filteredQuestResults = computed(() => {
   return questResults.value.filter(matchVersionFilter)
@@ -89,17 +120,64 @@ const filteredReadableResults = computed(() => {
   return readableResults.value.filter(matchVersionFilter)
 })
 
-const onSearchClicked = async () => {
+const getActiveQuestSourceType = () => (mode.value === 'quest' ? questSourceTypeFilter.value : '')
+const getActiveSpeakerKeyword = () => (mode.value === 'quest' ? speakerKeyword.value : '')
+const getActiveReadableCategory = () => (mode.value === 'readable' ? readableCategoryFilter.value : '')
+
+const hasModeSpecificFilters = () => {
   const keywordText = keyword.value.trim()
   const createdText = createdVersionFilter.value.trim()
   const updatedText = updatedVersionFilter.value.trim()
-  const sourceTypeText = questSourceTypeFilter.value.trim()
-  const speakerText = speakerKeyword.value.trim()
+  if (mode.value === 'quest') {
+    return Boolean(
+      keywordText ||
+      createdText ||
+      updatedText ||
+      questSourceTypeFilter.value.trim() ||
+      speakerKeyword.value.trim()
+    )
+  }
+  return Boolean(keywordText || createdText || updatedText || readableCategoryFilter.value.trim())
+}
 
-  if (!keywordText && !createdText && !updatedText && !sourceTypeText && !speakerText) {
-    searchSummary.value = uiText.emptyInput
+const updateSearchSummary = () => {
+  if (!hasSearched.value || lastSearchTime.value === null) {
+    return
+  }
+
+  const values = {
+    time: Number(lastSearchTime.value).toFixed(2),
+    count: mode.value === 'quest' ? questResults.value.length : readableResults.value.length,
+  }
+  const keywordText = keyword.value.trim()
+  const createdText = createdVersionFilter.value.trim()
+  const updatedText = updatedVersionFilter.value.trim()
+  const activeSpeakerText = getActiveSpeakerKeyword().trim()
+  const activeSourceType = getActiveQuestSourceType().trim()
+  const activeReadableCategory = getActiveReadableCategory().trim()
+  const isVersionOnly = !keywordText && !activeSpeakerText && !activeSourceType && !activeReadableCategory && (createdText || updatedText)
+
+  if (mode.value === 'quest') {
+    searchSummary.value = formatText(
+      isVersionOnly ? uiText.questVersionOnlySummary : uiText.questSummary,
+      values,
+    )
+    return
+  }
+
+  searchSummary.value = formatText(
+    isVersionOnly ? uiText.readableVersionOnlySummary : uiText.readableSummary,
+    values,
+  )
+}
+
+const onSearchClicked = async () => {
+  if (!hasModeSpecificFilters()) {
+    searchSummary.value = mode.value === 'quest' ? uiText.emptyInput : uiText.readableEmptyInput
     questResults.value = []
     readableResults.value = []
+    hasSearched.value = false
+    lastSearchTime.value = null
     return
   }
 
@@ -108,25 +186,32 @@ const onSearchClicked = async () => {
     selectedInputLanguage.value,
     createdVersionFilter.value,
     updatedVersionFilter.value,
-    questSourceTypeFilter.value,
-    speakerKeyword.value,
+    getActiveQuestSourceType(),
+    getActiveSpeakerKeyword(),
+    getActiveReadableCategory(),
   )).json
   const contents = ans.contents
   keywordLast.value = keyword.value
   questResults.value = contents.quests || []
   readableResults.value = contents.readables || []
+  hasSearched.value = true
+  lastSearchTime.value = ans.time
 
-  const summaryValues = {
-    time: ans.time.toFixed(2),
-    questCount: questResults.value.length,
-    readableCount: readableResults.value.length,
-  }
-  if (!keywordText && !speakerText && (createdText || updatedText)) {
-    searchSummary.value = formatText(uiText.versionOnlySummary, summaryValues)
-  } else {
-    searchSummary.value = formatText(uiText.summary, summaryValues)
-  }
+  updateSearchSummary()
 }
+
+watch(mode, async () => {
+  if (!hasModeSpecificFilters()) {
+    questResults.value = []
+    readableResults.value = []
+    hasSearched.value = false
+    lastSearchTime.value = null
+    searchSummary.value = mode.value === 'quest' ? uiText.emptyInput : uiText.readableEmptyInput
+    return
+  }
+
+  await onSearchClicked()
+})
 
 const gotoQuest = (questId) => {
   router.push({
@@ -155,196 +240,157 @@ setupVersionWatchers(onSearchClicked)
 </script>
 
 <template>
-  <div class="viewWrapper">
+  <div class="viewWrapper pageShell">
     <h1 class="pageTitle">{{ uiText.pageTitle }}</h1>
     <div class="helpText">
       <p>{{ uiText.helpText }}</p>
     </div>
 
-    <div class="searchBar">
-      <el-input
-        v-model="keyword"
-        style="max-width: 600px;"
-        :placeholder="uiText.searchPlaceholder"
-        class="input-with-select"
-        @keyup.enter.native="onSearchClicked"
-        clearable
-      >
-        <template #prepend>
-          <el-select v-model="selectedInputLanguage" :placeholder="uiText.searchLanguage" class="languageSelector">
-            <el-option v-for="(v, k) in supportedInputLanguage" :key="k" :label="v" :value="k" />
-          </el-select>
-        </template>
-        <template #append>
-          <el-button :icon="Search" @click="onSearchClicked" />
-        </template>
-      </el-input>
-      <span class="searchSummary">{{ searchSummary }}</span>
-    </div>
+    <div class="stickySearchSection">
+      <div class="filterTopRow">
+        <el-radio-group v-model="mode" size="large" class="modeSwitch">
+          <el-radio-button label="quest">{{ uiText.modeQuest }}</el-radio-button>
+          <el-radio-button label="readable">{{ uiText.modeReadable }}</el-radio-button>
+        </el-radio-group>
+      </div>
 
-    <div class="filterBar">
-      <el-input
-        v-model="speakerKeyword"
-        :placeholder="uiText.speakerKeyword"
-        class="speakerInput"
-        clearable
-        @keyup.enter.native="onSearchClicked"
+      <SearchBar
+        v-model:keyword="keyword"
+        v-model:selectedLanguage="selectedInputLanguage"
+        :supportedLanguages="supportedInputLanguage"
+        :summary="searchSummary"
+        :inputPlaceholder="currentSearchPlaceholder"
+        :languagePlaceholder="uiText.searchLanguage"
+        @search="onSearchClicked"
       />
-      <el-select v-model="createdVersionFilter" :placeholder="uiText.createdVersion" class="versionInput" clearable filterable>
-        <el-option v-for="version in versionOptions" :key="`created-${version}`" :label="version" :value="version" />
-      </el-select>
-      <el-select v-model="updatedVersionFilter" :placeholder="uiText.updatedVersion" class="versionInput" clearable filterable>
-        <el-option v-for="version in versionOptions" :key="`updated-${version}`" :label="version" :value="version" />
-      </el-select>
-      <el-select v-model="questSourceTypeFilter" placeholder="任务类别" class="versionInput" clearable>
-        <el-option
-          v-for="option in questSourceTypeOptions"
-          :key="`quest-type-${option.value || 'all'}`"
-          :label="option.label"
-          :value="option.value"
+
+      <div class="filterBar">
+        <el-input
+          v-if="showQuestSpecificFilters"
+          v-model="speakerKeyword"
+          :placeholder="uiText.speakerKeyword"
+          class="speakerInput"
+          clearable
+          @keyup.enter.native="onSearchClicked"
         />
-      </el-select>
-    </div>
-
-    <div class="searchSpacer"></div>
-
-    <div class="resultSection">
-      <h2>{{ uiText.questResults }}</h2>
-      <el-empty v-if="filteredQuestResults.length === 0" :description="uiText.noQuestResults" />
-      <div v-else class="resultGrid">
-        <el-card v-for="quest in filteredQuestResults" :key="quest.questId" class="resultCard">
-          <div class="cardTitle">
-            <StylizedText :text="quest.title" :keyword="keywordLast" />
-          </div>
-          <div v-if="quest.contentPreview" class="cardPreview">
-            <StylizedText :text="quest.contentPreview" :keyword="keywordLast" />
-          </div>
-          <div v-if="quest.chapterName" class="cardMeta">{{ uiText.chapter }}: {{ quest.chapterName }}</div>
-          <div class="cardMeta">{{ uiText.questId }}: {{ quest.questId }}</div>
-          <div class="versionTags">
-            <el-tag size="small" effect="plain">{{ uiText.created }}: {{ displayVersion(quest, 'created') }}</el-tag>
-            <el-tag v-if="showUpdatedVersionTag(quest)" size="small" effect="plain">{{ uiText.updated }}: {{ displayVersion(quest, 'updated') }}</el-tag>
-          </div>
-          <el-button size="small" type="primary" @click="gotoQuest(quest.questId)">{{ uiText.viewDetails }}</el-button>
-        </el-card>
+        <el-select v-model="createdVersionFilter" :placeholder="uiText.createdVersion" class="versionInput" clearable filterable>
+          <el-option v-for="version in versionOptions" :key="`created-${version}`" :label="version" :value="version" />
+        </el-select>
+        <el-select v-model="updatedVersionFilter" :placeholder="uiText.updatedVersion" class="versionInput" clearable filterable>
+          <el-option v-for="version in versionOptions" :key="`updated-${version}`" :label="version" :value="version" />
+        </el-select>
+        <el-select v-if="showQuestSpecificFilters" v-model="questSourceTypeFilter" placeholder="任务类别" class="versionInput" clearable>
+          <el-option
+            v-for="option in questSourceTypeOptions"
+            :key="`quest-type-${option.value || 'all'}`"
+            :label="option.label"
+            :value="option.value"
+          />
+        </el-select>
+        <el-select v-if="showReadableSpecificFilters" v-model="readableCategoryFilter" :placeholder="uiText.readableCategory" class="versionInput" clearable>
+          <el-option
+            v-for="option in readableCategoryOptions"
+            :key="`readable-type-${option.value || 'all'}`"
+            :label="option.label"
+            :value="option.value"
+          />
+        </el-select>
       </div>
     </div>
 
-    <div class="resultSection">
-      <h2>{{ uiText.readableResults }}</h2>
-      <el-empty v-if="filteredReadableResults.length === 0" :description="uiText.noReadableResults" />
-      <div v-else class="resultGrid">
-        <el-card v-for="readable in filteredReadableResults" :key="`${readable.readableId}-${readable.fileName}`" class="resultCard">
-          <div class="cardTitle">
-            <StylizedText :text="readable.title" :keyword="keywordLast" />
-          </div>
-          <div v-if="readable.contentPreview" class="cardPreview">
-            <StylizedText :text="readable.contentPreview" :keyword="keywordLast" />
-          </div>
-          <div class="versionTags">
-            <el-tag size="small" effect="plain">{{ uiText.created }}: {{ displayVersion(readable, 'created') }}</el-tag>
-            <el-tag v-if="showUpdatedVersionTag(readable)" size="small" effect="plain">{{ uiText.updated }}: {{ displayVersion(readable, 'updated') }}</el-tag>
-          </div>
-          <el-button size="small" type="primary" @click="gotoReadable(readable)">{{ uiText.viewDetails }}</el-button>
-        </el-card>
+    <div class="resultSection resultsSection">
+      <h2 class="resultsSectionTitle">{{ currentResultsTitle }}</h2>
+      <el-empty v-if="currentResults.length === 0" :description="currentEmptyDescription" />
+      <div v-else class="resultGrid cardGrid">
+        <template v-if="mode === 'quest'">
+          <el-card v-for="quest in currentResults" :key="quest.questId" class="resultCard cardPanel">
+            <div class="cardTitle cardTitleText">
+              <StylizedText :text="quest.title" :keyword="keywordLast" />
+            </div>
+            <div v-if="quest.contentPreview" class="cardPreview">
+              <StylizedText :text="quest.contentPreview" :keyword="keywordLast" />
+            </div>
+            <div v-if="quest.chapterName" class="cardMeta cardMetaText">{{ uiText.chapter }}: {{ quest.chapterName }}</div>
+            <div class="cardMeta cardMetaText">{{ uiText.questId }}: {{ quest.questId }}</div>
+            <div class="versionTags tagRow">
+              <el-tag v-if="quest.sourceTypeLabel" size="small" effect="plain" type="success">{{ quest.sourceTypeLabel }}</el-tag>
+              <el-tag size="small" effect="plain">{{ uiText.created }}: {{ displayVersion(quest, 'created') }}</el-tag>
+              <el-tag v-if="showUpdatedVersionTag(quest)" size="small" effect="plain">{{ uiText.updated }}: {{ displayVersion(quest, 'updated') }}</el-tag>
+            </div>
+            <el-button size="small" type="primary" @click="gotoQuest(quest.questId)">{{ uiText.viewDetails }}</el-button>
+          </el-card>
+        </template>
+
+        <template v-else>
+          <el-card v-for="readable in currentResults" :key="`${readable.readableId}-${readable.fileName}`" class="resultCard cardPanel">
+            <div class="cardTitle cardTitleText">
+              <StylizedText :text="readable.title" :keyword="keywordLast" />
+            </div>
+            <div v-if="readable.contentPreview" class="cardPreview">
+              <StylizedText :text="readable.contentPreview" :keyword="keywordLast" />
+            </div>
+            <div class="versionTags tagRow">
+              <el-tag v-if="readable.readableCategoryLabel" size="small" effect="plain" type="success">{{ readable.readableCategoryLabel }}</el-tag>
+              <el-tag size="small" effect="plain">{{ uiText.created }}: {{ displayVersion(readable, 'created') }}</el-tag>
+              <el-tag v-if="showUpdatedVersionTag(readable)" size="small" effect="plain">{{ uiText.updated }}: {{ displayVersion(readable, 'updated') }}</el-tag>
+            </div>
+            <el-button size="small" type="primary" @click="gotoReadable(readable)">{{ uiText.viewDetails }}</el-button>
+          </el-card>
+        </template>
       </div>
     </div>
   </div>
 </template>
 
 <style scoped>
-.viewWrapper {
-  position: relative;
-  width: var(--page-width);
-  margin: 0 auto;
-  background-color: #fff;
-  box-shadow: var(--page-shadow);
-  border-radius: var(--page-radius);
-  padding: var(--page-padding);
-  overflow: visible;
+.filterTopRow {
+  display: flex;
+  margin-bottom: 10px;
 }
 
-.pageTitle {
-  border-bottom: 1px #ccc solid;
-  padding-bottom: 10px;
+.modeSwitch {
+  display: inline-flex;
+  flex-wrap: wrap;
 }
 
-.helpText {
-  margin: 20px 0;
-  color: #999;
+.modeSwitch:deep(.el-radio-button__inner) {
+  min-width: 96px;
+  background: rgba(255, 251, 244, 0.9);
+  border-color: rgba(190, 164, 124, 0.32);
+  color: var(--theme-text-muted);
+  box-shadow: none;
 }
 
-.searchBar {
-  position: sticky;
-  top: 0;
-  z-index: 3;
-  background-color: #fff;
-  padding-bottom: 8px;
-  box-sizing: border-box;
+.modeSwitch:deep(.el-radio-button__inner:hover) {
+  color: var(--theme-primary);
 }
 
-.languageSelector {
-  width: 120px;
-}
-
-.languageSelector:deep(input) {
-  text-align: center;
-}
-
-.searchSummary {
-  margin-left: 10px;
-  color: var(--el-input-text-color, var(--el-text-color-regular));
-  font-size: 14px;
-}
-
-.searchSpacer {
-  display: none;
+.modeSwitch:deep(.el-radio-button__original-radio:checked + .el-radio-button__inner) {
+  background: linear-gradient(135deg, var(--theme-primary), var(--theme-primary-strong));
+  border-color: transparent;
+  color: #fff;
+  box-shadow: 0 10px 18px rgba(var(--theme-primary-rgb), 0.18);
 }
 
 .filterBar {
   display: flex;
   flex-wrap: wrap;
-  gap: 8px;
+  gap: 10px;
   width: 100%;
-  max-width: 960px;
-  margin: 10px 0 6px;
+  max-width: 100%;
 }
 
 .versionInput {
-  width: 180px;
+  width: 188px;
 }
 
 .speakerInput {
-  width: 180px;
-  min-width: 180px;
-}
-
-.resultSection {
-  margin-top: 20px;
-}
-
-.resultSection h2 {
-  margin-bottom: 12px;
-}
-
-.resultGrid {
-  display: grid;
-  gap: 12px;
-  grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
-}
-
-.resultCard {
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-}
-
-.cardTitle {
-  font-weight: 600;
+  width: 188px;
+  min-width: 188px;
 }
 
 .cardPreview {
-  color: #666;
+  color: var(--theme-text-muted);
   font-size: 13px;
   line-height: 1.6;
 }
@@ -357,27 +403,4 @@ setupVersionWatchers(onSearchClicked)
   margin: 0;
 }
 
-.cardMeta {
-  color: #888;
-  font-size: 13px;
-}
-
-.versionTags {
-  display: flex;
-  gap: 6px;
-  flex-wrap: wrap;
-}
-
-@media (max-width: 720px) {
-  .searchSummary {
-    display: block;
-    margin-left: 0;
-    margin-top: 8px;
-  }
-
-  .searchSpacer {
-    display: none;
-    height: 0;
-  }
-}
 </style>

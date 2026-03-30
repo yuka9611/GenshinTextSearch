@@ -1756,6 +1756,25 @@ _QUEST_SOURCE_TYPE_FILTERS = {
     "UNKNOWN",
 }
 
+READABLE_CATEGORY_LABELS = {
+    "BOOK": "书籍",
+    "COSTUME": "衣装",
+    "RELIC": "圣遗物",
+    "WEAPON": "武器",
+    "WINGS": "风之翼",
+    "OTHER": "其他",
+}
+
+_READABLE_CATEGORY_PREFIXES = (
+    ("BOOK", "Book"),
+    ("COSTUME", "Costume"),
+    ("RELIC", "Relic"),
+    ("WEAPON", "Weapon"),
+    ("WINGS", "Wings"),
+)
+
+_READABLE_CATEGORY_FILTERS = set(READABLE_CATEGORY_LABELS.keys())
+
 
 def _normalize_quest_source_type_filter(source_type: str | None) -> str | None:
     if source_type is None:
@@ -1782,6 +1801,54 @@ def _append_quest_source_type_filter_clause(
     if not _table_has_column("quest", "source_type"):
         return sql + "and 1=0 "
     sql += f"and {table_alias}.source_type = ? "
+    params.append(normalized)
+    return sql
+
+
+def getReadableCategoryCode(file_name: str | None) -> str:
+    normalized_name = str(file_name or "").strip()
+    for code, prefix in _READABLE_CATEGORY_PREFIXES:
+        if normalized_name.startswith(prefix):
+            return code
+    return "OTHER"
+
+
+def _normalize_readable_category_filter(category: str | None) -> str | None:
+    if category is None:
+        return None
+    normalized = str(category).strip().upper()
+    if not normalized:
+        return None
+    if normalized in _READABLE_CATEGORY_FILTERS:
+        return normalized
+    return "__INVALID__"
+
+
+def _readable_category_case_expr(table_alias: str) -> str:
+    file_name_expr = f"{table_alias}.fileName"
+    return (
+        f"case "
+        f"when {file_name_expr} glob 'Book*' then 'BOOK' "
+        f"when {file_name_expr} glob 'Costume*' then 'COSTUME' "
+        f"when {file_name_expr} glob 'Relic*' then 'RELIC' "
+        f"when {file_name_expr} glob 'Weapon*' then 'WEAPON' "
+        f"when {file_name_expr} glob 'Wings*' then 'WINGS' "
+        f"else 'OTHER' end"
+    )
+
+
+def _append_readable_category_filter_clause(
+    sql: str,
+    params: list,
+    table_alias: str,
+    category: str | None,
+) -> str:
+    normalized = _normalize_readable_category_filter(category)
+    if normalized is None:
+        return sql
+    if normalized == "__INVALID__":
+        return sql + "and 1=0 "
+    sql += f"and {_readable_category_case_expr(table_alias)} = ? "
     params.append(normalized)
     return sql
 
@@ -2852,6 +2919,7 @@ def selectReadableFromKeyword(
     offset: int | None = None,
     created_version: str | None = None,
     updated_version: str | None = None,
+    category: str | None = None,
 ):
     with closing(conn.cursor()) as cursor:
         exact, fuzzy = _build_like_patterns(keyword, langCode)
@@ -2879,6 +2947,7 @@ def selectReadableFromKeyword(
             updated_version,
             "readable",
         )
+        sql = _append_readable_category_filter_clause(sql, params, "readable", category)
         sql += f"order by {match_sort_sql}, {normalized_length_sql} "
         params.extend(match_sort_params)
         if limit is not None:
@@ -3042,10 +3111,11 @@ def selectQuestByTitleKeyword(
     with closing(conn.cursor()) as cursor:
         exact, fuzzy = _build_like_patterns(keyword, langCode)
         version_select = _version_select_expr("quest", "quest", langCode)
+        source_type_select = "quest.source_type" if _table_has_column("quest", "source_type") else "NULL"
         match_sort_sql, match_sort_params = _build_match_sort_case("textMap.content", keyword, langCode)
         normalized_length_sql = f"length({_build_normalized_match_expr('textMap.content', langCode)})"
         sql = (
-            f"select quest.questId, textMap.content, {version_select} from quest "
+            f"select quest.questId, textMap.content, {source_type_select} as source_type, {version_select} from quest "
             "join textMap on quest.titleTextMapHash=textMap.hash "
             "where textMap.lang=? and (textMap.content like ? escape '\\' or textMap.content like ? escape '\\') "
         )
@@ -3079,10 +3149,11 @@ def selectQuestByIdContains(
         escaped = _escape_like(keyword)
         pattern = f"%{escaped}%"
         version_select = _version_select_expr("quest", "quest", langCode)
+        source_type_select = "quest.source_type" if _table_has_column("quest", "source_type") else "NULL"
         match_sort_sql, match_sort_params = _build_match_sort_case("cast(quest.questId as text)", keyword, langCode)
         normalized_length_sql = f"length({_build_normalized_match_expr('cast(quest.questId as text)', langCode)})"
         sql = (
-            f"select quest.questId, textMap.content, {version_select} "
+            f"select quest.questId, textMap.content, {source_type_select} as source_type, {version_select} "
             "from quest "
             "left join textMap on quest.titleTextMapHash=textMap.hash and textMap.lang=? "
             "where cast(quest.questId as text) like ? escape '\\' "
@@ -3114,6 +3185,7 @@ def selectQuestByContentKeyword(
     with closing(conn.cursor()) as cursor:
         exact, fuzzy = _build_like_patterns(keyword, langCode)
         version_select = _version_select_expr("quest", "quest", langCode)
+        source_type_select = "quest.source_type" if _table_has_column("quest", "source_type") else "NULL"
         match_sql_parts: list[str] = []
         if _table_has_column("quest", "descTextMapHash"):
             match_sql_parts.append(
@@ -3146,7 +3218,7 @@ def selectQuestByContentKeyword(
             f"select quest.questId, quest.titleTextMapHash, titleText.content, "
             "(select min(m2.matched_text) from matched m2 "
             "where m2.questId=ranked.questId and m2.match_rank=ranked.best_rank) as matched_text, "
-            f"{version_select}, ranked.best_rank "
+            f"{source_type_select} as source_type, {version_select}, ranked.best_rank "
             "from ranked "
             "join quest on ranked.questId=quest.questId "
             "left join textMap titleText on quest.titleTextMapHash=titleText.hash and titleText.lang=? "
@@ -3180,8 +3252,10 @@ def selectQuestByNpcSpeakerKeyword(
     with closing(conn.cursor()) as cursor:
         exact, fuzzy = _build_like_patterns(keyword, langCode)
         version_select = _version_select_expr("quest", "quest", langCode)
+        source_type_select = "quest.source_type" if _table_has_column("quest", "source_type") else "NULL"
         sql = (
             "select distinct quest.questId, titleText.content, "
+            f"{source_type_select} as source_type, "
             f"{version_select} "
             "from quest "
             "join questTalk qt on qt.questId = quest.questId "
@@ -3218,8 +3292,10 @@ def selectQuestByTalkerType(
 ):
     with closing(conn.cursor()) as cursor:
         version_select = _version_select_expr("quest", "quest", langCode)
+        source_type_select = "quest.source_type" if _table_has_column("quest", "source_type") else "NULL"
         sql = (
             "select distinct quest.questId, titleText.content, "
+            f"{source_type_select} as source_type, "
             f"{version_select} "
             "from quest "
             "join questTalk qt on qt.questId = quest.questId "
@@ -4005,8 +4081,10 @@ def selectQuestByChapterKeyword(
     with closing(conn.cursor()) as cursor:
         exact, fuzzy = _build_like_patterns(keyword, langCode)
         version_select = _version_select_expr("quest", "quest", langCode)
+        source_type_select = "quest.source_type" if _table_has_column("quest", "source_type") else "NULL"
         sql = (
             "select quest.questId, questTitle.content, chapterTitle.content, chapterNum.content, "
+            f"{source_type_select} as source_type, "
             f"{version_select} "
             "from quest "
             "join textMap as questTitle on quest.titleTextMapHash=questTitle.hash "
@@ -4151,6 +4229,7 @@ def selectReadableByTitleKeyword(
     langStr: str,
     created_version: str | None = None,
     updated_version: str | None = None,
+    category: str | None = None,
 ):
     with closing(conn.cursor()) as cursor:
         exact, fuzzy = _build_like_patterns(keyword, langCode)
@@ -4176,6 +4255,7 @@ def selectReadableByTitleKeyword(
             updated_version,
             "readable",
         )
+        sql = _append_readable_category_filter_clause(sql, params, "readable", category)
         sql += ("group by readable.fileName, readable.readableId, readable.titleTextMapHash, textMap.content, "
                 f"{version_group} "
                 f"order by {match_sort_sql}, {normalized_length_sql} "
@@ -4191,6 +4271,7 @@ def selectReadableByFileNameContains(
     langStr: str,
     created_version: str | None = None,
     updated_version: str | None = None,
+    category: str | None = None,
 ):
     with closing(conn.cursor()) as cursor:
         escaped = _escape_like(keyword)
@@ -4219,6 +4300,7 @@ def selectReadableByFileNameContains(
             updated_version,
             "readable",
         )
+        sql = _append_readable_category_filter_clause(sql, params, "readable", category)
         sql += ("group by readable.fileName, readable.readableId, readable.titleTextMapHash, textMap.content, "
                 f"{version_group} "
                 f"order by {match_sort_sql}, {normalized_length_sql} "
@@ -4237,8 +4319,9 @@ def selectQuestByVersion(
 ):
     with closing(conn.cursor()) as cursor:
         version_select = _version_select_expr("quest", "quest", langCode)
+        source_type_select = "quest.source_type" if _table_has_column("quest", "source_type") else "NULL"
         sql = (
-            f"select quest.questId, textMap.content, {version_select} "
+            f"select quest.questId, textMap.content, {source_type_select} as source_type, {version_select} "
             "from quest "
             "left join textMap on quest.titleTextMapHash=textMap.hash and textMap.lang=? "
             "where 1=1 "
@@ -4268,6 +4351,7 @@ def selectReadableByVersion(
     created_version: str | None = None,
     updated_version: str | None = None,
     limit: int | None = 2000,
+    category: str | None = None,
 ):
     with closing(conn.cursor()) as cursor:
         readable_langs = _expand_readable_langs([langStr])
@@ -4291,6 +4375,7 @@ def selectReadableByVersion(
             updated_version,
             "readable",
         )
+        sql = _append_readable_category_filter_clause(sql, params, "readable", category)
         sql += "order by readable.readableId, readable.fileName "
         if limit is not None:
             sql += "limit ?"
