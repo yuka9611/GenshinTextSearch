@@ -1,48 +1,48 @@
 <template>
-    <div class="viewWrapper">
+    <div class="viewWrapper pageShell pageShell--compact">
         <h1 class="pageTitle">关键词搜索</h1>
         <div class="helpText">
             <p>支持关键词、说话人、语音存在性、创建版本、更新版本组合筛选。</p>
             <p>当关键词留空时，只要填写了版本或说话人也可以查询。</p>
         </div>
 
-        <SearchBar
-            v-model:keyword="keyword"
-            v-model:selectedLanguage="selectedInputLanguage"
-            :supportedLanguages="supportedInputLanguage"
-            :summary="searchSummary"
-            @search="onQueryButtonClicked"
-        />
-
-        <div class="searchBarAdditional">
-            <el-input
-                v-model="speakerKeyword"
-                placeholder="说话人（可选）"
-                class="speakerInput"
-                @keyup.enter.native="onQueryButtonClicked"
-                clearable
-            />
-
-            <el-select
-                v-model="voiceFilter"
-                class="voiceFilter"
-                placeholder="语音筛选"
-                @change="onQueryButtonClicked"
-            >
-                <el-option label="全部(语音)" value="all" />
-                <el-option label="有语音" value="with" />
-                <el-option label="无语音" value="without" />
-            </el-select>
-
-            <VersionFilter
-                v-model:createdVersion="createdVersionFilter"
-                v-model:updatedVersion="updatedVersionFilter"
-                :versionOptions="versionOptions"
+        <div class="stickySearchSection">
+            <SearchBar
+                v-model:keyword="keyword"
+                v-model:selectedLanguage="selectedInputLanguage"
+                :supportedLanguages="supportedInputLanguage"
+                :summary="searchSummary"
                 @search="onQueryButtonClicked"
             />
-        </div>
 
-        <div class="searchSpacer"></div>
+            <div class="searchBarAdditional">
+                <el-input
+                    v-model="speakerKeyword"
+                    placeholder="说话人（可选）"
+                    class="speakerInput"
+                    @keyup.enter.native="onQueryButtonClicked"
+                    clearable
+                />
+
+                <el-select
+                    v-model="voiceFilter"
+                    class="voiceFilter"
+                    placeholder="语音筛选"
+                    @change="onQueryButtonClicked"
+                >
+                    <el-option label="全部(语音)" value="all" />
+                    <el-option label="有语音" value="with" />
+                    <el-option label="无语音" value="without" />
+                </el-select>
+
+                <VersionFilter
+                    v-model:createdVersion="createdVersionFilter"
+                    v-model:updatedVersion="updatedVersionFilter"
+                    :versionOptions="versionOptions"
+                    @search="onQueryButtonClicked"
+                />
+            </div>
+        </div>
 
         <div class="resultControls" v-if="totalCount > 0">
             <span class="resultCount">共 {{ totalCount }} 条，当前 {{ currentPage }} / {{ totalPages }} 页</span>
@@ -65,7 +65,7 @@
                 v-for="translate in queryResult"
                 :key="`${translate.hash}-${translate.origin || ''}`"
                 :translate-obj="translate"
-                class="translate"
+                class="translate textResultItem"
                 @onVoicePlay="onVoicePlay"
                 :keyword="keywordLast"
                 :search-lang="searchLangLast"
@@ -81,8 +81,8 @@
         </div>
     </div>
 
-    <div class="viewWrapper voicePlayerContainer" v-show="showPlayer && queryResult.length > 0">
-        <span class="hideIcon" @click="onHidePlayerButtonClicked">
+    <div class="viewWrapper pageShell pageShell--compact voicePlayerContainer audioDock" v-show="showPlayer && queryResult.length > 0">
+        <span class="hideIcon audioDockClose" @click="onHidePlayerButtonClicked">
             <el-icon>
                 <Close />
             </el-icon>
@@ -99,14 +99,14 @@
         />
     </div>
 
-    <div class="showPlayerButton" @click="onShowPlayerButtonClicked" v-show="!showPlayer && queryResult.length > 0">
+    <div class="showPlayerButton audioDockToggle" @click="onShowPlayerButtonClicked" v-show="!showPlayer && queryResult.length > 0">
         <i class="fi fi-sr-waveform-path"></i>
     </div>
 </template>
 
 <script setup>
 import { onBeforeMount } from 'vue'
-import { Close, Search } from '@element-plus/icons-vue'
+import { Close } from '@element-plus/icons-vue'
 import TranslateDisplay from '@/components/ResultEntry.vue'
 import AudioPlayer from '@liripeng/vue-audio-player'
 import SearchBar from '@/components/SearchBar.vue'
@@ -156,17 +156,6 @@ onBeforeMount(async () => {
 </script>
 
 <style scoped>
-.viewWrapper {
-    position: relative;
-    width: var(--page-width);
-    margin: 0 auto;
-    background-color: #fff;
-    box-shadow: var(--page-shadow);
-    border-radius: var(--page-radius);
-    padding: var(--page-padding-compact);
-    overflow: visible;
-}
-
 .languageSelector {
     width: 120px;
 }
@@ -175,83 +164,13 @@ onBeforeMount(async () => {
     text-align: center;
 }
 
-.translate:not(:last-child) {
-    border-bottom: 1px solid #ccc;
-}
-
-.voicePlayerContainer {
-    margin-top: 10px;
-    bottom: 0;
-    position: sticky !important;
-    box-shadow: 0 0 5px 5px rgba(36, 37, 38, .05);
-    z-index: 3;
-    background-color: #fff;
-}
-
-.showPlayerButton {
-    position: absolute;
-    right: 7.5%;
-    bottom: 80px;
-    height: 70px;
-    width: 70px;
-    border-radius: 50%;
-    background-color: var(--el-color-primary);
-    color: #fff;
-    font-size: 25px;
-    box-shadow: 0 6px 15px rgba(36, 37, 38, .2);
-    text-align: center;
-    line-height: 75px;
-    cursor: pointer;
-    z-index: 3;
-}
-
-.showPlayerButton:hover {
-    background-color: var(--el-color-primary-light-3);
-}
-
-.hideIcon {
-    cursor: pointer;
-    position: absolute;
-    top: 10px;
-    right: 10px;
-}
-
-.hideIcon:hover {
-    color: #888;
-}
-
-.pageTitle {
-    border-bottom: 1px #ccc solid;
-    padding-bottom: 10px;
-}
-
-.helpText {
-    margin: 8px 0 12px;
-    color: #999;
-}
-
-.searchBar {
-    position: sticky;
-    top: 0;
-    z-index: 3;
-    background-color: #fff;
-    padding-bottom: 8px;
-    box-sizing: border-box;
-}
-
-.searchSummary {
-    margin-left: 10px;
-    color: var(--el-input-text-color, var(--el-text-color-regular));
-    font-size: 14px;
-}
-
 .searchBarAdditional {
     display: flex;
     align-items: flex-start;
     flex-wrap: wrap;
-    gap: 8px;
+    gap: 10px;
     width: 100%;
-    max-width: 960px;
+    max-width: 100%;
 }
 
 .speakerInput {
@@ -273,40 +192,36 @@ onBeforeMount(async () => {
     margin-top: 0;
 }
 
-.searchSpacer {
-    display: none;
-}
-
 .resultControls {
     display: flex;
     align-items: center;
     gap: 8px;
     flex-wrap: wrap;
-    margin: 6px 0 12px;
-    color: #666;
+    margin: 2px 0 4px;
+    padding: 12px 14px;
+    border-radius: 18px;
+    border: 1px solid rgba(190, 164, 124, 0.28);
+    background: rgba(255, 255, 255, 0.46);
+    color: var(--theme-text-muted);
     font-size: 13px;
 }
 
 .resultCount {
     margin-right: 4px;
+    font-weight: 600;
+    color: var(--theme-text);
 }
 
 .loading-container {
-    padding: 20px 0;
+    padding: 12px 0;
 }
 
 .no-results {
-    padding: 40px 0;
+    padding: 16px 0 8px;
     text-align: center;
 }
 
 @media (max-width: 720px) {
-    .searchSummary {
-        display: block;
-        margin-left: 0;
-        margin-top: 8px;
-    }
-
     .speakerInput,
     .voiceFilter {
         flex-basis: calc(50% - 4px);
@@ -316,35 +231,6 @@ onBeforeMount(async () => {
     :deep(.versionFilterGroup) {
         flex-basis: 100%;
         min-width: 0;
-    }
-
-    .searchSpacer {
-        display: none;
-        height: 0;
-    }
-
-    .voicePlayerContainer {
-        position: fixed !important;
-        left: 8px;
-        right: 8px;
-        bottom: 0;
-        width: auto;
-        margin-top: 0;
-        border-radius: 0;
-        z-index: 3;
-        box-sizing: border-box;
-        box-shadow: none;
-    }
-
-    .showPlayerButton {
-        position: fixed;
-        right: 16px;
-        bottom: 24px;
-        width: 56px;
-        height: 56px;
-        line-height: 60px;
-        z-index: 3;
-        box-shadow: none;
     }
 
     .loading-container {

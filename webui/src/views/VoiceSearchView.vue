@@ -1,8 +1,9 @@
 <script setup>
 import { onBeforeMount, ref, computed, reactive, watch } from 'vue'
-import { Search, Close } from '@element-plus/icons-vue'
+import { Close } from '@element-plus/icons-vue'
 import global from '@/global/global'
 import api from '@/api/keywordQuery'
+import SearchBar from '@/components/SearchBar.vue'
 import TranslateDisplay from '@/components/ResultEntry.vue'
 import AudioPlayer from '@liripeng/vue-audio-player'
 import * as converter from '@/assets/wem2wav'
@@ -10,6 +11,7 @@ import { ElMessage } from 'element-plus'
 import useLanguage from '@/composables/useLanguage'
 import useVersion from '@/composables/useVersion'
 import useSearchCommon from '@/composables/useSearchCommon'
+import formatText from '@/utils/formatText'
 
 const uiText = {
   pageTitle: '角色语音搜索',
@@ -47,10 +49,6 @@ const uiText = {
   audioUnavailable: '当前语言暂无语音',
   audioMissing: '未找到语音文件',
   noPlayableAudio: '所选语言没有可播放的语音',
-}
-
-const formatText = (template, values) => {
-  return template.replace(/\{(\w+)\}/g, (_, key) => String(values[key] ?? ''))
 }
 
 const {
@@ -435,53 +433,42 @@ setupVersionWatchers(onSearchClicked)
 </script>
 
 <template>
-  <div class="viewWrapper">
+  <div class="viewWrapper pageShell">
     <h1 class="pageTitle">{{ uiText.pageTitle }}</h1>
     <div class="helpText">
       <p>{{ uiText.helpLine1 }}</p>
       <p>{{ uiText.helpLine2 }}</p>
     </div>
 
-    <div class="searchBar">
-      <el-input
-        v-model="keyword"
-        style="max-width: 600px;"
-        :placeholder="uiText.avatarPlaceholder"
-        class="input-with-select"
-        @keyup.enter.native="onSearchClicked"
-        clearable
-      >
-        <template #prepend>
-          <el-select v-model="selectedInputLanguage" :placeholder="uiText.searchLanguage" class="languageSelector">
-            <el-option v-for="(v, k) in supportedInputLanguage" :key="k" :label="v" :value="k" />
-          </el-select>
-        </template>
-        <template #append>
-          <el-button :icon="Search" @click="onSearchClicked" />
-        </template>
-      </el-input>
-      <span class="searchSummary">{{ searchSummary }}</span>
+    <div class="stickySearchSection">
+      <SearchBar
+        v-model:keyword="keyword"
+        v-model:selectedLanguage="selectedInputLanguage"
+        :supportedLanguages="supportedInputLanguage"
+        :summary="searchSummary"
+        :inputPlaceholder="uiText.avatarPlaceholder"
+        :languagePlaceholder="uiText.searchLanguage"
+        @search="onSearchClicked"
+      />
+
+      <div class="filterBar topFilterBar">
+        <el-input v-model="textFilter" :placeholder="uiText.titlePlaceholder" class="filterInput" clearable @keyup.enter.native="onSearchClicked" />
+        <el-select v-model="createdVersionFilter" :placeholder="uiText.createdVersion" class="versionInput" clearable filterable>
+          <el-option v-for="version in versionOptions" :key="`created-${version}`" :label="version" :value="version" />
+        </el-select>
+        <el-select v-model="updatedVersionFilter" :placeholder="uiText.updatedVersion" class="versionInput" clearable filterable>
+          <el-option v-for="version in versionOptions" :key="`updated-${version}`" :label="version" :value="version" />
+        </el-select>
+      </div>
     </div>
 
-    <div class="filterBar topFilterBar">
-      <el-input v-model="textFilter" :placeholder="uiText.titlePlaceholder" class="filterInput" clearable @keyup.enter.native="onSearchClicked" />
-      <el-select v-model="createdVersionFilter" :placeholder="uiText.createdVersion" class="versionInput" clearable filterable>
-        <el-option v-for="version in versionOptions" :key="`created-${version}`" :label="version" :value="version" />
-      </el-select>
-      <el-select v-model="updatedVersionFilter" :placeholder="uiText.updatedVersion" class="versionInput" clearable filterable>
-        <el-option v-for="version in versionOptions" :key="`updated-${version}`" :label="version" :value="version" />
-      </el-select>
-    </div>
-
-    <div class="searchSpacer"></div>
-
-    <div v-if="keyword.trim() || textFilter.trim() || createdVersionFilter.trim() || updatedVersionFilter.trim()" class="resultSection">
-      <h2>{{ uiText.avatarResults }}</h2>
+    <div v-if="keyword.trim() || textFilter.trim() || createdVersionFilter.trim() || updatedVersionFilter.trim()" class="resultSection resultsSection">
+      <h2 class="resultsSectionTitle">{{ uiText.avatarResults }}</h2>
       <el-empty v-if="avatarResults.length === 0" :description="uiText.noAvatarResults" />
-      <div v-else class="resultGrid">
-        <el-card v-for="avatar in avatarResults" :key="avatar.avatarId" class="resultCard">
-          <div class="cardTitle">{{ avatar.name }}</div>
-          <div class="cardMeta">{{ uiText.avatarId }}: {{ avatar.avatarId }}</div>
+      <div v-else class="resultGrid cardGrid">
+        <el-card v-for="avatar in avatarResults" :key="avatar.avatarId" class="resultCard cardPanel">
+          <div class="cardTitle cardTitleText">{{ avatar.name }}</div>
+          <div class="cardMeta cardMetaText">{{ uiText.avatarId }}: {{ avatar.avatarId }}</div>
           <el-button size="small" type="primary" @click="onAvatarClicked(avatar)">
             {{ uiText.viewVoices }}
           </el-button>
@@ -489,8 +476,8 @@ setupVersionWatchers(onSearchClicked)
       </div>
     </div>
 
-    <div class="resultSection">
-      <h2 v-if="selectedAvatar">{{ uiText.voiceResults }} - {{ selectedAvatar.name }}</h2>
+    <div class="resultSection resultsSection">
+      <h2 v-if="selectedAvatar" class="resultsSectionTitle">{{ uiText.voiceResults }} - {{ selectedAvatar.name }}</h2>
       <div v-if="voiceSummary" class="voiceSummary">{{ voiceSummary }}</div>
 
       <div v-if="selectedAvatar" class="filterBar">
@@ -522,15 +509,15 @@ setupVersionWatchers(onSearchClicked)
           :translate-obj="voice"
           :keyword="highlightKeyword"
           :search-lang="selectedInputLanguage"
-          class="translate"
+          class="translate textResultItem"
           @onVoicePlay="onVoicePlay"
         />
       </div>
     </div>
   </div>
 
-  <div v-if="audio.length > 0" v-show="showPlayer" class="viewWrapper voicePlayerContainer">
-    <span class="hideIcon" @click="onHidePlayerButtonClicked">
+  <div v-if="audio.length > 0" v-show="showPlayer" class="viewWrapper pageShell voicePlayerContainer audioDock">
+    <span class="hideIcon audioDockClose" @click="onHidePlayerButtonClicked">
       <el-icon>
         <Close />
       </el-icon>
@@ -547,7 +534,7 @@ setupVersionWatchers(onSearchClicked)
     />
   </div>
 
-  <div v-show="!showPlayer && audio.length > 0" class="showPlayerButton" @click="onShowPlayerButtonClicked">
+  <div v-show="!showPlayer && audio.length > 0" class="showPlayerButton audioDockToggle" @click="onShowPlayerButtonClicked">
     <i class="fi fi-sr-waveform-path"></i>
   </div>
 
@@ -559,100 +546,21 @@ setupVersionWatchers(onSearchClicked)
 </template>
 
 <style scoped>
-.viewWrapper {
-  position: relative;
-  width: var(--page-width);
-  margin: 0 auto;
-  background-color: #fff;
-  box-shadow: var(--page-shadow);
-  border-radius: var(--page-radius);
-  padding: var(--page-padding);
-  overflow: visible;
-}
-
-.pageTitle {
-  border-bottom: 1px #ccc solid;
-  padding-bottom: 10px;
-}
-
-.helpText {
-  margin: 20px 0;
-  color: #999;
-}
-
-.searchBar {
-  position: sticky;
-  top: 0;
-  z-index: 3;
-  background-color: #fff;
-  padding-bottom: 8px;
-  box-sizing: border-box;
-}
-
-.languageSelector {
-  width: 120px;
-}
-
-.languageSelector:deep(input) {
-  text-align: center;
-}
-
-.searchSummary {
-  margin-left: 10px;
-  color: var(--el-input-text-color, var(--el-text-color-regular));
-  font-size: 14px;
-}
-
-.searchSpacer {
-  display: none;
-}
-
-.resultSection {
-  margin-top: 20px;
-}
-
-.resultSection h2 {
-  margin-bottom: 12px;
-}
-
-.resultGrid {
-  display: grid;
-  gap: 12px;
-  grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
-}
-
-.resultCard {
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-}
-
-.cardTitle {
-  font-weight: 600;
-}
-
-.cardMeta {
-  color: #888;
-  font-size: 13px;
-}
-
 .voiceSummary {
   margin: 8px 0 12px;
-  color: #666;
-  font-size: 13px;
 }
 
 .filterBar {
   display: flex;
   flex-wrap: wrap;
-  gap: 8px;
+  gap: 10px;
   align-items: center;
   justify-content: flex-start;
-  margin-bottom: 12px;
+  margin-bottom: 0;
 }
 
 .topFilterBar {
-  margin-top: 8px;
+  margin-top: 0;
 }
 
 .filterSelect {
@@ -665,88 +573,6 @@ setupVersionWatchers(onSearchClicked)
 }
 
 .versionInput {
-  width: 180px;
-}
-
-.translate:not(:last-child) {
-  border-bottom: 1px solid #ccc;
-}
-
-.voicePlayerContainer {
-  margin-top: 10px;
-  bottom: 0;
-  position: sticky !important;
-  box-shadow: 0 0 5px 5px rgba(36, 37, 38, 0.05);
-  z-index: 3;
-  background-color: #fff;
-}
-
-.showPlayerButton {
-  position: absolute;
-  right: 7.5%;
-  bottom: 80px;
-  height: 70px;
-  width: 70px;
-  border-radius: 50%;
-  background-color: var(--el-color-primary);
-  color: #fff;
-  font-size: 25px;
-  box-shadow: 0 6px 15px rgba(36, 37, 38, 0.2);
-  text-align: center;
-  line-height: 75px;
-  cursor: pointer;
-  z-index: 3;
-}
-
-.showPlayerButton:hover {
-  background-color: var(--el-color-primary-light-3);
-}
-
-.hideIcon {
-  cursor: pointer;
-  position: absolute;
-  top: 10px;
-  right: 10px;
-}
-
-.hideIcon:hover {
-  color: #888;
-}
-
-@media (max-width: 720px) {
-  .searchSummary {
-    display: block;
-    margin-left: 0;
-    margin-top: 8px;
-  }
-
-  .searchSpacer {
-    display: none;
-    height: 0;
-  }
-
-  .voicePlayerContainer {
-    position: fixed !important;
-    left: 8px;
-    right: 8px;
-    bottom: 0;
-    width: auto;
-    margin-top: 0;
-    border-radius: 0;
-    z-index: 3;
-    box-sizing: border-box;
-    box-shadow: none;
-  }
-
-  .showPlayerButton {
-    position: fixed;
-    right: 16px;
-    bottom: 24px;
-    width: 56px;
-    height: 56px;
-    line-height: 60px;
-    z-index: 3;
-    box-shadow: none;
-  }
+  width: 188px;
 }
 </style>
