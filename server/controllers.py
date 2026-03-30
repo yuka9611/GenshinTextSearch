@@ -2692,7 +2692,7 @@ def getAvatarVoices(avatarId: int, searchLang: int | None = None):
                 if titleHash:
                     title = _get_text_map_content_with_fallback(titleHash, sourceLangCode, langs)
                     if title:
-                        obj['origin'] = f"{avatarName} ﾂｷ {title}"
+                        obj['origin'] = f"{avatarName} · {title}"
                         obj['voiceTitle'] = title
                     else:
                         obj['origin'] = avatarName
@@ -2762,7 +2762,7 @@ def searchAvatarVoicesByFilters(
             obj['viewAsTextHash'] = True
             obj['disableDetail'] = True
             if avatarName and title:
-                obj['origin'] = f"{avatarName} ﾂｷ {title}"
+                obj['origin'] = f"{avatarName} · {title}"
                 obj['voiceTitle'] = title
             elif avatarName:
                 obj['origin'] = avatarName
