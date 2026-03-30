@@ -1,29 +1,13 @@
 <script setup>
 
-import { changeTheme } from "@/assets/changeTheme";
 import router from "@/router";
-import { nextTick, onBeforeMount, onMounted, reactive, ref, watch } from "vue";
-import UserInfoCard from "@/components/UserInfoCard.vue";
-import globalData from "@/global/global"
+import { nextTick, onMounted, reactive, ref, watch } from "vue";
 import { ElMenuItem, ElSubMenu } from "element-plus";
 import global from "@/global/global";
 import api from "@/api/basicInfo";
 
-function loginButtonClicked() {
-    router.push("/login")
-}
-
 const menuItemClick = (ke) => {
     router.push(ke.index)
-}
-
-
-const notificationBox = ref();
-
-const avatarClicked = () => {
-    if (!isLogin.value) {
-        router.push("/login")
-    }
 }
 
 const menus = reactive({
@@ -36,26 +20,7 @@ const menus = reactive({
         { "title": "设置", "icon": "fi-rr-settings", "path": "/settings" },
     ]
 });
-
-let userInfo = reactive({
-    data: {
-        user_phone: "",
-        user_name: "未登录",
-        user_id: 123456,
-        user_group: "none",
-        avatar_url: "/webstatic/defaultAvatar.jpg",
-        unread_notification: false,
-        verified: false
-    }
-
-});
-
-const isLogin = ref(false);
 const loadComplete = ref(true);
-const gotUserInfo = ref(false)
-
-
-
 
 const getSidebarPath = () => {
     let path = router.currentRoute.value.path.split("/")
@@ -168,32 +133,30 @@ watch(router.currentRoute, async (to, from) => {
     <div class="pageWrapper">
         <div class="headerHolder">
             <div class="leftTitle">
-                <!--                <img alt="" src="../assets/logo.png">-->
-                原神文本搜索
+                <span class="titleIcon">
+                    <i class="fi fi-rr-search"></i>
+                </span>
+                <span class="titleMain">原神文本搜索</span>
             </div>
-
         </div>
         <div class="contentHolder">
             <div class="sideBar">
-                <div class="userInfoWrapper">
-                    <UserInfoCard :user-info="userInfo.data" showAvatarBorder @click="avatarClicked"></UserInfoCard>
+                <div class="sideBarPanel">
+                    <el-menu v-if="loadComplete" :default-active="getSidebarPath()" class="sideBarMenu" ref="menu">
+                        <component v-for="item in menus.v" :is="item.children ? ElSubMenu : ElMenuItem" :index="item.path"
+                            v-on="item.children ? {} : { click: menuItemClick }">
+                            <template #title>
+                                <i class="fi" :class="item.icon"></i>
+                                <span>{{ item.title }}</span>
+                            </template>
+                            <el-menu-item v-if="item.children" v-for="child in item.children" :index="child.path"
+                                @click="menuItemClick">
+                                <i class="fi" :class="child.icon"></i>
+                                <span>{{ child.title }}</span>
+                            </el-menu-item>
+                        </component>
+                    </el-menu>
                 </div>
-
-
-                <el-menu v-if="loadComplete" :default-active="getSidebarPath()" class="sideBarMenu" ref="menu">
-                    <component v-for="item in menus.v" :is="item.children ? ElSubMenu : ElMenuItem" :index="item.path"
-                        v-on="item.children ? {} : { click: menuItemClick }">
-                        <template #title>
-                            <i class="fi" :class="item.icon"></i>
-                            <span>{{ item.title }}</span>
-                        </template>
-                        <el-menu-item v-if="item.children" v-for="child in item.children" :index="child.path"
-                            @click="menuItemClick">
-                            <i class="fi" :class="child.icon"></i>
-                            <span>{{ child.title }}</span>
-                        </el-menu-item>
-                    </component>
-                </el-menu>
             </div>
 
             <div class="content">
@@ -214,14 +177,17 @@ watch(router.currentRoute, async (to, from) => {
 <style scoped>
 .headerHolder {
     width: 100%;
-    height: 50px;
+    min-height: var(--header-height);
     box-sizing: border-box;
-    background-color: var(--el-color-primary);
+    padding: 10px 0;
+    background:
+        linear-gradient(135deg, rgba(36, 77, 74, 0.96), rgba(47, 105, 101, 0.92)),
+        linear-gradient(90deg, rgba(183, 140, 79, 0.12), transparent 30%);
     display: flex;
-    justify-content: space-between;
+    justify-content: flex-start;
     align-items: center;
-    max-height: 50px;
     flex: 0 0 auto;
+    box-shadow: 0 12px 24px rgba(31, 48, 45, 0.16);
 }
 
 .headerHolder>div {
@@ -238,19 +204,33 @@ watch(router.currentRoute, async (to, from) => {
     box-sizing: border-box;
     display: flex;
     flex-direction: column;
+    background: transparent;
 }
 
-.leftTitle img {
-    max-height: 50px;
-    margin-right: 20px;
+.leftTitle {
+    gap: 12px;
+    color: #fff;
 }
 
-.rightTitle img {
-    height: 60px;
+.titleIcon {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 42px;
+    height: 42px;
+    border-radius: 14px;
+    font-size: 18px;
+    color: rgba(255, 250, 240, 0.96);
+    background: linear-gradient(180deg, rgba(255, 255, 255, 0.14), rgba(255, 255, 255, 0.05));
+    border: 1px solid rgba(255, 255, 255, 0.18);
+    box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.18);
 }
 
-.rightTitle>* {
-    margin: 0 10px;
+.titleMain {
+    font-family: var(--font-title);
+    font-size: clamp(1.35rem, 1.8vw, 1.65rem);
+    font-weight: 700;
+    letter-spacing: 0.02em;
 }
 
 .line {
@@ -275,13 +255,14 @@ watch(router.currentRoute, async (to, from) => {
 .content {
     overflow-y: auto;
     overflow-x: hidden;
-    background-color: var(--el-color-primary-light-9);
+    background: transparent;
     flex: 1;
     min-height: 0;
     width: var(--content-width);
     -webkit-overflow-scrolling: var(--content-scroll);
     scrollbar-gutter: stable;
     padding-right: var(--content-scrollbar-padding);
+    padding: 18px 22px 30px 0;
 }
 
 .content.dialogueContent {
@@ -311,6 +292,16 @@ watch(router.currentRoute, async (to, from) => {
     gap: var(--sidebar-gap);
 }
 
+.sideBarPanel {
+    margin: 14px 0 14px 18px;
+    padding: 10px 10px 8px;
+    border-radius: 24px;
+    background:
+        linear-gradient(180deg, rgba(255, 253, 248, 0.95), rgba(247, 240, 229, 0.95));
+    border: 1px solid rgba(190, 164, 124, 0.36);
+    box-shadow: 0 14px 26px rgba(44, 57, 54, 0.10);
+}
+
 .sideBar .sideBarMenu {
     border-right: none;
     display: var(--sidebarmenu-display);
@@ -324,6 +315,25 @@ watch(router.currentRoute, async (to, from) => {
 :deep(.sideBarMenu .el-menu-item),
 :deep(.sideBarMenu .el-sub-menu__title) {
     padding: var(--sidebarmenu-item-padding);
+    margin-bottom: 6px;
+    min-height: 48px;
+    color: var(--theme-text);
+    border: 1px solid transparent;
+    transition: background-color 0.18s ease, color 0.18s ease, transform 0.18s ease, border-color 0.18s ease;
+}
+
+:deep(.sideBarMenu .el-menu-item:hover),
+:deep(.sideBarMenu .el-sub-menu__title:hover) {
+    background: rgba(47, 105, 101, 0.08);
+    color: var(--theme-primary);
+    transform: translateX(2px);
+}
+
+:deep(.sideBarMenu .el-menu-item.is-active) {
+    background: linear-gradient(135deg, rgba(47, 105, 101, 0.12), rgba(183, 140, 79, 0.10));
+    color: var(--theme-primary-strong);
+    border-color: rgba(47, 105, 101, 0.20);
+    box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.36);
 }
 
 .sideBar .sideBarMenu i {
@@ -331,22 +341,40 @@ watch(router.currentRoute, async (to, from) => {
     font-size: 1.1em;
 }
 
-.userInfoWrapper {
-    padding: var(--user-info-padding);
-    border-bottom: var(--user-info-border);
-}
-
-.leftTitle {
-    color: #fff;
-}
-
 @media (max-width: 720px) {
+    .headerHolder {
+        padding: 8px 0;
+    }
+
+    .leftTitle {
+        gap: 10px;
+    }
+
+    .titleIcon {
+        width: 36px;
+        height: 36px;
+        border-radius: 12px;
+        font-size: 15px;
+    }
+
+    .sideBarPanel {
+        margin: 10px 16px 0;
+        padding: 8px 8px 4px;
+        border-radius: 20px;
+    }
+
+    .content {
+        padding: 8px 0 24px;
+    }
+
     :deep(.sideBarMenu .el-sub-menu) {
         flex: 0 0 auto;
     }
 
-    .userInfoWrapper {
-        flex: 0 0 auto;
+    :deep(.sideBarMenu .el-menu-item),
+    :deep(.sideBarMenu .el-sub-menu__title) {
+        margin-bottom: 0;
+        min-height: 42px;
     }
 }
 </style>

@@ -3,7 +3,7 @@ import global from "@/global/global"
 import api from "@/api/keywordQuery";
 
 import {useRoute} from "vue-router";
-import {onActivated, onDeactivated, reactive, ref, watch, computed} from "vue";
+import {onDeactivated, reactive, ref, watch, computed} from "vue";
 import PlayVoiceButton from "@/components/PlayVoiceButton.vue";
 import StylizedText from "@/components/StylizedText.vue";
 import AudioPlayer from "@liripeng/vue-audio-player";
@@ -115,11 +115,24 @@ const reloadPage = () => {
     keyword.value = route.query.keyword
     playVoiceButtonDict = {}
     playableDialogueIdList = []
+    queryTime.value = "0"
+    questName.value = UI_TEXT.taskText
+    dialogues.value = []
+    readableTitle.value = ""
+    readableFileName.value = ""
+    readableTranslates.value = {}
+    audio.value = []
+    currentPlayingIndex.value = -1
     totalCount.value = 0
     questDescription.value = ""
     currentTalkId.value = null
     currentQuestId.value = null
     currentDialogueId.value = null
+    voiceListLoadingInfo.showLoadingDialogue = false
+    voiceListLoadingInfo.total = 1
+    voiceListLoadingInfo.current = 0
+    voiceListLoadingInfo.percentage = 0
+    voiceListLoadingInfo.audioLoaded = false
     const isSubtitle = !!route.query.isSubtitle
     const readableId = route.query.readableId
     const fileName = route.query.fileName
@@ -623,10 +636,12 @@ const tableRowClassName = ({row, rowIndex}) => {
     return classNames.join(' ')
 }
 
-onActivated(() => {
+watch(() => route.fullPath, () => {
+    if (route.name !== 'talkView') {
+        return
+    }
     reloadPage()
-    voiceListLoadingInfo.audioLoaded = false
-})
+}, { immediate: true })
 
 onDeactivated(() => {
     voicePlayer.value && voicePlayer.value.pause()
@@ -637,7 +652,7 @@ onDeactivated(() => {
 </script>
 
 <template>
-    <div class="viewWrapper" :class="{dialogueView: !isReadable}">
+    <div class="viewWrapper pageShell" :class="{dialogueView: !isReadable}">
         <h1 class="pageTitle">{{ isReadable ? UI_TEXT.pageTitleReadable : UI_TEXT.pageTitleDialogue }}</h1>
         <div class="helpText">
             <p v-if="!isReadable">{{ UI_TEXT.source }}: {{ questName }}</p>
@@ -658,7 +673,7 @@ onDeactivated(() => {
                 <StylizedText :text="questDescription" :keyword="keyword" />
             </div>
 
-            <div v-if="isReadable" class="versionTags">
+            <div v-if="isReadable" class="versionTags tagRow">
                 <el-tag size="small" effect="plain" :title="readableCreatedVersionRaw">{{ UI_TEXT.created }}: {{ formatVersionTag(readableCreatedVersion, readableCreatedVersionRaw) }}</el-tag>
                 <el-tag
                     v-if="shouldShowUpdatedVersionTag(readableCreatedVersion, readableCreatedVersionRaw, readableUpdatedVersion, readableUpdatedVersionRaw)"
@@ -669,7 +684,7 @@ onDeactivated(() => {
                     {{ UI_TEXT.updated }}: {{ formatVersionTag(readableUpdatedVersion, readableUpdatedVersionRaw) }}
                 </el-tag>
             </div>
-            <div v-else-if="route.query.isSubtitle" class="versionTags">
+            <div v-else-if="route.query.isSubtitle" class="versionTags tagRow">
                 <el-tag size="small" effect="plain" :title="subtitleCreatedVersionRaw">{{ UI_TEXT.created }}: {{ formatVersionTag(subtitleCreatedVersion, subtitleCreatedVersionRaw) }}</el-tag>
                 <el-tag
                     v-if="shouldShowUpdatedVersionTag(subtitleCreatedVersion, subtitleCreatedVersionRaw, subtitleUpdatedVersion, subtitleUpdatedVersionRaw)"
@@ -802,8 +817,8 @@ onDeactivated(() => {
         </el-form>
     </div>
 
-    <div class="viewWrapper voicePlayerContainer" v-show="showPlayer" v-if="!isReadable">
-        <span class="hideIcon" @click="onHidePlayerButtonClicked">
+    <div class="viewWrapper pageShell voicePlayerContainer audioDock" v-show="showPlayer" v-if="!isReadable">
+        <span class="hideIcon audioDockClose" @click="onHidePlayerButtonClicked">
             <el-icon>
                 <Close />
             </el-icon>
@@ -820,7 +835,7 @@ onDeactivated(() => {
         </AudioPlayer>
     </div>
 
-    <div class="showPlayerButton" @click="onShowPlayerButtonClicked" v-show="!showPlayer" v-if="!isReadable">
+    <div class="showPlayerButton audioDockToggle" @click="onShowPlayerButtonClicked" v-show="!showPlayer" v-if="!isReadable">
         <i class="fi fi-sr-waveform-path"></i>
     </div>
 
@@ -833,24 +848,8 @@ onDeactivated(() => {
     </el-dialog>
 </template>
 <style scoped>
-.viewWrapper{
-    position: relative;
-    width: 85%;
-    margin: 0 auto;
-    background-color: #fff;
-    box-shadow: 0 3px 3px rgba(36,37,38,.05);
-    border-radius: 3px;
-    padding: 20px;
-}
-
-.pageTitle {
-    border-bottom: 1px #ccc solid;
-    padding-bottom: 10px;
-}
-
 .helpText {
-    margin: 20px 0 20px 0;
-    color: #999;
+    line-height: 1.8;
 }
 
 .metaIdTags {
@@ -862,10 +861,11 @@ onDeactivated(() => {
 
 .questDescriptionBlock {
     margin-top: 10px;
-    padding: 10px 12px;
-    border-left: 3px solid var(--el-color-primary-light-5);
-    background-color: var(--el-color-primary-light-9);
-    color: var(--el-text-color-regular);
+    padding: 14px 16px;
+    border-radius: 16px;
+    border-left: 3px solid rgba(var(--theme-primary-rgb), 0.45);
+    background: rgba(47, 105, 101, 0.07);
+    color: var(--theme-text);
 }
 
 .questDescriptionLabel {
@@ -881,8 +881,10 @@ onDeactivated(() => {
 }
 
 .readableBlock {
-    padding: 12px 0;
-    border-bottom: 1px solid #eee;
+    padding: 18px;
+    border-radius: 20px;
+    border: 1px solid rgba(190, 164, 124, 0.24);
+    background: rgba(255, 255, 255, 0.38);
 }
 
 .readableHeader {
@@ -906,7 +908,12 @@ onDeactivated(() => {
     gap: 16px;
 }
 
-
+.dialogueGroup {
+    padding: 16px;
+    border-radius: 22px;
+    border: 1px solid rgba(190, 164, 124, 0.24);
+    background: rgba(255, 255, 255, 0.34);
+}
 
 .dialogueScroll {
     overflow-x: visible;
@@ -915,6 +922,10 @@ onDeactivated(() => {
 
 .dialogueTopControls {
     margin-bottom: 8px;
+    padding: 12px 14px;
+    border-radius: 18px;
+    border: 1px solid rgba(190, 164, 124, 0.28);
+    background: rgba(255, 255, 255, 0.46);
 }
 
 .resultControls {
@@ -923,12 +934,18 @@ onDeactivated(() => {
     gap: 8px;
     flex-wrap: wrap;
     margin: 6px 0 12px;
-    color: #666;
+    padding: 12px 14px;
+    border-radius: 18px;
+    border: 1px solid rgba(190, 164, 124, 0.28);
+    background: rgba(255, 255, 255, 0.46);
+    color: var(--theme-text-muted);
     font-size: 13px;
 }
 
 .resultCount {
     margin-right: 4px;
+    font-weight: 600;
+    color: var(--theme-text);
 }
 
 .dialogueView {
@@ -949,74 +966,31 @@ onDeactivated(() => {
 .dialogueGroupTitle {
     margin: 8px 0;
     font-weight: 600;
+    color: var(--theme-ink);
+    font-family: var(--font-title);
 }
 
 .voicePlayerContainer {
-    margin-top: 10px;
-    bottom: 0;
-    position: sticky !important;
-    box-shadow: 0 0 5px 5px rgba(36,37,38,.05);
     z-index: 9999;
 }
 
 .showPlayerButton{
-    position: absolute;
-    right: 7.5%;
-    bottom: 80px;
-    height: 70px;
-    width: 70px;
-    border-radius: 50%;
-    background-color: var(--el-color-primary);
-    color: #fff;
-    font-size: 25px;
-    box-shadow: 0 6px 15px rgba(36,37,38,.2);
-    text-align: center;
-    line-height: 75px;
-    cursor: pointer;
     z-index: 9999;
 }
 
-.showPlayerButton:hover{
-    background-color: var(--el-color-primary-light-3);
-}
-
-.hideIcon {
-    cursor: pointer;
-    position: absolute;
-    top: 10px;
-    right: 10px;
-}
-
-.hideIcon:hover {
-    color: #888;
-}
-
 :deep( .playingDialogue) {
-    background-color: var(--el-color-primary-light-9);
+    background-color: rgba(47, 105, 101, 0.10);
 }
 
 :deep(.selectedHashDialogue:not(.playingDialogue)) {
-    background-color: #fff6dd;
+    background-color: rgba(183, 140, 79, 0.12);
 }
 
 .disabledPlayIcon {
     opacity: 0.35;
 }
 
-@media (max-width: 720px) {
-    .showPlayerButton {
-        right: 16px;
-        bottom: 24px;
-        width: 56px;
-        height: 56px;
-        line-height: 60px;
-    }
-}
-
 .versionTags {
-    display: flex;
-    flex-wrap: wrap;
-    gap: 8px;
     margin-top: 6px;
 }
 .rowVersionTags {
@@ -1024,4 +998,9 @@ onDeactivated(() => {
     gap: 6px;
     flex-wrap: wrap;
 }
+
+:deep(.el-table .cell) {
+    color: var(--theme-text);
+}
+
 </style>

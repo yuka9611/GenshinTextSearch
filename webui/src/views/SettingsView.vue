@@ -1,95 +1,111 @@
 <template>
-  <div class="viewWrapper">
+  <div class="viewWrapper pageShell settingsView">
     <h1 class="pageTitle">设置</h1>
 
-    <div class="helpText">
+    <div class="helpText settingsHelpText">
       <p>所有已经导入到数据库的文本语言会在此处显示。要导入新的语言，请关闭服务器，并使用导入工具。</p>
       <p>所有游戏已下载的语言包会在此处显示。请进入游戏来管理语音包。</p>
       <p>现在可以在这里直接选择游戏资源路径。</p>
     </div>
 
-    <el-form :label-width="120" label-position="left">
-      <el-form-item label="默认搜索语言">
-        <el-select v-model="selectedInputLanguage" placeholder="选择语言" class="languageSelector">
-          <el-option v-for="(v, k) in supportedInputLanguage" :label="v" :value="k" :key="k" />
-        </el-select>
-      </el-form-item>
-
-      <el-form-item label="来源语言">
-        <el-select v-model="selectedSourceLanguage" placeholder="选择语言" class="languageSelector">
-          <el-option v-for="(v, k) in supportedInputLanguage" :label="v" :value="k" :key="k" />
-        </el-select>
-      </el-form-item>
-
-      <el-form-item label="结果语言">
-        <el-transfer
-          v-model="transferComponentValue"
-          :data="transferComponentData"
-          :titles="['可选语言', '已选语言']"
-        />
-      </el-form-item>
-
-      <el-form-item label="双子">
-        <el-select v-model="selectedTwin" placeholder="请选择" class="languageSelector">
-          <el-option v-for="(v, k) in twinList" :label="v.label" :value="v.value" :key="k" />
-        </el-select>
-      </el-form-item>
-
-      <el-form-item label="游戏资源路径">
-        <div class="assetRow">
-          <div class="assetInfo">
-            <div class="assetPath">{{ global.config.assetDir || "(未设置)" }}</div>
-            <div class="assetHint">
-              <span v-if="assetDirValid" class="ok">✅ 路径有效</span>
-              <span v-else class="bad">❌ 路径无效（请选择 GenshinImpact_Data 或包含 StreamingAssets 的目录）</span>
-            </div>
-          </div>
-
-          <el-button @click="pickDir" :loading="picking">
-            选择目录
-          </el-button>
+    <el-form :label-width="120" label-position="left" class="settingsForm">
+      <section class="settingsSection">
+        <div class="sectionHeader">
+          <div class="sectionEyebrow">Search Defaults</div>
+          <h2 class="sectionTitle">检索偏好</h2>
+          <p class="sectionDescription">统一管理默认输入语言、来源语言、结果语言和双子设定。</p>
         </div>
-      </el-form-item>
 
-      <!-- ✅ 新版：已安装语音包 UI -->
-      <el-form-item label="已安装语音包">
-        <div class="voiceRow">
-          <div class="voiceTop">
-            <div class="voiceStatus">
-              <span v-if="assetDirValid" class="ok">✅ 已检测到资源目录</span>
-              <span v-else class="bad">❌ 资源目录无效（先选择目录）</span>
-            </div>
+        <el-form-item label="默认搜索语言">
+          <el-select v-model="selectedInputLanguage" placeholder="选择语言" class="languageSelector">
+            <el-option v-for="(v, k) in supportedInputLanguage" :label="v" :value="k" :key="k" />
+          </el-select>
+        </el-form-item>
 
-            <div class="voiceActions">
-              <el-button size="small" @click="refreshVoicePacks" :loading="refreshingVoice">
-                刷新语音包列表
-              </el-button>
-            </div>
-          </div>
+        <el-form-item label="来源语言">
+          <el-select v-model="selectedSourceLanguage" placeholder="选择语言" class="languageSelector">
+            <el-option v-for="(v, k) in supportedInputLanguage" :label="v" :value="k" :key="k" />
+          </el-select>
+        </el-form-item>
 
-          <div class="voiceTags" v-if="voiceTagList.length > 0">
-            <el-tag
-              v-for="v in voiceTagList"
-              :key="v.code"
-              effect="plain"
-              class="langPackTag"
-            >
-              {{ v.name }}
-            </el-tag>
-          </div>
-
-          <el-empty
-            v-else
-            description="未检测到语音包（请确认游戏里已下载语音，或目录层级是否正确）"
+        <el-form-item label="结果语言" class="transferFormItem">
+          <el-transfer
+            v-model="transferComponentValue"
+            :data="transferComponentData"
+            :titles="['可选语言', '已选语言']"
+            class="resultLanguageTransfer"
           />
-        </div>
-      </el-form-item>
+        </el-form-item>
 
-      <el-form-item>
+        <el-form-item label="双子">
+          <el-select v-model="selectedTwin" placeholder="请选择" class="languageSelector">
+            <el-option v-for="(v, k) in twinList" :label="v.label" :value="v.value" :key="k" />
+          </el-select>
+        </el-form-item>
+      </section>
+
+      <section class="settingsSection">
+        <div class="sectionHeader">
+          <div class="sectionEyebrow">Assets</div>
+          <h2 class="sectionTitle">资源与语音包</h2>
+          <p class="sectionDescription">校验游戏资源目录，并同步当前机器上已经安装的语音语言包。</p>
+        </div>
+
+        <el-form-item label="游戏资源路径">
+          <div class="assetRow">
+            <div class="assetInfo statusCard">
+              <div class="assetPath">{{ global.config.assetDir || "(未设置)" }}</div>
+              <div class="assetHint">
+                <span v-if="assetDirValid" class="ok">✅ 路径有效</span>
+                <span v-else class="bad">❌ 路径无效（请选择 GenshinImpact_Data 或包含 StreamingAssets 的目录）</span>
+              </div>
+            </div>
+
+            <el-button @click="pickDir" :loading="picking">
+              选择目录
+            </el-button>
+          </div>
+        </el-form-item>
+
+        <el-form-item label="已安装语音包">
+          <div class="voiceRow statusCard">
+            <div class="voiceTop">
+              <div class="voiceStatus">
+                <span v-if="assetDirValid" class="ok">✅ 已检测到资源目录</span>
+                <span v-else class="bad">❌ 资源目录无效（先选择目录）</span>
+              </div>
+
+              <div class="voiceActions">
+                <el-button size="small" @click="refreshVoicePacks" :loading="refreshingVoice">
+                  刷新语音包列表
+                </el-button>
+              </div>
+            </div>
+
+            <div class="voiceTags" v-if="voiceTagList.length > 0">
+              <el-tag
+                v-for="v in voiceTagList"
+                :key="v.code"
+                effect="plain"
+                class="langPackTag"
+              >
+                {{ v.name }}
+              </el-tag>
+            </div>
+
+            <el-empty
+              v-else
+              description="未检测到语音包（请确认游戏里已下载语音，或目录层级是否正确）"
+            />
+          </div>
+        </el-form-item>
+      </section>
+
+      <div class="actionBar">
         <el-button type="primary" @click="save">
           保存
         </el-button>
-      </el-form-item>
+      </div>
     </el-form>
   </div>
 </template>
@@ -266,28 +282,94 @@ const save = async () => {
 </script>
 
 <style>
-.viewWrapper {
-  position: relative;
-  width: var(--page-width);
-  margin: 0 auto;
-  background-color: #fff;
-  box-shadow: var(--page-shadow);
-  border-radius: var(--page-radius);
-  padding: var(--page-padding);
+.settingsView {
+  gap: 18px;
 }
 
-.pageTitle {
-  border-bottom: 1px #ccc solid;
-  padding-bottom: 10px;
-}
-
-.helpText {
+.settingsHelpText {
   margin: 20px 0 20px 0;
-  color: #999;
+}
+
+.settingsForm {
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+}
+
+.settingsSection {
+  padding: 20px;
+  border-radius: 22px;
+  border: 1px solid rgba(190, 164, 124, 0.28);
+  background: rgba(255, 255, 255, 0.42);
+}
+
+.sectionHeader {
+  margin-bottom: 18px;
+}
+
+.sectionEyebrow {
+  color: var(--theme-primary);
+  font-size: 12px;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  margin-bottom: 8px;
+}
+
+.sectionTitle {
+  color: var(--theme-ink);
+  font-family: var(--font-title);
+  font-size: 1.2rem;
+  margin-bottom: 6px;
+}
+
+.sectionDescription {
+  color: var(--theme-text-muted);
+  line-height: 1.7;
 }
 
 .languageSelector {
   width: 260px;
+}
+
+.transferFormItem .el-form-item__content {
+  min-width: 0;
+  max-width: 100%;
+}
+
+.resultLanguageTransfer {
+  display: flex;
+  align-items: center;
+  gap: clamp(8px, 1.6vw, 16px);
+  flex-wrap: nowrap;
+  width: 100%;
+  max-width: 100%;
+  overflow: hidden;
+}
+
+.resultLanguageTransfer .el-transfer-panel {
+  flex: 1 1 0;
+  width: 0;
+  min-width: 0;
+}
+
+.resultLanguageTransfer .el-transfer__buttons {
+  flex: 0 0 auto;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 0;
+}
+
+.resultLanguageTransfer .el-transfer-panel .el-transfer-panel__header .el-checkbox__label {
+  min-width: 0;
+}
+
+.resultLanguageTransfer .el-transfer__button {
+  margin: 0;
+}
+
+.resultLanguageTransfer .el-transfer__button:nth-child(2) {
+  margin: 0;
 }
 
 .assetRow {
@@ -302,20 +384,29 @@ const save = async () => {
   min-width: 0;
 }
 
+.statusCard {
+  padding: 14px 16px;
+  border-radius: 18px;
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.66), rgba(243, 231, 211, 0.40));
+  border: 1px solid rgba(190, 164, 124, 0.22);
+}
+
 .assetPath {
   word-break: break-all;
+  color: var(--theme-text);
+  font-weight: 600;
 }
 
 .assetHint {
-  margin-top: 4px;
+  margin-top: 6px;
   font-size: 12px;
 }
 
 .ok {
-  color: #67c23a;
+  color: var(--theme-success);
 }
 .bad {
-  color: #f56c6c;
+  color: var(--theme-danger);
 }
 
 .voiceRow {
@@ -344,10 +435,42 @@ const save = async () => {
   margin-right: 0 !important;
 }
 
+.actionBar {
+  display: flex;
+  justify-content: flex-end;
+  padding-top: 4px;
+}
+
 @media (max-width: 720px) {
+  .resultLanguageTransfer {
+    flex-wrap: wrap;
+  }
+
+  .resultLanguageTransfer .el-transfer-panel {
+    min-width: 100%;
+  }
+
+  .resultLanguageTransfer .el-transfer__buttons {
+    width: 100%;
+    flex-direction: row;
+    justify-content: center;
+  }
+
+  .settingsSection {
+    padding: 16px;
+  }
+
   .voiceTop {
     flex-direction: column;
     align-items: flex-start;
+  }
+
+  .actionBar {
+    justify-content: stretch;
+  }
+
+  .actionBar .el-button {
+    width: 100%;
   }
 }
 </style>
