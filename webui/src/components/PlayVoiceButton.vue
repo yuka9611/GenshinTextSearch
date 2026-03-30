@@ -97,9 +97,31 @@ defineExpose({ getAudioUrl, scrollTo });
 .voiceButtonWrapper {
     display: inline-flex;
     align-items: center;
+    justify-content: center;
+    width: 28px;
+    height: 28px;
+    border-radius: 999px;
+    background: rgba(47, 105, 101, 0.08);
+    border: 1px solid rgba(47, 105, 101, 0.16);
+    color: var(--theme-primary);
+    transition: transform 0.18s ease, background-color 0.18s ease, border-color 0.18s ease, color 0.18s ease;
+}
+
+.voiceButtonWrapper:not(.isDisabled):hover {
+    transform: translateY(-1px);
+    background: rgba(47, 105, 101, 0.14);
+    border-color: rgba(47, 105, 101, 0.24);
+}
+
+.voiceButtonWrapper :deep(.el-icon) {
+    font-size: 14px;
+    cursor: pointer;
 }
 
 .voiceButtonWrapper.isDisabled {
-    opacity: 0.45;
+    opacity: 0.5;
+    color: var(--theme-text-soft);
+    background: rgba(233, 225, 210, 0.8);
+    border-color: rgba(190, 164, 124, 0.22);
 }
 </style>

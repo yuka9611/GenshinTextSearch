@@ -67,14 +67,14 @@ watch(() => props.updatedVersion, (newValue) => {
 .versionFilterGroup {
   display: flex;
   flex-direction: row;
-  gap: 8px;
+  gap: 10px;
   margin: 0;
   width: 100%;
 }
 
 .versionFilter {
-  flex: 1 1 150px;
-  min-width: 150px;
+  flex: 1 1 168px;
+  min-width: 168px;
 }
 
 @media (max-width: 720px) {

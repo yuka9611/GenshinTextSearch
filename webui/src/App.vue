@@ -87,9 +87,10 @@ async function ensureAssetDirOnFirstRun() {
       ElMessage({ type: 'warning', message: '已选择目录，但校验未通过（请确认目录层级）' })
       await jumpToSettings()
     }
-  } catch (e) {
-    // 去设置页 或关闭弹窗
-    await jumpToSettings()
+  } catch (action) {
+    if (action === 'cancel') {
+      await jumpToSettings()
+    }
   }
 }
 

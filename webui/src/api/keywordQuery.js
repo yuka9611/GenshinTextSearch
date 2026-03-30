@@ -98,6 +98,7 @@ const searchByName = (
     updatedVersion = "",
     questSourceType = "",
     speakerKeyword = "",
+    readableCategory = "",
 ) => {
     return request.post("/api/nameSearch", {
         keyword: keyword,
@@ -106,6 +107,7 @@ const searchByName = (
         updatedVersion: updatedVersion,
         questSourceType: questSourceType,
         speakerKeyword: speakerKeyword,
+        readableCategory: readableCategory,
     });
 };
 

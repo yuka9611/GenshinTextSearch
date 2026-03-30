@@ -10,6 +10,17 @@ import config
 import placeholderHandler
 from utils.cache import search_cache
 
+_QUEST_SOURCE_TYPE_LABELS = {
+    "AQ": "魔神任务",
+    "LQ": "传说任务",
+    "WQ": "世界任务",
+    "EQ": "活动任务",
+    "IQ": "委托任务",
+    "HANGOUT": "邀约事件",
+    "ANECDOTE": "游逸旅闻",
+    "UNKNOWN": "未分类",
+}
+
 
 @lru_cache(maxsize=1024)
 def _count_dialogue_by_talker_keyword_cached(
@@ -292,6 +303,34 @@ def _normalize_preview_text(content: str | None) -> str | None:
     text = str(content).replace("\\n", "\n")
     text = re.sub(r"\s+", " ", text).strip()
     return text or None
+
+
+def _build_quest_source_type_fields(source_type: str | None) -> dict:
+    normalized = str(source_type or "").strip().upper() or "UNKNOWN"
+    if normalized not in _QUEST_SOURCE_TYPE_LABELS:
+        normalized = "UNKNOWN"
+    return {
+        "sourceType": normalized,
+        "sourceTypeLabel": _QUEST_SOURCE_TYPE_LABELS[normalized],
+    }
+
+
+def _build_readable_category_fields(file_name: str | None) -> dict:
+    category = databaseHelper.getReadableCategoryCode(file_name)
+    return {
+        "readableCategory": category,
+        "readableCategoryLabel": databaseHelper.READABLE_CATEGORY_LABELS.get(
+            category,
+            databaseHelper.READABLE_CATEGORY_LABELS["OTHER"],
+        ),
+    }
+
+
+def _has_visible_quest_card_content(entry: dict) -> bool:
+    return bool(
+        _normalize_preview_text(entry.get("title"))
+        or _normalize_preview_text(entry.get("contentPreview"))
+    )
 
 
 def _build_keyword_preview(
@@ -1199,11 +1238,8 @@ def _build_readable_obj(fileName, content, titleTextMapHash, readableId, created
     构建可读内容对象
     """
     fileHash = zlib.crc32(fileName.encode('utf-8'))
-    origin_label = "阅读物"
-    for prefix, label in prefix_labels.items():
-        if fileName.startswith(prefix):
-            origin_label = label
-            break
+    readable_category_fields = _build_readable_category_fields(fileName)
+    origin_label = readable_category_fields["readableCategoryLabel"]
 
     title = _get_text_map_content_with_fallback(
         titleTextMapHash,
@@ -1220,7 +1256,8 @@ def _build_readable_obj(fileName, content, titleTextMapHash, readableId, created
         'isReadable': True,
         'readableId': readableId,
         'fileName': fileName,
-        'origin': origin
+        'origin': origin,
+        **readable_category_fields,
     }
     obj.update(_build_version_fields(created_raw, updated_raw))
 
@@ -1342,6 +1379,7 @@ def searchNameEntries(
     updated_version: str | None = None,
     quest_source_type: str | None = None,
     speaker_keyword: str | None = None,
+    readable_category: str | None = None,
 ):
     quests = []
     readables = []
@@ -1350,12 +1388,14 @@ def searchNameEntries(
     created_version_filter = _normalize_version_filter(created_version)
     updated_version_filter = _normalize_version_filter(updated_version)
     quest_source_type_filter = (quest_source_type or "").strip().upper() or None
+    readable_category_filter = (readable_category or "").strip().upper() or None
     if (
         not keyword_trim
         and not created_version_filter
         and not updated_version_filter
         and not quest_source_type_filter
         and not speaker_keyword_trim
+        and not readable_category_filter
     ):
         return {
             "quests": [],
@@ -1383,12 +1423,13 @@ def searchNameEntries(
             updated_version_filter,
             quest_source_type_filter,
         )
-        for questId, questTitle, created_raw, updated_raw in questMatches:
+        for questId, questTitle, source_type, created_raw, updated_raw in questMatches:
             chapterName = databaseHelper.getQuestChapterName(questId, langCode)
             quest_map[questId] = {
                 "questId": questId,
                 "title": questTitle,
                 "chapterName": chapterName,
+                **_build_quest_source_type_fields(source_type),
                 **_build_version_fields(created_raw, updated_raw),
             }
 
@@ -1399,7 +1440,7 @@ def searchNameEntries(
             updated_version_filter,
             quest_source_type_filter,
         )
-        for questId, questTitle, chapterTitle, chapterNum, created_raw, updated_raw in chapterMatches:
+        for questId, questTitle, chapterTitle, chapterNum, source_type, created_raw, updated_raw in chapterMatches:
             if questId in quest_map:
                 continue
             chapterName = format_chapter_name(chapterNum, chapterTitle)
@@ -1407,6 +1448,7 @@ def searchNameEntries(
                 "questId": questId,
                 "title": questTitle,
                 "chapterName": chapterName,
+                **_build_quest_source_type_fields(source_type),
                 **_build_version_fields(created_raw, updated_raw),
             }
         questIdMatches = databaseHelper.selectQuestByIdContains(
@@ -1416,7 +1458,7 @@ def searchNameEntries(
             updated_version_filter,
             quest_source_type_filter,
         )
-        for questId, questTitle, created_raw, updated_raw in questIdMatches:
+        for questId, questTitle, source_type, created_raw, updated_raw in questIdMatches:
             if questId in quest_map:
                 continue
             chapterName = databaseHelper.getQuestChapterName(questId, langCode)
@@ -1424,6 +1466,7 @@ def searchNameEntries(
                 "questId": questId,
                 "title": questTitle,
                 "chapterName": chapterName,
+                **_build_quest_source_type_fields(source_type),
                 **_build_version_fields(created_raw, updated_raw),
             }
         questContentMatches = databaseHelper.selectQuestByContentKeyword(
@@ -1433,7 +1476,7 @@ def searchNameEntries(
             updated_version_filter,
             quest_source_type_filter,
         )
-        for questId, title_hash, questTitle, matched_text, created_raw, updated_raw, best_rank in questContentMatches:
+        for questId, title_hash, questTitle, matched_text, source_type, created_raw, updated_raw, best_rank in questContentMatches:
             preview = build_preview(_normalize_text_map_content(matched_text, langCode))
             if questId in quest_map:
                 if preview and not quest_map[questId].get("contentPreview"):
@@ -1453,6 +1496,7 @@ def searchNameEntries(
                 "chapterName": chapterName,
                 "contentPreview": preview,
                 "contentMatchType": "description" if best_rank == 0 else "dialogue",
+                **_build_quest_source_type_fields(source_type),
                 **_build_version_fields(created_raw, updated_raw),
             }
     else:
@@ -1463,12 +1507,13 @@ def searchNameEntries(
                 updated_version_filter,
                 quest_source_type_filter,
             )
-            for questId, questTitle, created_raw, updated_raw in questMatches:
+            for questId, questTitle, source_type, created_raw, updated_raw in questMatches:
                 chapterName = databaseHelper.getQuestChapterName(questId, langCode)
                 quest_map[questId] = {
                     "questId": questId,
                     "title": questTitle,
                     "chapterName": chapterName,
+                    **_build_quest_source_type_fields(source_type),
                     **_build_version_fields(created_raw, updated_raw),
                 }
 
@@ -1481,12 +1526,13 @@ def searchNameEntries(
             updated_version_filter,
             quest_source_type_filter,
         )
-        for questId, questTitle, created_raw, updated_raw in speakerMatches:
+        for questId, questTitle, source_type, created_raw, updated_raw in speakerMatches:
             chapterName = databaseHelper.getQuestChapterName(questId, langCode)
             speaker_quest_map[questId] = {
                 "questId": questId,
                 "title": questTitle,
                 "chapterName": chapterName,
+                **_build_quest_source_type_fields(source_type),
                 **_build_version_fields(created_raw, updated_raw),
             }
 
@@ -1504,7 +1550,7 @@ def searchNameEntries(
                 updated_version_filter,
                 quest_source_type_filter,
             )
-            for questId, questTitle, created_raw, updated_raw in specialMatches:
+            for questId, questTitle, source_type, created_raw, updated_raw in specialMatches:
                 if questId in speaker_quest_map:
                     continue
                 chapterName = databaseHelper.getQuestChapterName(questId, langCode)
@@ -1512,6 +1558,7 @@ def searchNameEntries(
                     "questId": questId,
                     "title": questTitle,
                     "chapterName": chapterName,
+                    **_build_quest_source_type_fields(source_type),
                     **_build_version_fields(created_raw, updated_raw),
                 }
 
@@ -1524,13 +1571,13 @@ def searchNameEntries(
         else:
             quest_map = speaker_quest_map
 
-    quests.extend(quest_map.values())
+    quests.extend(entry for entry in quest_map.values() if _has_visible_quest_card_content(entry))
 
     langMap = databaseHelper.getLangCodeMap()
     if (
         not speaker_keyword_trim
         and langCode in langMap
-        and (keyword_trim or created_version_filter or updated_version_filter)
+        and (keyword_trim or created_version_filter or updated_version_filter or readable_category_filter)
     ):
         langStr = langMap[langCode]
         readable_seen = set()
@@ -1542,6 +1589,7 @@ def searchNameEntries(
                 langStr,
                 created_version_filter,
                 updated_version_filter,
+                readable_category_filter,
             )
             for fileName, readableId, titleTextMapHash, title, created_raw, updated_raw in readableMatches:
                 resolved_hash = titleTextMapHash
@@ -1557,6 +1605,7 @@ def searchNameEntries(
                     "readableId": readableId,
                     "title": resolved_title or fileName,
                     "titleTextMapHash": resolved_hash,
+                    **_build_readable_category_fields(fileName),
                     **_build_version_fields(created_raw, updated_raw),
                 }
                 readables.append(entry)
@@ -1568,6 +1617,7 @@ def searchNameEntries(
                 langStr,
                 created_version_filter,
                 updated_version_filter,
+                readable_category_filter,
             )
             for fileName, readableId, titleTextMapHash, title, created_raw, updated_raw in readableFileMatches:
                 key = (readableId, fileName)
@@ -1587,6 +1637,7 @@ def searchNameEntries(
                     "readableId": readableId,
                     "title": resolved_title or fileName,
                     "titleTextMapHash": resolved_hash,
+                    **_build_readable_category_fields(fileName),
                     **_build_version_fields(created_raw, updated_raw),
                 }
                 readables.append(entry)
@@ -1599,6 +1650,7 @@ def searchNameEntries(
                 offset=None,
                 created_version=created_version_filter,
                 updated_version=updated_version_filter,
+                category=readable_category_filter,
             )
             for fileName, content, titleTextMapHash, readableId, created_raw, updated_raw in readableContentMatches:
                 key = (readableId, fileName)
@@ -1622,6 +1674,7 @@ def searchNameEntries(
                     "title": title or fileName,
                     "titleTextMapHash": resolved_hash,
                     "contentPreview": preview,
+                    **_build_readable_category_fields(fileName),
                     **_build_version_fields(created_raw, updated_raw),
                 }
                 readables.append(entry)
@@ -1632,6 +1685,7 @@ def searchNameEntries(
                 langStr,
                 created_version_filter,
                 updated_version_filter,
+                category=readable_category_filter,
             )
             for fileName, readableId, titleTextMapHash, title, created_raw, updated_raw in readableMatches:
                 resolved_hash = titleTextMapHash
@@ -1647,6 +1701,7 @@ def searchNameEntries(
                     "readableId": readableId,
                     "title": resolved_title or fileName,
                     "titleTextMapHash": resolved_hash,
+                    **_build_readable_category_fields(fileName),
                     **_build_version_fields(created_raw, updated_raw),
                 }
                 readables.append(entry)

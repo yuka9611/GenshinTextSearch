@@ -625,13 +625,15 @@ def nameSearch():
     updatedVersion = request.json.get("updatedVersion")
     questSourceType = request.json.get("questSourceType")
     speakerKeyword = request.json.get("speakerKeyword", "")
+    readableCategory = request.json.get("readableCategory")
 
     has_keyword = keyword.strip() != ""
     has_created = createdVersion and str(createdVersion).strip() != ""
     has_updated = updatedVersion and str(updatedVersion).strip() != ""
     has_source_type = questSourceType and str(questSourceType).strip() != ""
     has_speaker = speakerKeyword and str(speakerKeyword).strip() != ""
-    if not has_keyword and not has_created and not has_updated and not has_source_type and not has_speaker:
+    has_readable_category = readableCategory and str(readableCategory).strip() != ""
+    if not has_keyword and not has_created and not has_updated and not has_source_type and not has_speaker and not has_readable_category:
         return jsonify({
             "data": {
                 "contents": {
@@ -652,6 +654,7 @@ def nameSearch():
         updated_version=updatedVersion,
         quest_source_type=questSourceType,
         speaker_keyword=speakerKeyword,
+        readable_category=readableCategory,
     )
     end = time.time()
 

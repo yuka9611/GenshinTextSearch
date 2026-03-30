@@ -215,49 +215,70 @@ const showUpdatedVersionTag = () => {
 
 <style scoped>
 .translate {
-    margin-bottom: 10px;
+    margin-bottom: 14px;
+}
+
+.translate:last-child {
+    margin-bottom: 0;
 }
 
 .entry {
-    padding-bottom: 20px;
-    padding-top: 20px;
+    position: relative;
     line-height: 30px;
     transition: all 0.3s ease;
-    border-radius: 8px;
-    padding: 16px;
-    margin-bottom: 12px;
-    background-color: #f9f9f9;
+    border-radius: 22px;
+    padding: 20px 20px 18px;
+    margin-bottom: 14px;
+    background:
+        linear-gradient(180deg, rgba(255, 253, 248, 0.98), rgba(249, 243, 232, 0.94));
+    border: 1px solid rgba(190, 164, 124, 0.32);
+    box-shadow: 0 12px 26px rgba(44, 57, 54, 0.07);
 }
 
 .entry:hover {
-    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.1);
+    box-shadow: 0 18px 32px rgba(44, 57, 54, 0.10);
     transform: translateY(-2px);
 }
 
-.entry-with-voice {
-    border-left: 4px solid #409eff;
+.entry-with-voice::before {
+    content: "";
+    position: absolute;
+    left: 0;
+    top: 18px;
+    bottom: 18px;
+    width: 4px;
+    border-radius: 999px;
+    background: linear-gradient(180deg, var(--theme-primary), var(--theme-accent));
 }
 
 .info {
     font-size: 14px;
     display: flex;
     align-items: center;
+    flex-wrap: wrap;
     gap: 8px;
-    margin-bottom: 8px;
+    margin-bottom: 10px;
 }
 
 .language-label {
-    font-weight: 500;
-    color: #606266;
+    display: inline-flex;
+    align-items: center;
+    min-height: 28px;
+    padding: 0 10px;
+    border-radius: 999px;
+    font-weight: 700;
+    color: var(--theme-ink);
+    background: rgba(183, 140, 79, 0.12);
+    font-family: var(--font-title);
 }
 
 .voice-buttons {
     display: inline-flex;
-    gap: 4px;
+    gap: 6px;
 }
 
 .copyButton {
-    margin-left: 8px;
+    margin-left: auto;
     vertical-align: middle;
     transition: all 0.3s ease;
 }
@@ -267,20 +288,25 @@ const showUpdatedVersionTag = () => {
 }
 
 .origin {
-    color: #ab9d96;
+    color: var(--theme-text-muted);
     display: flex;
     align-items: center;
+    flex-wrap: wrap;
     gap: 4px;
+    padding: 10px 12px;
+    border-radius: 14px;
+    background: rgba(47, 105, 101, 0.06);
+    border: 1px solid rgba(47, 105, 101, 0.1);
 }
 
 .origin-label {
     font-size: 13px;
-    color: #909399;
+    color: var(--theme-text-soft);
 }
 
 .origin-value {
     font-size: 13px;
-    color: #606266;
+    color: var(--theme-text);
 }
 
 .talkOrigin {
@@ -289,36 +315,40 @@ const showUpdatedVersionTag = () => {
 }
 
 .talkOrigin:hover {
-    opacity: 0.8;
+    border-color: rgba(47, 105, 101, 0.24);
+    background: rgba(47, 105, 101, 0.10);
 }
 
 .talkOrigin:hover .origin-value {
-    color: #409eff;
+    color: var(--theme-primary);
 }
 
 .talkOrigin > .gotoIcon {
     transition: all 0.3s ease;
     margin-left: 0;
     font-size: 12px;
-    color: #909399;
+    color: var(--theme-text-soft);
 }
 
 .talkOrigin:hover > .gotoIcon {
     padding-left: 5px;
-    color: #409eff;
+    color: var(--theme-primary);
 }
 
 .versionTags {
     display: flex;
     gap: 8px;
     flex-wrap: wrap;
-    margin: 10px 0;
+    margin: 12px 0 10px;
 }
 
 .versionTag {
-    border-radius: 999px;
     font-size: 12px;
     padding: 2px 10px;
+}
+
+.translate :deep(p) {
+    margin: 0;
 }
 
 @media (max-width: 720px) {

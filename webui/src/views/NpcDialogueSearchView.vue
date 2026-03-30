@@ -1,10 +1,11 @@
 <script setup>
 import { computed, onBeforeMount, ref, watch } from 'vue'
-import { Search } from '@element-plus/icons-vue'
 import { useRouter } from 'vue-router'
 import api from '@/api/keywordQuery'
+import SearchBar from '@/components/SearchBar.vue'
 import useLanguage from '@/composables/useLanguage'
 import useVersion from '@/composables/useVersion'
+import formatText from '@/utils/formatText'
 
 const router = useRouter()
 
@@ -35,10 +36,6 @@ const uiText = {
   dialogueSummary: '搜索耗时: {time}ms，找到 {count} 张对话卡片',
   unknown: '未知',
   selectedNpc: '当前名称组',
-}
-
-const formatText = (template, values) => {
-  return template.replace(/\{(\w+)\}/g, (_, key) => String(values[key] ?? ''))
 }
 
 const {
@@ -215,7 +212,7 @@ const gotoDialogueDetail = (group) => {
 </script>
 
 <template>
-  <div class="viewWrapper">
+  <div class="viewWrapper pageShell">
     <h1 class="pageTitle">{{ uiText.pageTitle }}</h1>
     <div class="helpText">
       <p>{{ uiText.helpLine1 }}</p>
@@ -223,26 +220,15 @@ const gotoDialogueDetail = (group) => {
     </div>
 
     <div class="stickySearchSection">
-      <div class="searchBar">
-        <el-input
-          v-model="npcKeyword"
-          style="max-width: 600px;"
-          :placeholder="uiText.npcPlaceholder"
-          class="input-with-select"
-          @keyup.enter.native="onNpcSearchClicked"
-          clearable
-        >
-          <template #prepend>
-            <el-select v-model="selectedInputLanguage" :placeholder="uiText.searchLanguage" class="languageSelector">
-              <el-option v-for="(v, k) in supportedInputLanguage" :key="k" :label="v" :value="k" />
-            </el-select>
-          </template>
-          <template #append>
-            <el-button :icon="Search" @click="onNpcSearchClicked" />
-          </template>
-        </el-input>
-        <span class="searchSummary">{{ npcSummary }}</span>
-      </div>
+      <SearchBar
+        v-model:keyword="npcKeyword"
+        v-model:selectedLanguage="selectedInputLanguage"
+        :supportedLanguages="supportedInputLanguage"
+        :summary="npcSummary"
+        :inputPlaceholder="uiText.npcPlaceholder"
+        :languagePlaceholder="uiText.searchLanguage"
+        @search="onNpcSearchClicked"
+      />
 
       <div class="filterBar">
         <el-select v-model="npcCreatedVersionFilter" :placeholder="uiText.npcCreatedVersion" class="versionInput" clearable filterable>
@@ -254,18 +240,18 @@ const gotoDialogueDetail = (group) => {
       </div>
     </div>
 
-    <div class="resultSection">
-      <h2>{{ uiText.npcResults }}</h2>
+    <div class="resultSection resultsSection">
+      <h2 class="resultsSectionTitle">{{ uiText.npcResults }}</h2>
       <el-empty v-if="npcSearched && !loadingNpcs && npcResults.length === 0" :description="uiText.noNpcResults" />
-      <div v-else class="resultGrid">
+      <div v-else class="resultGrid cardGrid cardGrid--wide">
         <el-card
           v-for="npc in npcResults"
           :key="getNpcCardKey(npc)"
-          class="resultCard"
+          class="resultCard cardPanel"
           :class="{ selectedCard: selectedNpc && getNpcCardKey(selectedNpc) === getNpcCardKey(npc) }"
         >
-          <div class="cardTitle">{{ npc.name }}</div>
-          <div class="versionTags">
+          <div class="cardTitle cardTitleText">{{ npc.name }}</div>
+          <div class="versionTags tagRow">
             <el-tag size="small" effect="plain">{{ uiText.created }}: {{ resolveVersionValue(npc, 'created') }}</el-tag>
             <el-tag v-if="showUpdatedVersionTag(npc)" size="small" effect="plain">{{ uiText.updated }}: {{ resolveVersionValue(npc, 'updated') }}</el-tag>
           </div>
@@ -274,8 +260,8 @@ const gotoDialogueDetail = (group) => {
       </div>
     </div>
 
-    <div v-if="selectedNpc" class="resultSection">
-      <h2>{{ uiText.dialogueResults }} - {{ selectedNpc.name }}</h2>
+    <div v-if="selectedNpc" class="resultSection resultsSection">
+      <h2 class="resultsSectionTitle">{{ uiText.dialogueResults }} - {{ selectedNpc.name }}</h2>
       <div class="selectedMeta">{{ uiText.selectedNpc }}: {{ selectedNpc.name }}</div>
       <div class="filterBar">
         <el-select v-model="dialogueCreatedVersionFilter" :placeholder="uiText.dialogueCreatedVersion" class="versionInput" clearable filterable>
@@ -297,19 +283,19 @@ const gotoDialogueDetail = (group) => {
       </div>
 
       <el-empty v-if="dialogueLoaded && !loadingDialogues && dialogueGroups.length === 0" :description="uiText.noDialogueResults" />
-      <div v-else class="resultGrid">
-        <el-card v-for="group in dialogueGroups" :key="group.groupKey" class="resultCard dialogueCard">
-          <div class="cardTitle">{{ uiText.talkId }}: {{ group.talkId }}</div>
-          <div v-if="group.dialogueIdFallback !== null && group.dialogueIdFallback !== undefined" class="cardMeta">
+      <div v-else class="resultGrid cardGrid cardGrid--wide">
+        <el-card v-for="group in dialogueGroups" :key="group.groupKey" class="resultCard cardPanel dialogueCard">
+          <div class="cardTitle cardTitleText">{{ uiText.talkId }}: {{ group.talkId }}</div>
+          <div v-if="group.dialogueIdFallback !== null && group.dialogueIdFallback !== undefined" class="cardMeta cardMetaText">
             {{ uiText.dialogueId }}: {{ group.dialogueIdFallback }}
           </div>
-          <div class="cardMeta">{{ uiText.lineCount }}: {{ group.lineCount }}</div>
+          <div class="cardMeta cardMetaText">{{ uiText.lineCount }}: {{ group.lineCount }}</div>
           <div v-if="group.previewLines?.length" class="previewBlock">
             <div v-for="(line, index) in group.previewLines" :key="`${group.groupKey}-${index}`" class="previewLine">
               {{ line }}
             </div>
           </div>
-          <div class="versionTags">
+          <div class="versionTags tagRow">
             <el-tag size="small" effect="plain">{{ uiText.created }}: {{ resolveVersionValue(group, 'created') }}</el-tag>
             <el-tag v-if="showUpdatedVersionTag(group)" size="small" effect="plain">{{ uiText.updated }}: {{ resolveVersionValue(group, 'updated') }}</el-tag>
           </div>
@@ -321,46 +307,6 @@ const gotoDialogueDetail = (group) => {
 </template>
 
 <style scoped>
-.viewWrapper {
-  position: relative;
-  width: var(--page-width);
-  margin: 0 auto;
-  background-color: #fff;
-  box-shadow: var(--page-shadow);
-  border-radius: var(--page-radius);
-  padding: var(--page-padding);
-  overflow: visible;
-}
-
-.pageTitle {
-  border-bottom: 1px #ccc solid;
-  padding-bottom: 10px;
-}
-
-.helpText {
-  margin: 20px 0;
-  color: #999;
-}
-
-.searchBar {
-  padding-bottom: 8px;
-  box-sizing: border-box;
-}
-
-.languageSelector {
-  width: 120px;
-}
-
-.languageSelector:deep(input) {
-  text-align: center;
-}
-
-.searchSummary {
-  margin-left: 10px;
-  color: var(--el-input-text-color, var(--el-text-color-regular));
-  font-size: 14px;
-}
-
 .dialogueSummary {
   display: block;
   margin: 0 0 12px;
@@ -369,50 +315,25 @@ const gotoDialogueDetail = (group) => {
 .filterBar {
   display: flex;
   flex-wrap: wrap;
-  gap: 8px;
-  margin: 10px 0 12px;
+  gap: 10px;
+  margin: 0;
 }
 
 .versionInput {
-  width: 180px;
-}
-
-.resultSection {
-  margin-top: 20px;
-}
-
-.resultGrid {
-  display: grid;
-  gap: 12px;
-  grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
-}
-
-.resultCard {
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
+  width: 188px;
 }
 
 .selectedCard {
-  border-color: var(--el-color-primary);
+  box-shadow: 0 0 0 2px rgba(var(--theme-primary-rgb), 0.18), 0 18px 32px rgba(44, 57, 54, 0.10);
 }
 
 .dialogueCard {
   min-height: 220px;
 }
 
-.cardTitle {
-  font-weight: 600;
-}
-
-.cardMeta {
-  color: #888;
-  font-size: 13px;
-}
-
 .selectedMeta {
   margin-bottom: 8px;
-  color: #666;
+  color: var(--theme-text-muted);
 }
 
 .previewBlock {
@@ -423,15 +344,9 @@ const gotoDialogueDetail = (group) => {
 }
 
 .previewLine {
-  color: #666;
+  color: var(--theme-text-muted);
   font-size: 13px;
   line-height: 1.6;
-}
-
-.versionTags {
-  display: flex;
-  gap: 6px;
-  flex-wrap: wrap;
 }
 
 .resultControls {
@@ -440,15 +355,14 @@ const gotoDialogueDetail = (group) => {
   flex-wrap: wrap;
   gap: 8px;
   margin-bottom: 12px;
+  padding: 12px 14px;
+  border-radius: 18px;
+  border: 1px solid rgba(190, 164, 124, 0.28);
+  background: rgba(255, 255, 255, 0.46);
+  color: var(--theme-text-muted);
 }
 
 @media (max-width: 720px) {
-  .searchSummary {
-    display: block;
-    margin-left: 0;
-    margin-top: 8px;
-  }
-
   .versionInput {
     width: 100%;
   }
