@@ -12,8 +12,8 @@ import formatText from '@/utils/formatText'
 const router = useRouter()
 
 const uiText = {
-  pageTitle: '任务 / 可读物搜索',
-  helpText: '输入任务名称、可读物标题或版本号，支持仅按版本筛选；搜索结果可直接跳转到详情页面。',
+  pageTitle: '任务 / 阅读物搜索',
+  helpText: '输入任务名称、阅读物标题或版本号，支持仅按版本筛选；搜索结果可直接跳转到详情页面。',
   questSearchPlaceholder: '输入任务名称或版本',
   readableSearchPlaceholder: '输入阅读物标题或版本',
   searchLanguage: '搜索语言',
@@ -35,8 +35,8 @@ const uiText = {
   created: '创建',
   updated: '更新',
   viewDetails: '查看详情',
-  readableResults: '可读物结果',
-  noReadableResults: '没有找到可读物结果',
+  readableResults: '阅读物结果',
+  noReadableResults: '没有找到阅读物结果',
   waitingResults: '等待检索',
   category: '类别',
   readableCategory: '阅读物类别',
