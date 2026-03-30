@@ -5,6 +5,7 @@ import re
 import subprocess
 import sys
 import time
+from dataclasses import dataclass
 
 # 日志配置
 
@@ -45,6 +46,8 @@ from version_control import (
     should_update_version,
 )
 from versioning import (
+    _extract_version_tag,
+    _version_tag_to_sort_key,
     _table_exists,
     get_meta,
     normalize_version_label,
@@ -75,6 +78,9 @@ DEFAULT_HISTORY_COMMIT_BATCH_SIZE = 50
 DEFAULT_GIT_BACKFILL_CHECKPOINT_EVERY = 100
 DEFAULT_FIX_COMMIT_BATCH_SIZE = 1000
 _git_cache = {}
+_snapshot_metadata_cache: dict[str, dict[str, object]] = {}
+_snapshot_textmap_file_groups_cache: dict[tuple[str, str], dict[str, list[str]]] = {}
+_snapshot_textmap_group_cache: dict[tuple[str, str, str], dict[str, object] | None] = {}
 
 # Git 命令缓存
 
@@ -100,6 +106,26 @@ READABLE_ONLY_PATHS = ["Readable"]
 SUBTITLE_ONLY_PATHS = ["Subtitle"]
 ANECDOTE_CONFIG_PATH = "ExcelBinOutput/AnecdoteExcelConfigData.json"
 MAIN_COOP_CONFIG_PATH = "ExcelBinOutput/MainCoopExcelConfigData.json"
+
+
+@dataclass(frozen=True)
+class VersionSnapshot:
+    version_tag: str
+    version_label: str
+    version_id: int
+    commit_sha: str
+    version_sort_key: int
+
+
+@dataclass(frozen=True)
+class SnapshotReplayRange:
+    raw_target_commit: str
+    raw_from_commit: str | None
+    target_snapshot: VersionSnapshot | None
+    from_snapshot: VersionSnapshot | None
+    base_snapshot: VersionSnapshot | None
+    snapshots: tuple[VersionSnapshot, ...]
+    resume_scope: str
 
 
 
@@ -350,6 +376,166 @@ def _resolve_commit_version(repo_path: str, commit_sha: str, commit_title: str) 
     except Exception as e:
         logger.error(f"解析提交版本失败 {commit_sha[:8]}: {e}")
         return commit_sha, None
+
+
+def _extract_history_version_parts(commit_title: str | None) -> tuple[str | None, str | None]:
+    normalized = normalize_version_label(commit_title) if commit_title else None
+    if not normalized:
+        return None, None
+    version_tag = _extract_version_tag(normalized)
+    if not version_tag:
+        return None, None
+    return normalized, version_tag
+
+
+def _build_snapshot_specs_from_commit_rows(
+    commit_rows: list[tuple[str, str]],
+) -> tuple[dict[str, str | None], list[tuple[str, str, str, int]]]:
+    commit_to_version_tag: dict[str, str | None] = {}
+    canonical_by_tag: dict[str, tuple[str, str]] = {}
+    current_tag: str | None = None
+
+    for commit_sha, commit_title in commit_rows:
+        version_label, explicit_tag = _extract_history_version_parts(commit_title)
+        if explicit_tag:
+            current_tag = explicit_tag
+            canonical_by_tag[explicit_tag] = (
+                version_label or explicit_tag,
+                commit_sha,
+            )
+        commit_to_version_tag[commit_sha] = current_tag
+
+    snapshot_specs: list[tuple[str, str, str, int]] = []
+    for version_tag, (version_label, commit_sha) in canonical_by_tag.items():
+        sort_key = _version_tag_to_sort_key(version_tag)
+        if sort_key is None:
+            continue
+        snapshot_specs.append((version_tag, version_label, commit_sha, sort_key))
+
+    snapshot_specs.sort(key=lambda item: (item[3], item[0], item[2]))
+    return commit_to_version_tag, snapshot_specs
+
+
+def _get_version_snapshot_metadata(repo_path: str) -> dict[str, object]:
+    cached = _snapshot_metadata_cache.get(repo_path)
+    if cached is not None:
+        return cached
+
+    commit_rows = _list_commits(repo_path, "HEAD")
+    commit_to_version_tag, snapshot_specs = _build_snapshot_specs_from_commit_rows(commit_rows)
+
+    snapshots: list[VersionSnapshot] = []
+    snapshot_by_tag: dict[str, VersionSnapshot] = {}
+    for version_tag, version_label, commit_sha, sort_key in snapshot_specs:
+        version_id = _resolve_version_id(version_label)
+        if version_id is None:
+            continue
+        snapshot = VersionSnapshot(
+            version_tag=version_tag,
+            version_label=version_label,
+            version_id=version_id,
+            commit_sha=commit_sha,
+            version_sort_key=sort_key,
+        )
+        snapshots.append(snapshot)
+        snapshot_by_tag[version_tag] = snapshot
+
+    metadata = {
+        "snapshots": tuple(snapshots),
+        "snapshot_by_tag": snapshot_by_tag,
+        "commit_to_version_tag": commit_to_version_tag,
+    }
+    _snapshot_metadata_cache[repo_path] = metadata
+    return metadata
+
+
+def _resolve_commit_snapshot(
+    repo_path: str,
+    commit_sha: str | None,
+    *,
+    metadata: dict[str, object] | None = None,
+) -> VersionSnapshot | None:
+    if not commit_sha:
+        return None
+    snapshot_metadata = metadata or _get_version_snapshot_metadata(repo_path)
+    commit_to_version_tag = snapshot_metadata.get("commit_to_version_tag", {})
+    snapshot_by_tag = snapshot_metadata.get("snapshot_by_tag", {})
+    if not isinstance(commit_to_version_tag, dict) or not isinstance(snapshot_by_tag, dict):
+        return None
+    version_tag = commit_to_version_tag.get(commit_sha)
+    if version_tag is None:
+        return None
+    snapshot = snapshot_by_tag.get(version_tag)
+    return snapshot if isinstance(snapshot, VersionSnapshot) else None
+
+
+def _resolve_snapshot_replay_range(
+    repo_path: str,
+    *,
+    target_commit: str,
+    from_commit: str | None = None,
+) -> SnapshotReplayRange:
+    raw_target_commit = _resolve_commit(repo_path, target_commit)
+    raw_from_commit = _resolve_commit(repo_path, from_commit) if from_commit else None
+    metadata = _get_version_snapshot_metadata(repo_path)
+    snapshots = tuple(metadata.get("snapshots", ()))
+    if not isinstance(snapshots, tuple):
+        snapshots = tuple()
+
+    target_snapshot = _resolve_commit_snapshot(
+        repo_path,
+        raw_target_commit,
+        metadata=metadata,
+    )
+    from_snapshot = _resolve_commit_snapshot(
+        repo_path,
+        raw_from_commit,
+        metadata=metadata,
+    ) if raw_from_commit else None
+
+    snapshot_index = {snapshot.version_tag: idx for idx, snapshot in enumerate(snapshots)}
+    target_idx = snapshot_index.get(target_snapshot.version_tag) if target_snapshot else None
+    if target_idx is None:
+        return SnapshotReplayRange(
+            raw_target_commit=raw_target_commit,
+            raw_from_commit=raw_from_commit,
+            target_snapshot=target_snapshot,
+            from_snapshot=from_snapshot,
+            base_snapshot=None,
+            snapshots=tuple(),
+            resume_scope="",
+        )
+
+    start_idx = 0
+    if from_snapshot is not None:
+        start_idx = snapshot_index.get(from_snapshot.version_tag, -1) + 1
+    if start_idx < 0:
+        start_idx = 0
+
+    if start_idx > target_idx:
+        replay_snapshots: tuple[VersionSnapshot, ...] = tuple()
+    else:
+        replay_snapshots = snapshots[start_idx : target_idx + 1]
+    base_snapshot = snapshots[start_idx - 1] if start_idx > 0 else None
+    resume_scope = (
+        f"{from_snapshot.commit_sha if from_snapshot else ''}.."
+        f"{target_snapshot.commit_sha if target_snapshot else ''}"
+    )
+    return SnapshotReplayRange(
+        raw_target_commit=raw_target_commit,
+        raw_from_commit=raw_from_commit,
+        target_snapshot=target_snapshot,
+        from_snapshot=from_snapshot,
+        base_snapshot=base_snapshot,
+        snapshots=replay_snapshots,
+        resume_scope=resume_scope,
+    )
+
+
+def _snapshot_display_label(snapshot: VersionSnapshot | None) -> str:
+    if snapshot is None:
+        return "unknown"
+    return f"{snapshot.version_tag} ({snapshot.commit_sha[:8]})"
 
 def _resolve_first_version_for_path(repo_path: str, file_path: str) -> tuple[str | None, int | None]:
     """解析文件首个提交及版本。"""
@@ -657,6 +843,22 @@ def _diff_entries(
     return entries
 
 
+def _snapshot_entries(
+    repo_path: str,
+    snapshot: VersionSnapshot,
+    previous_snapshot: VersionSnapshot | None,
+    include_paths: list[str] | None = None,
+) -> list[dict]:
+    if previous_snapshot is None:
+        return _initial_entries(repo_path, snapshot.commit_sha, include_paths=include_paths)
+    return _diff_entries(
+        repo_path,
+        previous_snapshot.commit_sha,
+        snapshot.commit_sha,
+        include_paths=include_paths,
+    )
+
+
 def _git_show_text(repo_path: str, commit: str, rel_path: str) -> str | None:
     """读取指定提交中的文本文件。"""
     try:
@@ -729,6 +931,63 @@ def _load_worktree_textmap_group(repo_path: str, base_name: str) -> dict[str, ob
         return None
 
     return merged if matched else None
+
+
+def _list_snapshot_textmap_groups(
+    repo_path: str,
+    commit_sha: str,
+) -> dict[str, list[str]]:
+    cache_key = (repo_path, commit_sha)
+    cached = _snapshot_textmap_file_groups_cache.get(cache_key)
+    if cached is not None:
+        return cached
+
+    groups: dict[str, list[str]] = {}
+    out = _run_git(
+        repo_path,
+        ["ls-tree", "-r", "--name-only", commit_sha, "--", "TextMap"],
+        check=False,
+    )
+    for rel_path in out.splitlines():
+        rel_path = rel_path.strip()
+        if not rel_path:
+            continue
+        file_name = os.path.basename(rel_path)
+        parsed = parse_textmap_file_name(file_name)
+        if parsed is None:
+            continue
+        base_name, _split_part = parsed
+        groups.setdefault(base_name, []).append(rel_path)
+
+    for base_name in groups:
+        groups[base_name].sort()
+    _snapshot_textmap_file_groups_cache[cache_key] = groups
+    return groups
+
+
+def _load_snapshot_textmap_group(
+    repo_path: str,
+    commit_sha: str,
+    base_name: str,
+) -> dict[str, object] | None:
+    cache_key = (repo_path, commit_sha, base_name)
+    cached = _snapshot_textmap_group_cache.get(cache_key)
+    if cached is not None or cache_key in _snapshot_textmap_group_cache:
+        return cached
+
+    merged: dict[str, object] = {}
+    matched = False
+    groups = _list_snapshot_textmap_groups(repo_path, commit_sha)
+    for rel_path in groups.get(base_name, []):
+        payload = _git_show_json(repo_path, commit_sha, rel_path)
+        if not isinstance(payload, dict):
+            continue
+        merged.update(payload)
+        matched = True
+
+    result = merged if matched else None
+    _snapshot_textmap_group_cache[cache_key] = result
+    return result
 
 
 def _git_show_json(repo_path: str, commit: str, rel_path: str):
@@ -985,6 +1244,44 @@ def _prepare_resume_for_commits(
     return start_idx
 
 
+def _prepare_resume_for_snapshots(
+    *,
+    resume_target_key: str,
+    resume_done_key: str,
+    resolved_target: str,
+    snapshots: tuple[VersionSnapshot, ...],
+    force: bool,
+    label: str,
+) -> int:
+    """根据断点计算版本快照起点。"""
+    total_snapshots = len(snapshots)
+    snapshot_index = {snapshot.commit_sha: idx for idx, snapshot in enumerate(snapshots)}
+
+    if force:
+        set_meta(resume_target_key, "")
+        set_meta(resume_done_key, "")
+
+    start_idx = 0
+    resume_target = get_meta(resume_target_key, "")
+    resume_done = get_meta(resume_done_key, "")
+    if not force and resume_target == resolved_target and resume_done:
+        done_idx = snapshot_index.get(resume_done)
+        if done_idx is not None:
+            start_idx = done_idx + 1
+            if start_idx < total_snapshots:
+                done_snapshot = snapshots[done_idx]
+                print(
+                    f"{label} 断点续跑：从第 {start_idx + 1}/{total_snapshots} 个版本快照继续 "
+                    f"(上次完成: {done_snapshot.version_tag} / {resume_done[:8]})"
+                )
+            else:
+                print(f"{label} 断点续跑：版本快照已全部处理，仅执行元数据收尾。")
+        else:
+            print(f"{label} 的断点不在当前快照链中，已从头开始。")
+            start_idx = 0
+    return start_idx
+
+
 def _extract_quest_backfill_stats(backfill_result) -> tuple[int, int]:
     """标准化任务回填统计结果。"""
     if isinstance(backfill_result, dict):
@@ -1199,6 +1496,79 @@ def _backfill_quest_version_by_commit_entry(
         logger.debug(f"Updated git_created_version_id for quest {new_row[0]} to {version_id}")
 
     return 1 if (created_updated or git_updated) else 0
+
+
+def _replay_quest_snapshot_entries(
+    cursor,
+    *,
+    repo_path: str,
+    snapshots: tuple[VersionSnapshot, ...],
+    base_snapshot: VersionSnapshot | None,
+    target_quest_ids: set[int] | None = None,
+    start_idx: int = 0,
+    pbar_desc: str = "任务回放",
+    checkpoint_every: int = DEFAULT_HISTORY_COMMIT_BATCH_SIZE,
+    resume_target_key: str | None = None,
+    resume_done_key: str | None = None,
+    resume_scope: str | None = None,
+) -> int:
+    if not snapshots:
+        return 0
+
+    checkpoint_every = max(1, int(checkpoint_every))
+    quest_history_include_paths = _build_quest_history_include_paths(repo_path)
+    updated_total = 0
+    processed_snapshots = 0
+    last_snapshot: VersionSnapshot | None = None
+
+    pbar = LightweightProgress(len(snapshots), desc=pbar_desc, unit="snapshots", initial_print=False)
+    pbar.current = start_idx
+    pbar.update(0)
+    with pbar:
+        for idx in range(start_idx, len(snapshots)):
+            snapshot = snapshots[idx]
+            last_snapshot = snapshot
+            previous_snapshot = snapshots[idx - 1] if idx > 0 else base_snapshot
+            postfix = f"{snapshot.version_tag} ({snapshot.commit_sha[:8]})"
+
+            entries = _snapshot_entries(
+                repo_path,
+                snapshot,
+                previous_snapshot,
+                include_paths=quest_history_include_paths,
+            )
+            for entry in entries:
+                try:
+                    updated_total += _backfill_quest_version_by_commit_entry(
+                        cursor,
+                        repo_path=repo_path,
+                        commit_sha=snapshot.commit_sha,
+                        parent_sha=previous_snapshot.commit_sha if previous_snapshot else None,
+                        entry=entry,
+                        version_id=snapshot.version_id,
+                        target_quest_ids=target_quest_ids,
+                    )
+                except Exception as e:
+                    print(f"处理任务快照条目失败: {e}")
+
+            pbar.update(postfix=postfix)
+            processed_snapshots += 1
+            if (
+                resume_target_key
+                and resume_done_key
+                and resume_scope
+                and processed_snapshots % checkpoint_every == 0
+            ):
+                conn.commit()
+                set_meta(resume_target_key, resume_scope)
+                set_meta(resume_done_key, snapshot.commit_sha)
+
+    if processed_snapshots > 0 and last_snapshot is not None:
+        conn.commit()
+        if resume_target_key and resume_done_key and resume_scope:
+            set_meta(resume_target_key, resume_scope)
+            set_meta(resume_done_key, last_snapshot.commit_sha)
+    return updated_total
 
 
 def apply_quest_version_delta_from_textmap(
@@ -1528,6 +1898,222 @@ def _has_any_version_data(table_name: str) -> bool:
         cursor.close()
 
 
+def _backfill_versions_from_snapshots(
+    *,
+    target_commit: str = "HEAD",
+    from_commit: str | None = None,
+    force: bool = False,
+    batch_size: int = DEFAULT_BATCH_SIZE,
+    verbose: bool = False,
+    include_paths: list[str] | None = None,
+    table_name: str,
+    meta_commit_key: str,
+    meta_title_key: str,
+    resume_target_key: str,
+    resume_done_key: str,
+    process_entry_fn,
+    pbar_desc: str,
+    commit_batch_size: int = DEFAULT_HISTORY_COMMIT_BATCH_SIZE,
+):
+    """通用版本快照回放入口，按版本快照批次处理指定资源。"""
+    commit_batch_size = max(1, int(commit_batch_size))
+
+    try:
+        ensure_version_schema()
+    except Exception as e:
+        logger.error(f"Error ensuring version schema: {e}")
+        raise
+
+    repo_path = DATA_PATH
+    try:
+        replay_range = _resolve_snapshot_replay_range(
+            repo_path,
+            target_commit=target_commit,
+            from_commit=from_commit,
+        )
+    except Exception as e:
+        logger.error(f"Error resolving commits: {e}")
+        raise
+
+    target_snapshot = replay_range.target_snapshot
+    from_snapshot = replay_range.from_snapshot
+    base_snapshot = replay_range.base_snapshot
+    snapshots = replay_range.snapshots
+    resolved_target = target_snapshot.commit_sha if target_snapshot else replay_range.raw_target_commit
+    resolved_from = from_snapshot.commit_sha if from_snapshot else None
+    resume_scope = replay_range.resume_scope
+
+    try:
+        if target_snapshot is None:
+            logger.info(
+                f"{table_name} 版本快照回放：目标提交 {replay_range.raw_target_commit[:8]} "
+                "未映射到任何版本快照，已跳过。"
+            )
+            return
+
+        if not force and resolved_from is None and get_meta(meta_commit_key) == resolved_target:
+            if _has_any_version_data(table_name):
+                logger.info(f"{table_name} 版本快照回放已完成于 {target_snapshot.version_tag}，跳过。")
+                return
+            logger.info(
+                f"{table_name} 版本快照回放元数据指向 {target_snapshot.version_tag}，"
+                f"但 {table_name} 版本列为空或不完整；将重新执行。"
+            )
+    except Exception as e:
+        logger.error(f"Error checking backfill status: {e}")
+    try:
+        if not snapshots:
+            if from_snapshot and target_snapshot and from_snapshot.version_tag == target_snapshot.version_tag:
+                logger.info(
+                    f"{table_name} 版本快照回放：起止提交均折算到 {target_snapshot.version_tag}，无需处理。"
+                )
+            else:
+                logger.info(f"{table_name} 版本快照回放：没有需要处理的版本快照。")
+            return
+        total_snapshots = len(snapshots)
+        try:
+            start_idx = _prepare_resume_for_snapshots(
+                resume_target_key=resume_target_key,
+                resume_done_key=resume_done_key,
+                resolved_target=resume_scope,
+                snapshots=snapshots,
+                force=force,
+                label=f"{table_name} 版本快照回放",
+            )
+        except Exception as e:
+            logger.error(f"Error preparing resume for snapshots: {e}")
+            start_idx = 0
+
+        if start_idx == 0:
+            if from_snapshot:
+                logger.info(
+                    f"{table_name} 版本快照回放开始："
+                    f"{total_snapshots} 个快照 (起点: {from_snapshot.version_tag}, 目标: {target_snapshot.version_tag})"
+                )
+            else:
+                logger.info(
+                    f"{table_name} 版本快照回放开始："
+                    f"{total_snapshots} 个快照 (目标: {target_snapshot.version_tag})"
+                )
+        else:
+            logger.info(
+                f"{table_name} 版本快照回放继续："
+                f"剩余 {total_snapshots - start_idx} / 总计 {total_snapshots} 个快照 "
+                f"(目标: {target_snapshot.version_tag})"
+            )
+
+        cursor = conn.cursor()
+        logger.info(f"正在处理 {total_snapshots} 个 {table_name} 版本快照...")
+        last_snapshot: VersionSnapshot | None = None
+        processed_snapshots = 0
+        try:
+            pbar = LightweightProgress(total_snapshots, desc=pbar_desc, unit="snapshots", initial_print=False)
+            pbar.current = start_idx
+            pbar.update(0)
+            with pbar:
+                for idx in range(start_idx, total_snapshots):
+                    postfix = f"Snapshot {idx}"
+                    try:
+                        snapshot = snapshots[idx]
+                        previous_snapshot = snapshots[idx - 1] if idx > 0 else base_snapshot
+                        last_snapshot = snapshot
+                        postfix = f"{snapshot.version_tag} ({snapshot.commit_sha[:8]})"
+
+                        try:
+                            entries = _snapshot_entries(
+                                repo_path,
+                                snapshot,
+                                previous_snapshot,
+                                include_paths=include_paths,
+                            )
+                        except Exception as e:
+                            logger.error(f"Error getting entries for snapshot {snapshot.version_tag}: {e}")
+                            pbar.update(postfix=postfix)
+                            continue
+
+                        entry_errors = 0
+                        for entry in entries:
+                            try:
+                                process_entry_fn(
+                                    cursor,
+                                    repo_path,
+                                    snapshot.commit_sha,
+                                    previous_snapshot.commit_sha if previous_snapshot else None,
+                                    entry,
+                                    snapshot.version_id,
+                                    snapshot.version_label,
+                                    batch_size,
+                                )
+                            except Exception as e:
+                                logger.error(f"Error processing {table_name} entry: {e}")
+                                entry_errors += 1
+                        if entry_errors > 0:
+                                logger.warning(
+                                    f"处理快照 {snapshot.version_tag} ({snapshot.commit_sha[:8]}) "
+                                    f"的条目时出现 {entry_errors} 个错误"
+                                )
+
+                        pbar.update(postfix=postfix)
+                        processed_snapshots += 1
+
+                        if processed_snapshots % commit_batch_size == 0:
+                            try:
+                                conn.commit()
+                                set_meta(resume_target_key, resume_scope)
+                                set_meta(resume_done_key, snapshot.commit_sha)
+                                logger.debug(f"已批量提交到快照 {snapshot.version_tag} ({snapshot.commit_sha[:8]})")
+                            except Exception as e:
+                                logger.error(f"Error committing changes for batch: {e}")
+                    except Exception as e:
+                        logger.error(f"Error processing snapshot {idx}: {e}")
+                        pbar.update(postfix=postfix)
+                if processed_snapshots > 0 and last_snapshot is not None:
+                    try:
+                        conn.commit()
+                        set_meta(resume_target_key, resume_scope)
+                        set_meta(resume_done_key, last_snapshot.commit_sha)
+                        logger.info(
+                            f"最终快照已完成到 {last_snapshot.version_tag} ({last_snapshot.commit_sha[:8]})"
+                        )
+                    except Exception as e:
+                        logger.error(f"Error finalizing commit: {e}")
+
+        except BaseException:
+            conn.rollback()
+            logger.error(
+                f"{table_name} 版本快照回放被中断；已保存断点，重新运行可继续。",
+                exc_info=True
+            )
+            if last_snapshot is not None:
+                try:
+                    set_meta(resume_target_key, resume_scope)
+                    set_meta(resume_done_key, last_snapshot.commit_sha)
+                    logger.info(
+                        f"已在快照 {last_snapshot.version_tag} ({last_snapshot.commit_sha[:8]}) 保存断点"
+                    )
+                except Exception as save_error:
+                    logger.error(f"Error saving checkpoint: {save_error}")
+            raise
+        finally:
+            try:
+                cursor.close()
+            except Exception as e:
+                logger.error(f"Error closing cursor: {e}")
+
+        try:
+            if resolved_from is None:
+                set_meta(meta_commit_key, resolved_target)
+                set_meta(meta_title_key, target_snapshot.version_label)
+            set_meta(resume_target_key, "")
+            set_meta(resume_done_key, "")
+            rebuild_version_catalog([table_name])
+        except Exception as e:
+            logger.error(f"Error finalizing metadata: {e}")
+    except Exception as e:
+        logger.error(f"{table_name} 版本快照回放失败: {e}", exc_info=True)
+        raise
+
+
 def _backfill_versions_from_history(
     *,
     target_commit: str = "HEAD",
@@ -1545,178 +2131,23 @@ def _backfill_versions_from_history(
     pbar_desc: str,
     commit_batch_size: int = DEFAULT_HISTORY_COMMIT_BATCH_SIZE,
 ):
-    """通用历史回放入口，按提交批次处理指定资源。"""
-    commit_batch_size = max(1, int(commit_batch_size))
-
-    try:
-        ensure_version_schema()
-    except Exception as e:
-        logger.error(f"Error ensuring version schema: {e}")
-        raise
-
-    repo_path = DATA_PATH
-    try:
-        resolved_target = _resolve_commit(repo_path, target_commit)
-        resolved_from = _resolve_commit(repo_path, from_commit) if from_commit else None
-        resume_scope = f"{resolved_from or ''}..{resolved_target}"
-    except Exception as e:
-        logger.error(f"Error resolving commits: {e}")
-        raise
-
-    try:
-        if not force and resolved_from is None and get_meta(meta_commit_key) == resolved_target:
-            if _has_any_version_data(table_name):
-                logger.info(f"{table_name} 历史回填已完成于 {resolved_target}，跳过。")
-                return
-            logger.info(
-                f"{table_name} 历史回填元数据指向 {resolved_target}，"
-                f"但 {table_name} 版本列为空或不完整；将重新执行。"
-            )
-    except Exception as e:
-        logger.error(f"Error checking backfill status: {e}")
-    try:
-        commits = _list_commits(repo_path, resolved_target, from_commit=resolved_from)
-        if not commits:
-            logger.info(f"{table_name} 历史回填：没有需要处理的提交。")
-            return
-        first_parent_sha = _resolve_first_parent_sha(repo_path, commits, resolved_from)
-        total_commits = len(commits)
-        try:
-            start_idx = _prepare_resume_for_commits(
-                resume_target_key=resume_target_key,
-                resume_done_key=resume_done_key,
-                resolved_target=resume_scope,
-                commits=commits,
-                force=force,
-                label=f"{table_name} 历史回填",
-            )
-        except Exception as e:
-            logger.error(f"Error preparing resume for commits: {e}")
-            start_idx = 0
-
-        if start_idx == 0:
-            if resolved_from:
-                logger.info(
-                    f"{table_name} 历史回填开始："
-                    f"{total_commits} 个提交 (起点: {resolved_from[:8]}, 目标: {resolved_target})"
-                )
-            else:
-                logger.info(f"{table_name} 历史回填开始：{total_commits} 个提交 (目标: {resolved_target})")
-        else:
-            logger.info(
-                f"{table_name} 历史回填继续："
-                f"剩余 {total_commits - start_idx} / 总计 {total_commits} 个提交 "
-                f"(目标: {resolved_target})"
-            )
-
-        cursor = conn.cursor()
-        logger.info(f"正在处理 {total_commits} 个 {table_name} 提交...")
-        last_commit_sha = None
-        processed_commits = 0
-        try:
-            pbar = LightweightProgress(total_commits, desc=pbar_desc, unit="commits", initial_print=False)
-            pbar.current = start_idx
-            pbar.update(0)
-            with pbar:
-                for idx in range(start_idx, total_commits):
-                    postfix = f"Commit {idx}"
-                    try:
-                        commit_sha, commit_title = commits[idx]
-                        last_commit_sha = commit_sha
-                        parent_sha = commits[idx - 1][0] if idx > 0 else first_parent_sha
-
-                        postfix = f"Commit {commit_sha[:8]}"
-
-                        try:
-                            version_label, version_id = _resolve_commit_version(repo_path, commit_sha, commit_title)
-                            if version_id is None:
-                                logger.warning(f"无法解析提交版本 {commit_sha[:8]}，已跳过")
-                                pbar.update(postfix=postfix)
-                                continue
-                        except Exception as e:
-                            logger.error(f"Error resolving version for commit {commit_sha}: {e}")
-                            pbar.update(postfix=postfix)
-                            continue
-
-                        try:
-                            entries = (
-                                _initial_entries(repo_path, commit_sha, include_paths=include_paths)
-                                if parent_sha is None
-                                else _diff_entries(repo_path, parent_sha, commit_sha, include_paths=include_paths)
-                            )
-                        except Exception as e:
-                            logger.error(f"Error getting entries for commit {commit_sha}: {e}")
-                            pbar.update(postfix=postfix)
-                            continue
-
-                        entry_errors = 0
-                        for entry in entries:
-                            try:
-                                process_entry_fn(cursor, repo_path, commit_sha, parent_sha, entry, version_id, version_label, batch_size)
-                            except Exception as e:
-                                logger.error(f"Error processing {table_name} entry: {e}")
-                                entry_errors += 1
-                        if entry_errors > 0:
-                                logger.warning(f"处理提交 {commit_sha[:8]} 的条目时出现 {entry_errors} 个错误")
-
-                        pbar.update(postfix=postfix)
-                        processed_commits += 1
-
-                        if processed_commits % commit_batch_size == 0:
-                            try:
-                                conn.commit()
-                                set_meta(resume_target_key, resume_scope)
-                                set_meta(resume_done_key, commit_sha)
-                                logger.debug(f"已批量提交到 {commit_sha[:8]}")
-                            except Exception as e:
-                                logger.error(f"Error committing changes for batch: {e}")
-                    except Exception as e:
-                        logger.error(f"Error processing commit {idx}: {e}")
-                        pbar.update(postfix=postfix)
-                if processed_commits > 0 and last_commit_sha:
-                    try:
-                        conn.commit()
-                        set_meta(resume_target_key, resume_scope)
-                        set_meta(resume_done_key, last_commit_sha)
-                        logger.info(f"最终提交已完成到 {last_commit_sha[:8]}")
-                    except Exception as e:
-                        logger.error(f"Error finalizing commit: {e}")
-
-        except BaseException:
-            conn.rollback()
-            logger.error(
-                f"{table_name} 历史回填被中断；已保存断点，重新运行可继续。",
-                exc_info=True
-            )
-            if last_commit_sha:
-                try:
-                    set_meta(resume_target_key, resume_scope)
-                    set_meta(resume_done_key, last_commit_sha)
-                    logger.info(f"已在提交 {last_commit_sha[:8]} 保存断点")
-                except Exception as save_error:
-                    logger.error(f"Error saving checkpoint: {save_error}")
-            raise
-        finally:
-            try:
-                cursor.close()
-            except Exception as e:
-                logger.error(f"Error closing cursor: {e}")
-
-        try:
-            if resolved_from is None:
-                set_meta(meta_commit_key, resolved_target)
-                if commits:
-                    title = _latest_commit_meta_title(commits) or commits[-1][0]
-                    set_meta(meta_title_key, title if title is not None else "")
-            if start_idx >= total_commits:
-                set_meta(resume_target_key, "")
-                set_meta(resume_done_key, "")
-            rebuild_version_catalog([table_name])
-        except Exception as e:
-            logger.error(f"Error finalizing metadata: {e}")
-    except Exception as e:
-        logger.error(f"{table_name} 历史回填失败: {e}", exc_info=True)
-        raise
+    """兼容旧入口名，内部改走版本快照回放。"""
+    _backfill_versions_from_snapshots(
+        target_commit=target_commit,
+        from_commit=from_commit,
+        force=force,
+        batch_size=batch_size,
+        verbose=verbose,
+        include_paths=include_paths,
+        table_name=table_name,
+        meta_commit_key=meta_commit_key,
+        meta_title_key=meta_title_key,
+        resume_target_key=resume_target_key,
+        resume_done_key=resume_done_key,
+        process_entry_fn=process_entry_fn,
+        pbar_desc=pbar_desc,
+        commit_batch_size=commit_batch_size,
+    )
 
 
 def backfill_versions_from_history(
@@ -1737,8 +2168,20 @@ def backfill_versions_from_history(
 
     repo_path = DATA_PATH
     try:
-        resolved_target = _resolve_commit(repo_path, target_commit)
-        resolved_from = _resolve_commit(repo_path, from_commit) if from_commit else None
+        replay_range = _resolve_snapshot_replay_range(
+            repo_path,
+            target_commit=target_commit,
+            from_commit=from_commit,
+        )
+        target_snapshot = replay_range.target_snapshot
+        from_snapshot = replay_range.from_snapshot
+        if target_snapshot is None:
+            logger.info(
+                f"版本快照回放：目标提交 {replay_range.raw_target_commit[:8]} 未映射到任何版本快照，已跳过。"
+            )
+            return
+        resolved_target = target_snapshot.commit_sha if target_snapshot else replay_range.raw_target_commit
+        resolved_from = from_snapshot.commit_sha if from_snapshot else None
         resume_target_key = "db_history_versions_commit_resume_target"
         resume_done_key = "db_history_versions_commit_resume_done"
     except Exception as e:
@@ -1750,12 +2193,16 @@ def backfill_versions_from_history(
             version_tables = ("textMap", "readable", "subtitle", "quest", "npc")
             try:
                 if all(_has_any_version_data(t) for t in version_tables):
-                    logger.info(f"历史回填已完成于 {resolved_target}，跳过。")
+                    logger.info(
+                        f"版本快照回放已完成于 "
+                        f"{target_snapshot.version_tag if target_snapshot else resolved_target}，跳过。"
+                    )
                     return
             except Exception as e:
                 logger.error(f"Error checking version data: {e}")
             logger.info(
-                f"历史回填元数据指向 {resolved_target}，"
+                f"版本快照回放元数据指向 "
+                f"{target_snapshot.version_tag if target_snapshot else resolved_target}，"
                 "但版本列为空或不完整；将重新执行。"
             )
     except Exception as e:
@@ -1770,11 +2217,11 @@ def backfill_versions_from_history(
 
     # 预留顶层批量写入开关，供后续调优使用。
     if fast_db_write:
-        logger.info("历史回填：启用快速 SQLite pragma 以加速批量写入")
+        logger.info("版本快照回放：启用快速 SQLite pragma 以加速批量写入")
     with fast_import_pragmas(conn, enabled=fast_db_write):
         for name, func in backfill_functions:
             try:
-                logger.info(f"开始执行 {name} 历史回填...")
+                logger.info(f"开始执行 {name} 版本快照回放...")
                 func(
                     target_commit=target_commit,
                     from_commit=from_commit,
@@ -1782,9 +2229,9 @@ def backfill_versions_from_history(
                     batch_size=batch_size,
                     verbose=verbose,
                 )
-                logger.info(f"{name} 历史回填完成")
+                logger.info(f"{name} 版本快照回放完成")
             except Exception as e:
-                logger.error(f"{name} 历史回填失败: {e}", exc_info=True)
+                logger.error(f"{name} 版本快照回放失败: {e}", exc_info=True)
     try:
         if resolved_from is None:
             set_meta("db_history_versions_commit", resolved_target)
@@ -1793,7 +2240,7 @@ def backfill_versions_from_history(
         rebuild_version_catalog(["textMap", "quest", "subtitle", "readable", "npc"])
     except Exception as e:
         logger.error(f"Error finalizing metadata: {e}")
-    logger.info("历史回填元数据已刷新，版本目录已重建")
+    logger.info("版本快照回放元数据已刷新，版本目录已重建")
     cursor = conn.cursor()
     try:
         try:
@@ -1813,7 +2260,10 @@ def backfill_versions_from_history(
         except Exception as e:
             logger.error(f"Error closing cursor: {e}")
 
-    logger.info(f"历史回填完成于提交 {resolved_target}")
+    logger.info(
+        f"版本快照回放完成于 "
+        f"{target_snapshot.version_tag if target_snapshot else resolved_target}"
+    )
 
 
 def backfill_textmap_versions_from_history(
@@ -1827,13 +2277,10 @@ def backfill_textmap_versions_from_history(
     """回填 TextMap 历史版本。"""
     textmap_lang_map = _get_textmap_lang_id_map()
     local_textmap_cache: dict[str, dict[str, object] | None] = {}
-    confirmed_updated_hashes: set[tuple[int, int]] = set()
 
     def process_textmap_entry(cursor, repo_path, commit_sha, parent_sha, entry, version_id, version_label, batch_size):
-        """处理单个 TextMap 变更条目。"""
+        """处理单个 TextMap 版本快照条目。"""
         action = entry["action"]
-        if action == "D":
-            return
         old_path = entry.get("old_path")
         new_path = entry.get("new_path")
         rel_path = (new_path or old_path or "").replace("\\", "/")
@@ -1851,9 +2298,9 @@ def backfill_textmap_versions_from_history(
         if lang_id is None:
             return
 
-        new_obj = _git_show_json(repo_path, commit_sha, rel_path)
-        if not isinstance(new_obj, dict):
-            return
+        snapshot_obj = _load_snapshot_textmap_group(repo_path, commit_sha, base_name)
+        if snapshot_obj is None:
+            snapshot_obj = {}
 
         if base_name not in local_textmap_cache:
             local_textmap_cache[base_name] = _load_worktree_textmap_group(repo_path, base_name)
@@ -1862,10 +2309,10 @@ def backfill_textmap_versions_from_history(
             return
 
         candidate_items: list[tuple[int, object, object]] = []
-        for raw_hash, content in new_obj.items():
-            if raw_hash not in current_obj:
+        for raw_hash, current_content in current_obj.items():
+            if raw_hash not in snapshot_obj:
                 continue
-            candidate_items.append((_to_hash_value(raw_hash), content, current_obj[raw_hash]))
+            candidate_items.append((_to_hash_value(raw_hash), snapshot_obj[raw_hash], current_content))
         if not candidate_items:
             return
 
@@ -1891,21 +2338,15 @@ def backfill_textmap_versions_from_history(
             existing_created_version, existing_updated_version = version_info
             created_version = existing_created_version
             updated_version = existing_updated_version
-            key = (lang_id, hash_value)
 
             if should_update_version(existing_created_version, version_id, is_created=True):
                 created_version = version_id
 
-            updated_confirmed = (
-                key in confirmed_updated_hashes
-                or (
-                    existing_updated_version is not None
-                    and existing_updated_version != existing_created_version
-                )
-            )
-            if history_content == current_content and not updated_confirmed:
+            if history_content == current_content and (
+                existing_updated_version is None
+                or should_update_version(existing_updated_version, version_id, is_created=True)
+            ):
                 updated_version = version_id
-                confirmed_updated_hashes.add(key)
 
             if (
                 created_version != existing_created_version
@@ -1971,13 +2412,10 @@ def backfill_readable_versions_from_history(
     """回填 Readable 历史版本。"""
 
     local_text_cache: dict[str, str | None] = {}
-    confirmed_updated_readables: set[tuple[str, str]] = set()
 
     def process_readable_entry(cursor, repo_path, commit_sha, parent_sha, entry, version_id, version_label, batch_size):
-        """处理单个 Readable 历史条目。"""
+        """处理单个 Readable 版本快照条目。"""
         action = entry["action"]
-        if action == "D":
-            return
         old_path = entry.get("old_path")
         new_path = entry.get("new_path")
         rel_path = (new_path or old_path or "").replace("\\", "/")
@@ -1994,9 +2432,7 @@ def backfill_readable_versions_from_history(
         rel_path_file = os.path.relpath(full_path, lang_path)
         clean_file_name = rel_path_file.replace(os.sep, "/")
 
-        new_text = _git_show_text(repo_path, commit_sha, rel_path)
-        if new_text is None:
-            return
+        new_text = _git_show_text(repo_path, commit_sha, rel_path) if action != "D" else None
 
         current_rel_path = f"Readable/{lang}/{clean_file_name}"
         if current_rel_path not in local_text_cache:
@@ -2007,7 +2443,7 @@ def backfill_readable_versions_from_history(
                 else None
             )
         local_text = local_text_cache[current_rel_path]
-        if local_text is None:
+        if local_text is None or new_text is None:
             return
 
         cursor.execute(
@@ -2019,23 +2455,22 @@ def backfill_readable_versions_from_history(
             return
         existing_created_version, existing_updated_version = version_info
 
-        created_version = existing_created_version
+        previous_text = _git_show_text(repo_path, parent_sha, rel_path) if parent_sha else None
+        was_alive = previous_text is not None
+        created_version = version_id if not was_alive else existing_created_version
         updated_version = existing_updated_version
 
-        if should_update_version(existing_created_version, version_id, is_created=True):
+        if was_alive and should_update_version(existing_created_version, version_id, is_created=True):
             created_version = version_id
 
-        row_key = (clean_file_name, lang)
-        updated_confirmed = (
-            row_key in confirmed_updated_readables
-            or (
-                existing_updated_version is not None
-                and existing_updated_version != existing_created_version
-            )
-        )
-        if _normalize_text_for_compare(new_text) == local_text and not updated_confirmed:
-            updated_version = version_id
-            confirmed_updated_readables.add(row_key)
+        if _normalize_text_for_compare(new_text) == local_text:
+            if not was_alive:
+                updated_version = version_id
+            elif (
+                existing_updated_version is None
+                or should_update_version(existing_updated_version, version_id, is_created=True)
+            ):
+                updated_version = version_id
         if (
             created_version != existing_created_version
             or updated_version != existing_updated_version
@@ -2104,13 +2539,10 @@ def backfill_subtitle_versions_from_history(
 ):
     """回填 Subtitle 历史版本。"""
     local_rows_cache: dict[str, dict[str, str] | None] = {}
-    confirmed_updated_subtitles: set[str] = set()
 
     def process_subtitle_entry(cursor, repo_path, commit_sha, parent_sha, entry, version_id, version_label, batch_size):
-        """处理单个 Subtitle 历史条目。"""
+        """处理单个 Subtitle 版本快照条目。"""
         action = entry["action"]
-        if action == "D":
-            return
         old_path = entry.get("old_path")
         new_path = entry.get("new_path")
         rel_path = (new_path or old_path or "").replace("\\", "/")
@@ -2127,10 +2559,8 @@ def backfill_subtitle_versions_from_history(
             return
 
         rel_under_lang = parts[2]
-        new_text = _git_show_text(repo_path, commit_sha, rel_path)
-        if new_text is None:
-            return
-        history_rows = _parse_srt_rows(new_text, lang_id, rel_under_lang)
+        new_text = _git_show_text(repo_path, commit_sha, rel_path) if action != "D" else None
+        history_rows = _parse_srt_rows(new_text, lang_id, rel_under_lang) if new_text is not None else {}
         current_rel_path = f"Subtitle/{lang_name}/{rel_under_lang}"
         if current_rel_path not in local_rows_cache:
             current_text = _read_worktree_text(repo_path, current_rel_path)
@@ -2165,16 +2595,11 @@ def backfill_subtitle_versions_from_history(
             if should_update_version(existing_created_version, version_id, is_created=True):
                 created_version = version_id
 
-            updated_confirmed = (
-                subtitle_key in confirmed_updated_subtitles
-                or (
-                    existing_updated_version is not None
-                    and existing_updated_version != existing_created_version
-                )
-            )
-            if subtitle_key in matching_current_keys and not updated_confirmed:
+            if subtitle_key in matching_current_keys and (
+                existing_updated_version is None
+                or should_update_version(existing_updated_version, version_id, is_created=True)
+            ):
                 updated_version = version_id
-                confirmed_updated_subtitles.add(subtitle_key)
 
             if (
                 created_version != existing_created_version
@@ -2278,23 +2703,22 @@ def backfill_npc_versions_from_history(
 
     def process_npc_entry(cursor, repo_path, commit_sha, parent_sha, entry, version_id, version_label, batch_size):
         action = entry["action"]
-        if action == "D":
-            return
         old_path = entry.get("old_path")
         new_path = entry.get("new_path")
         rel_path = (new_path or old_path or "").replace("\\", "/")
         if rel_path != "ExcelBinOutput/NpcExcelConfigData.json":
             return
 
-        history_rows = _git_show_json(repo_path, commit_sha, rel_path)
+        history_rows = _git_show_json(repo_path, commit_sha, rel_path) if action != "D" else []
         if not isinstance(history_rows, list):
-            return
+            history_rows = []
 
         valid_ids = _get_current_npc_ids()
         if not valid_ids or version_id is None:
             return
 
-        candidate_ids: list[int] = []
+        current_snapshot_ids: set[int] = set()
+        previous_snapshot_ids: set[int] = set()
         seen_ids: set[int] = set()
         for row in history_rows:
             if not isinstance(row, dict):
@@ -2306,8 +2730,24 @@ def backfill_npc_versions_from_history(
             if npc_id not in valid_ids or npc_id in seen_ids:
                 continue
             seen_ids.add(npc_id)
-            candidate_ids.append(npc_id)
+            current_snapshot_ids.add(npc_id)
 
+        previous_rows = _git_show_json(repo_path, parent_sha, rel_path) if parent_sha else []
+        seen_ids.clear()
+        if isinstance(previous_rows, list):
+            for row in previous_rows:
+                if not isinstance(row, dict):
+                    continue
+                try:
+                    npc_id = int(row.get("id"))
+                except Exception:
+                    continue
+                if npc_id not in valid_ids or npc_id in seen_ids:
+                    continue
+                seen_ids.add(npc_id)
+                previous_snapshot_ids.add(npc_id)
+
+        candidate_ids = sorted(current_snapshot_ids - previous_snapshot_ids)
         if not candidate_ids:
             return
 
@@ -2321,7 +2761,7 @@ def backfill_npc_versions_from_history(
                 chunk,
             ).fetchall()
             for npc_id, existing_created_version in rows:
-                if should_update_version(existing_created_version, version_id, is_created=True):
+                if existing_created_version != version_id:
                     update_rows.append((version_id, int(npc_id)))
 
         if update_rows:
@@ -2701,31 +3141,42 @@ def backfill_quest_versions_from_history(
     batch_size: int = DEFAULT_BATCH_SIZE,
     verbose: bool = False,
 ) -> dict[str, int | str]:
-    """执行任务历史回填。
-
-    Args:
-        target_commit: 目标提交。
-        from_commit: 可选起始提交。
-        force: 是否强制全量重跑。
-        unresolved_ratio_threshold: 定向回放阈值。
-        batch_size: 数据库批量大小。
-        verbose: 是否输出详细日志。
-
-    Returns:
-        回填结果摘要。
-    """
+    """执行任务版本快照回放。"""
     ensure_version_schema()
     repo_path = DATA_PATH
-    resolved_target = _resolve_commit(repo_path, target_commit)
-    resolved_from = _resolve_commit(repo_path, from_commit) if from_commit else None
-    resume_scope = f"{resolved_from or ''}..{resolved_target}"
+    replay_range = _resolve_snapshot_replay_range(
+        repo_path,
+        target_commit=target_commit,
+        from_commit=from_commit,
+    )
+    target_snapshot = replay_range.target_snapshot
+    from_snapshot = replay_range.from_snapshot
+    base_snapshot = replay_range.base_snapshot
+    snapshots = replay_range.snapshots
+    resolved_target = target_snapshot.commit_sha if target_snapshot else replay_range.raw_target_commit
+    resolved_from = from_snapshot.commit_sha if from_snapshot else None
+    resume_scope = replay_range.resume_scope
     meta_commit_key = "db_history_versions_commit_quest"
     meta_title_key = "db_history_versions_commit_title_quest"
     resume_target_key = "db_history_versions_commit_quest_resume_target"
     resume_done_key = "db_history_versions_commit_quest_resume_done"
+
+    if target_snapshot is None:
+        print(
+            f"任务版本快照回放：目标提交 {replay_range.raw_target_commit[:8]} 未映射到任何版本，跳过。"
+        )
+        return {
+            "replay_mode": "none",
+            "total_quests": 0,
+            "unresolved_quests": 0,
+            "phase1_created_backfilled": 0,
+            "phase1_updated_backfilled": 0,
+            "phase2_commit_created_backfilled": 0,
+        }
+
     if not force and resolved_from is None and get_meta(meta_commit_key) == resolved_target:
         if _has_any_version_data("quest"):
-            print(f"任务历史回填已完成于 {resolved_target}，跳过。")
+            print(f"任务版本快照回放已完成于 {target_snapshot.version_tag}，跳过。")
             return {
                 "replay_mode": "skip",
                 "total_quests": 0,
@@ -2735,13 +3186,15 @@ def backfill_quest_versions_from_history(
                 "phase2_commit_created_backfilled": 0,
             }
         print(
-            f"任务历史回填元数据指向 {resolved_target}，"
+            f"任务版本快照回放元数据指向 {target_snapshot.version_tag}，"
             "但任务版本数据为空或不完整；将重新执行。"
         )
 
-    commits = _list_commits(repo_path, resolved_target, from_commit=resolved_from)
-    if not commits:
-        print("任务历史回填：没有需要处理的提交。")
+    if not snapshots:
+        if from_snapshot and from_snapshot.version_tag == target_snapshot.version_tag:
+            print(f"任务版本快照回放：起止提交均折算到 {target_snapshot.version_tag}，跳过。")
+        else:
+            print("任务版本快照回放：没有需要处理的版本快照。")
         return {
             "replay_mode": "none",
             "total_quests": 0,
@@ -2750,30 +3203,32 @@ def backfill_quest_versions_from_history(
             "phase1_updated_backfilled": 0,
             "phase2_commit_created_backfilled": 0,
         }
-    first_parent_sha = _resolve_first_parent_sha(repo_path, commits, resolved_from)
-    total_commits = len(commits)
-    start_idx = _prepare_resume_for_commits(
+    total_snapshots = len(snapshots)
+    start_idx = _prepare_resume_for_snapshots(
         resume_target_key=resume_target_key,
         resume_done_key=resume_done_key,
         resolved_target=resume_scope,
-        commits=commits,
+        snapshots=snapshots,
         force=force,
-        label="任务历史回填",
+        label="任务版本快照回放",
     )
 
     if start_idx == 0:
-        if resolved_from:
+        if from_snapshot:
             print(
-                "任务历史回填开始："
-                f"{total_commits} 个提交 (起点: {resolved_from[:8]}, 目标: {resolved_target})"
+                "任务版本快照回放开始："
+                f"{total_snapshots} 个快照 (起点: {from_snapshot.version_tag}, 目标: {target_snapshot.version_tag})"
             )
         else:
-            print(f"任务历史回填开始：{total_commits} 个提交 (目标: {resolved_target})")
+            print(
+                "任务版本快照回放开始："
+                f"{total_snapshots} 个快照 (目标: {target_snapshot.version_tag})"
+            )
     else:
         print(
-            "任务历史回填继续："
-            f"剩余 {total_commits - start_idx} / 总计 {total_commits} 个提交 "
-            f"(目标: {resolved_target})"
+            "任务版本快照回放继续："
+            f"剩余 {total_snapshots - start_idx} / 总计 {total_snapshots} 个快照 "
+            f"(目标: {target_snapshot.version_tag})"
         )
 
     cursor = conn.cursor()
@@ -2791,11 +3246,11 @@ def backfill_quest_versions_from_history(
         if start_idx > 0:
             print(
                 "任务历史阶段 1 在断点续跑时跳过："
-                f"从第 {start_idx + 1}/{total_commits} 个提交继续阶段 2"
+                f"从第 {start_idx + 1}/{total_snapshots} 个快照继续阶段 2"
             )
         else:
             # 阶段 1 先基于本地 textMap 数据推断版本。
-            # 下面的提交回放只补未解决的记录。
+            # 下面的快照回放只补未解决的记录。
             print("任务历史阶段 1：基于本地 textMap 推断（创建+更新）")
             prefilled_created_rows, prefilled_updated_rows = _backfill_quest_phase1_with_progress(
                 cursor
@@ -2808,126 +3263,30 @@ def backfill_quest_versions_from_history(
 
         total_quests, unresolved_quests = _count_unresolved_quest_versions(cursor)
 
-        print("任务历史阶段 1.5：为任务执行 Git 回溯")
+        print("任务历史阶段 1.5：按版本快照回放任务首次出现")
         if force:
-            print("强制模式：为所有任务回填 Git 版本...")
+            print("强制模式：为所有任务回放 Git 创建版本...")
             cursor.execute("SELECT questId FROM quest")
         else:
-            print("标准模式：为缺少 Git 版本的任务执行回填...")
+            print("标准模式：为缺少 Git 版本的任务执行快照回放...")
             cursor.execute("SELECT questId FROM quest WHERE git_created_version_id IS NULL")
-        quest_ids_to_backfill = [row[0] for row in cursor.fetchall()]
+        quest_ids_to_backfill = {int(row[0]) for row in cursor.fetchall()}
         git_backfilled_count = 0
 
         if quest_ids_to_backfill:
-            print(f"需要 Git 回溯的任务数量：{len(quest_ids_to_backfill)}")
-            total_quests = len(quest_ids_to_backfill)
-            pbar = LightweightProgress(total_quests, desc="Git 回溯", unit="quests")
-            with pbar:
-                for i, quest_id in enumerate(quest_ids_to_backfill):
-                    postfix = f"Quest {quest_id}"
-                    try:
-                        quest_file_path: str | None = None
-                        source_type, source_code_raw = _get_quest_source_fields(cursor, int(quest_id))
-                        if source_type == SOURCE_TYPE_ANECDOTE:
-                            first_commit = _find_anecdote_first_commit(repo_path, int(quest_id))
-                        elif source_type == SOURCE_TYPE_HANGOUT and source_code_raw == SOURCE_TYPE_HANGOUT:
-                            first_commit = _find_hangout_first_commit(repo_path, int(quest_id))
-                        else:
-                            quest_file_path = f"BinOutput/Quest/{quest_id}.json"
-                            out = _run_git(
-                                repo_path,
-                                ["log", "--reverse", "--format=%H", "-n", "1", "--", quest_file_path],
-                                check=False
-                            )
-                            first_commit = out.strip() if out.strip() else None
-
-                        if first_commit:
-                            first_commit_title = _run_git(
-                                repo_path,
-                                ["show", "-s", "--format=%s", first_commit],
-                                check=False
-                            ).strip()
-                            first_version_label, first_version_id = _resolve_commit_version(repo_path, first_commit, first_commit_title)
-
-                            if first_version_id:
-                                cursor.execute(
-                                    "SELECT git_created_version_id FROM quest WHERE questId = ?",
-                                    (quest_id,)
-                                )
-                                existing_version = cursor.fetchone()
-                                existing_git_created_version = existing_version[0] if existing_version else None
-
-                                cursor.execute(
-                                    "SELECT questId, titleTextMapHash, created_version_id FROM quest WHERE questId = ?",
-                                    (quest_id,)
-                                )
-                                db_row = cursor.fetchone()
-                                if not db_row:
-                                    pbar.update(postfix=postfix)
-                                    continue
-
-                                existing_created_version = db_row[2] if len(db_row) >= 3 else None
-
-                                update_git_created = should_update_version(
-                                    existing_git_created_version,
-                                    first_version_id,
-                                    is_created=True,
-                                )
-                                update_created = should_update_version(
-                                    existing_created_version,
-                                    first_version_id,
-                                    is_created=True,
-                                )
-
-                                if update_git_created or update_created:
-                                    if source_type == SOURCE_TYPE_ANECDOTE:
-                                        first_payload = _load_anecdote_history_payload(repo_path, first_commit, int(quest_id))
-                                        if first_payload is None:
-                                            pbar.update(postfix=postfix)
-                                            continue
-                                    elif source_type == SOURCE_TYPE_HANGOUT and source_code_raw == SOURCE_TYPE_HANGOUT:
-                                        first_payload = _load_hangout_history_payload(repo_path, first_commit, int(quest_id))
-                                        if first_payload is None:
-                                            pbar.update(postfix=postfix)
-                                            continue
-                                    else:
-                                        if quest_file_path is None:
-                                            pbar.update(postfix=postfix)
-                                            continue
-                                        first_obj = _git_show_json(repo_path, first_commit, quest_file_path)
-                                        if not isinstance(first_obj, dict):
-                                            pbar.update(postfix=postfix)
-                                            continue
-                                        first_row = _extract_quest_row(first_obj)
-                                        if first_row is None:
-                                            pbar.update(postfix=postfix)
-                                            continue
-
-                                    update_fields = []
-                                    update_params = []
-                                    if update_git_created:
-                                        update_fields.append("git_created_version_id = ?")
-                                        update_params.append(first_version_id)
-                                    if update_created:
-                                        update_fields.append("created_version_id = ?")
-                                        update_params.append(first_version_id)
-                                    if update_fields:
-                                        update_params.append(quest_id)
-                                        cursor.execute(
-                                            f"UPDATE quest SET {', '.join(update_fields)} WHERE questId = ?",
-                                            tuple(update_params)
-                                        )
-                                        git_backfilled_count += 1
-                    except Exception as e:
-                        print(f"[ERROR] 任务 {quest_id} 的 Git 回溯失败: {e}")
-                        pass
-                    finally:
-                        pbar.update(postfix=postfix)
-
-            conn.commit()
-            print(f"任务历史阶段 1.5 完成：已通过 Git 回填 {git_backfilled_count} 个任务")
+            print(f"需要快照回放 Git 版本的任务数量：{len(quest_ids_to_backfill)}")
+            git_backfilled_count = _replay_quest_snapshot_entries(
+                cursor,
+                repo_path=repo_path,
+                snapshots=snapshots,
+                base_snapshot=base_snapshot,
+                target_quest_ids=quest_ids_to_backfill,
+                start_idx=0,
+                pbar_desc="任务 Git 快照回放",
+            )
+            print(f"任务历史阶段 1.5 完成：已通过快照回放更新 {git_backfilled_count} 个任务")
         else:
-            print("所有任务都已有 Git 版本，跳过 Git 回溯。")
+            print("所有任务都已有 Git 版本，跳过阶段 1.5。")
 
         synced_created_from_git = _sync_created_version_from_git(cursor)
         if synced_created_from_git > 0:
@@ -2974,65 +3333,26 @@ def backfill_quest_versions_from_history(
             )
 
         if replay_mode in ("targeted", "full"):
-            print(f"正在以 {replay_mode} 模式处理 {total_commits} 个任务提交...")
+            print(f"正在以 {replay_mode} 模式处理 {total_snapshots} 个任务版本快照...")
             try:
                 target_quest_ids = unresolved_created_ids if replay_mode == "targeted" else None
-                quest_history_include_paths = _build_quest_history_include_paths(repo_path)
-                commit_batch_size = DEFAULT_HISTORY_COMMIT_BATCH_SIZE
-                processed_commits = 0
-                last_commit_sha = None
-                pbar = LightweightProgress(total_commits, desc="任务回填", unit="commits", initial_print=False)
-                pbar.current = start_idx
-                pbar.update(0)
-                with pbar:
-                    for idx in range(start_idx, total_commits):
-                        commit_sha, commit_title = commits[idx]
-                        last_commit_sha = commit_sha
-                        parent_sha = commits[idx - 1][0] if idx > 0 else first_parent_sha
-                        version_label, version_id = _resolve_commit_version(repo_path, commit_sha, commit_title)
-                        postfix = f"Commit {commit_sha[:8]}"
-
-                        if version_id is None:
-                            pbar.update(postfix=postfix)
-                            continue
-
-                        entries = (
-                            _initial_entries(repo_path, commit_sha, include_paths=quest_history_include_paths)
-                            if parent_sha is None
-                            else _diff_entries(repo_path, parent_sha, commit_sha, include_paths=quest_history_include_paths)
-                        )
-
-                        for entry in entries:
-                            try:
-                                updated = _backfill_quest_version_by_commit_entry(
-                                    cursor,
-                                    repo_path=repo_path,
-                                    commit_sha=commit_sha,
-                                    parent_sha=parent_sha,
-                                    entry=entry,
-                                    version_id=version_id,
-                                    target_quest_ids=target_quest_ids,
-                                )
-                                phase2_commit_created_backfilled += updated
-                            except Exception as e:
-                                print(f"处理任务条目失败: {e}")
-
-                        pbar.update(postfix=postfix)
-                        processed_commits += 1
-
-                        if processed_commits % commit_batch_size == 0 and last_commit_sha:
-                            set_meta(resume_target_key, resume_scope)
-                            set_meta(resume_done_key, last_commit_sha)
-
-                    if processed_commits > 0 and last_commit_sha:
-                        conn.commit()
-                        set_meta(resume_target_key, resume_scope)
-                        set_meta(resume_done_key, last_commit_sha)
-
+                phase2_commit_created_backfilled = _replay_quest_snapshot_entries(
+                    cursor,
+                    repo_path=repo_path,
+                    snapshots=snapshots,
+                    base_snapshot=base_snapshot,
+                    target_quest_ids=target_quest_ids,
+                    start_idx=start_idx,
+                    pbar_desc="任务快照回放",
+                    checkpoint_every=DEFAULT_HISTORY_COMMIT_BATCH_SIZE,
+                    resume_target_key=resume_target_key,
+                    resume_done_key=resume_done_key,
+                    resume_scope=resume_scope,
+                )
             except BaseException:
                 conn.rollback()
                 print(
-                    "任务历史回填被中断；已保存断点，重新运行可继续。",
+                    "任务版本快照回放被中断；已保存断点，重新运行可继续。",
                     file=sys.stderr,
                 )
                 raise
@@ -3047,11 +3367,9 @@ def backfill_quest_versions_from_history(
 
     if resolved_from is None:
         set_meta(meta_commit_key, resolved_target)
-        if commits:
-            set_meta(meta_title_key, _latest_commit_meta_title(commits) or commits[-1][0])
-    if start_idx >= total_commits:
-        set_meta(resume_target_key, "")
-        set_meta(resume_done_key, "")
+        set_meta(meta_title_key, target_snapshot.version_label)
+    set_meta(resume_target_key, "")
+    set_meta(resume_done_key, "")
     rebuild_version_catalog(["quest"])
 
     print("\n=== Quest Version Validation ===")
@@ -3076,7 +3394,7 @@ def reset_history_version_marks(*, scope: str = "all"):
     normalized_scope = (scope or "all").strip().lower()
     scope_map: dict[str, tuple[tuple[str, ...], tuple[str, ...]]] = {
         "all": (
-            ("textMap", "readable", "subtitle", "quest"),
+            ("textMap", "readable", "subtitle", "quest", "npc"),
             (
                 "db_history_versions_commit",
                 "db_history_versions_commit_title",
@@ -3098,6 +3416,10 @@ def reset_history_version_marks(*, scope: str = "all"):
                 "db_history_versions_commit_title_quest",
                 "db_history_versions_commit_quest_resume_target",
                 "db_history_versions_commit_quest_resume_done",
+                "db_history_versions_commit_npc",
+                "db_history_versions_commit_title_npc",
+                "db_history_versions_commit_npc_resume_target",
+                "db_history_versions_commit_npc_resume_done",
             ),
         ),
         "textmap": (
@@ -3136,6 +3458,15 @@ def reset_history_version_marks(*, scope: str = "all"):
                 "db_history_versions_commit_quest_resume_done",
             ),
         ),
+        "npc": (
+            ("npc",),
+            (
+                "db_history_versions_commit_npc",
+                "db_history_versions_commit_title_npc",
+                "db_history_versions_commit_npc_resume_target",
+                "db_history_versions_commit_npc_resume_done",
+            ),
+        ),
     }
     if normalized_scope not in scope_map:
         raise ValueError(f"Unsupported reset scope: {scope}")
@@ -3147,6 +3478,8 @@ def reset_history_version_marks(*, scope: str = "all"):
             if table_name == 'quest':
                 cursor.execute(f"UPDATE {table_name} SET created_version_id=NULL, git_created_version_id=NULL")
                 cursor.execute("DELETE FROM quest_version")
+            elif table_name == 'npc':
+                cursor.execute(f"UPDATE {table_name} SET created_version_id=NULL")
             else:
                 cursor.execute(f"UPDATE {table_name} SET created_version_id=NULL, updated_version_id=NULL")
         conn.commit()

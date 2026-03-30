@@ -935,7 +935,7 @@ def _process_version_catalog_stage(plan, target_commit, base_commit):
     """
     处理version_catalog阶段
     """
-    # Reuse history-backfill rules for textMap/quest/readable/subtitle version replay so
+    # Reuse history-backfill rules for textMap/quest/readable/subtitle snapshot replay so
     # diff update and history replay share identical version decisions.
     history_backfill = None
     if plan["textmap_bases"]:
@@ -963,7 +963,7 @@ def _process_version_catalog_stage(plan, target_commit, base_commit):
     if unresolved_created_count <= 0:
         _meta_set_many({"quest_version_last_replay_mode": "none"})
         print(
-            "Quest history replay skipped: "
+            "Quest snapshot replay skipped: "
             f"created_null=0 (unresolved_total={unresolved_count}/{total_quest_count})"
         )
     elif plan["textmap_bases"] or plan["quest_related"] or plan["talk_changed"] or plan["talk_deleted"]:
@@ -980,7 +980,7 @@ def _process_version_catalog_stage(plan, target_commit, base_commit):
         replay_mode = str(quest_replay_stats.get("replay_mode", "unknown"))
         _meta_set_many({"quest_version_last_replay_mode": replay_mode})
         print(
-            "Quest history replay done: "
+            "Quest snapshot replay done: "
             f"mode={replay_mode}, "
             f"unresolved={int(quest_replay_stats.get('unresolved_quests', 0))}/"
             f"{int(quest_replay_stats.get('total_quests', 0))}, "
