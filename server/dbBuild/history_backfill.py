@@ -6,6 +6,12 @@ import subprocess
 import sys
 import time
 from dataclasses import dataclass
+from typing import Iterable
+
+try:
+    import pygit2 as _pygit2  # type: ignore[import-untyped]
+except ImportError:
+    _pygit2 = None  # type: ignore[assignment]
 
 # 日志配置
 
@@ -73,6 +79,10 @@ logging.basicConfig(
     ]
 )
 logger = logging.getLogger(__name__)
+if _pygit2 is not None:
+    logger.info(f"pygit2 {_pygit2.__version__} 可用，将使用进程内 git 读取")
+else:
+    logger.info("pygit2 不可用，将使用 subprocess 后端")
 _first_commit_version_cache: dict[tuple[str, str], tuple[str | None, int | None]] = {}
 DEFAULT_HISTORY_COMMIT_BATCH_SIZE = 50
 DEFAULT_GIT_BACKFILL_CHECKPOINT_EVERY = 100
@@ -81,6 +91,12 @@ _git_cache = {}
 _snapshot_metadata_cache: dict[str, dict[str, object]] = {}
 _snapshot_textmap_file_groups_cache: dict[tuple[str, str], dict[str, list[str]]] = {}
 _snapshot_textmap_group_cache: dict[tuple[str, str, str], dict[str, object] | None] = {}
+_GIT_SHOW_TEXT_CACHE_MAX = int(os.environ.get("GTS_GIT_SHOW_TEXT_CACHE_MAX", "1024"))
+_git_show_text_cache: dict[tuple[str, str], str | None] = {}
+_git_show_text_cache_order: list[tuple[str, str]] = []
+_git_show_json_cache: dict[tuple[str, str], object] = {}
+_git_show_text_cache_stats = {"hits": 0, "misses": 0}
+_pygit2_repo_cache: dict[str, object] = {}
 
 # Git 命令缓存
 
@@ -478,9 +494,12 @@ def _resolve_snapshot_replay_range(
     raw_target_commit = _resolve_commit(repo_path, target_commit)
     raw_from_commit = _resolve_commit(repo_path, from_commit) if from_commit else None
     metadata = _get_version_snapshot_metadata(repo_path)
-    snapshots = tuple(metadata.get("snapshots", ()))
-    if not isinstance(snapshots, tuple):
-        snapshots = tuple()
+    raw_snapshots = metadata.get("snapshots")
+    snapshots: tuple[VersionSnapshot, ...] = tuple()
+    if isinstance(raw_snapshots, Iterable):
+        snapshots = tuple(
+            snapshot for snapshot in raw_snapshots if isinstance(snapshot, VersionSnapshot)
+        )
 
     target_snapshot = _resolve_commit_snapshot(
         repo_path,
@@ -859,8 +878,39 @@ def _snapshot_entries(
     )
 
 
-def _git_show_text(repo_path: str, commit: str, rel_path: str) -> str | None:
-    """读取指定提交中的文本文件。"""
+def _get_pygit2_repo(repo_path: str):
+    """获取或创建 pygit2 Repository 句柄（缓存复用）。"""
+    cached = _pygit2_repo_cache.get(repo_path)
+    if cached is not None:
+        return cached
+    repo = _pygit2.Repository(repo_path)
+    _pygit2_repo_cache[repo_path] = repo
+    return repo
+
+
+def _git_show_text_pygit2(repo_path: str, commit: str, rel_path: str) -> str | None:
+    """通过 pygit2 进程内读取 blob，无 subprocess 开销。"""
+    try:
+        repo = _get_pygit2_repo(repo_path)
+        commit_obj = repo.revparse_single(commit)
+        if commit_obj.type == _pygit2.GIT_OBJECT_TAG:  # type: ignore[union-attr]
+            commit_obj = commit_obj.peel(_pygit2.Commit)  # type: ignore[union-attr]
+        tree = commit_obj.peel(_pygit2.Tree)  # type: ignore[union-attr]
+        entry = tree[rel_path]
+        blob = repo[entry.id]
+        if blob.type != _pygit2.GIT_OBJECT_BLOB:  # type: ignore[union-attr]
+            return None
+        return blob.data.decode("utf-8", errors="replace")
+    except KeyError:
+        logger.debug(f"pygit2: path not found {commit[:8]}:{rel_path}")
+        return None
+    except Exception as e:
+        logger.debug(f"pygit2 读取失败 {commit[:8]}:{rel_path}: {e}")
+        return None
+
+
+def _git_show_text_subprocess(repo_path: str, commit: str, rel_path: str) -> str | None:
+    """读取指定提交中的文本文件（无缓存，直接 subprocess）。"""
     try:
         logger.debug(f"Getting text from git: {commit}:{rel_path}")
         proc = subprocess.run(
@@ -877,6 +927,164 @@ def _git_show_text(repo_path: str, commit: str, rel_path: str) -> str | None:
     except Exception as e:
         logger.error(f"读取 Git 文本失败: {e}")
         return None
+
+
+def _git_show_text_uncached(repo_path: str, commit: str, rel_path: str) -> str | None:
+    """读取指定提交中的文本文件（自动选择 pygit2 或 subprocess 后端）。"""
+    if _pygit2 is not None:
+        return _git_show_text_pygit2(repo_path, commit, rel_path)
+    return _git_show_text_subprocess(repo_path, commit, rel_path)
+
+
+def _git_show_text(repo_path: str, commit: str, rel_path: str) -> str | None:
+    """读取指定提交中的文本文件（带 LRU 缓存）。"""
+    cache_key = (commit, rel_path)
+    if cache_key in _git_show_text_cache:
+        _git_show_text_cache_stats["hits"] += 1
+        return _git_show_text_cache[cache_key]
+    _git_show_text_cache_stats["misses"] += 1
+    result = _git_show_text_uncached(repo_path, commit, rel_path)
+    _git_show_text_cache[cache_key] = result
+    _git_show_text_cache_order.append(cache_key)
+    if len(_git_show_text_cache_order) > _GIT_SHOW_TEXT_CACHE_MAX:
+        evict_key = _git_show_text_cache_order.pop(0)
+        _git_show_text_cache.pop(evict_key, None)
+        _git_show_json_cache.pop(evict_key, None)
+    return result
+
+
+def _prefetch_via_pygit2(
+    repo_path: str,
+    commit: str,
+    uncached_paths: list[str],
+) -> None:
+    """通过 pygit2 批量读取 blob 并注入缓存（无 subprocess）。"""
+    try:
+        repo = _get_pygit2_repo(repo_path)
+        commit_obj = repo.revparse_single(commit)
+        if commit_obj.type == _pygit2.GIT_OBJECT_TAG:  # type: ignore[union-attr]
+            commit_obj = commit_obj.peel(_pygit2.Commit)  # type: ignore[union-attr]
+        tree = commit_obj.peel(_pygit2.Tree)  # type: ignore[union-attr]
+    except Exception as e:
+        logger.warning(f"pygit2 预取失败 (commit {commit[:8]}): {e}")
+        for p in uncached_paths:
+            _git_show_text(repo_path, commit, p)
+        return
+
+    for rel_path in uncached_paths:
+        cache_key = (commit, rel_path)
+        try:
+            entry = tree[rel_path]
+            blob = repo[entry.id]
+            if blob.type != _pygit2.GIT_OBJECT_BLOB:  # type: ignore[union-attr]
+                _git_show_text_cache[cache_key] = None
+            else:
+                _git_show_text_cache[cache_key] = blob.data.decode("utf-8", errors="replace")
+        except KeyError:
+            _git_show_text_cache[cache_key] = None
+        except Exception:
+            _git_show_text_cache[cache_key] = None
+        _git_show_text_cache_order.append(cache_key)
+
+    while len(_git_show_text_cache_order) > _GIT_SHOW_TEXT_CACHE_MAX:
+        evict_key = _git_show_text_cache_order.pop(0)
+        _git_show_text_cache.pop(evict_key, None)
+        _git_show_json_cache.pop(evict_key, None)
+
+
+def _prefetch_via_git_archive(
+    repo_path: str,
+    commit: str,
+    uncached_paths: list[str],
+) -> None:
+    """通过 git archive 批量预取并注入缓存（subprocess 方式）。"""
+    import io
+    import tarfile
+
+    try:
+        creationflags = 0
+        if sys.platform == "win32":
+            try:
+                creationflags = getattr(subprocess, "CREATE_LOW_PRIORITY_CLASS", 0)
+            except Exception:
+                pass
+        proc = subprocess.run(
+            ["git", "-C", repo_path, "archive", "--format=tar", commit, "--"] + uncached_paths,
+            capture_output=True,
+            creationflags=creationflags,
+        )
+        if proc.returncode != 0:
+            for p in uncached_paths:
+                _git_show_text(repo_path, commit, p)
+            return
+
+        fetched: set[str] = set()
+        with tarfile.open(fileobj=io.BytesIO(proc.stdout), mode="r:") as tar:
+            for member in tar.getmembers():
+                if not member.isfile():
+                    continue
+                rel = member.name.replace("\\", "/")
+                fobj = tar.extractfile(member)
+                if fobj is None:
+                    continue
+                raw_bytes = fobj.read()
+                try:
+                    text = raw_bytes.decode("utf-8", errors="replace")
+                except Exception:
+                    text = raw_bytes.decode("latin-1", errors="replace")
+                cache_key = (commit, rel)
+                _git_show_text_cache[cache_key] = text
+                _git_show_text_cache_order.append(cache_key)
+                fetched.add(rel)
+
+        for p in uncached_paths:
+            if p not in fetched:
+                cache_key = (commit, p)
+                _git_show_text_cache[cache_key] = None
+                _git_show_text_cache_order.append(cache_key)
+
+        while len(_git_show_text_cache_order) > _GIT_SHOW_TEXT_CACHE_MAX:
+            evict_key = _git_show_text_cache_order.pop(0)
+            _git_show_text_cache.pop(evict_key, None)
+            _git_show_json_cache.pop(evict_key, None)
+
+    except Exception as e:
+        logger.warning(f"git archive 批量预取失败，回退到逐文件读取: {e}")
+        for p in uncached_paths:
+            _git_show_text(repo_path, commit, p)
+
+
+def _prefetch_git_show_texts(
+    repo_path: str,
+    commit: str,
+    rel_paths: list[str],
+) -> None:
+    """批量预取同一提交下的多个文件，将结果注入缓存。
+
+    优先使用 pygit2 直接读取 blob（零 subprocess 开销），
+    缺失时回退到 ``git archive`` 方式。
+    已在缓存中的路径会被自动跳过。
+    """
+    if not rel_paths:
+        return
+    uncached_paths = [p for p in rel_paths if (commit, p) not in _git_show_text_cache]
+    if not uncached_paths:
+        return
+
+    if _pygit2 is not None:
+        _prefetch_via_pygit2(repo_path, commit, uncached_paths)
+    else:
+        _prefetch_via_git_archive(repo_path, commit, uncached_paths)
+
+
+def _log_git_show_text_cache_stats():
+    """输出缓存命中率统计。"""
+    hits = _git_show_text_cache_stats["hits"]
+    misses = _git_show_text_cache_stats["misses"]
+    total = hits + misses
+    if total > 0:
+        rate = hits / total * 100
+        logger.info(f"_git_show_text cache stats: {hits} hits, {misses} misses, {rate:.1f}% hit rate")
 
 
 def _read_worktree_text(repo_path: str, rel_path: str) -> str | None:
@@ -991,19 +1199,24 @@ def _load_snapshot_textmap_group(
 
 
 def _git_show_json(repo_path: str, commit: str, rel_path: str):
-    """读取并解析指定提交中的 JSON。"""
+    """读取并解析指定提交中的 JSON（带缓存）。"""
+    json_cache_key = (commit, rel_path)
+    cached = _git_show_json_cache.get(json_cache_key)
+    if cached is not None:
+        return cached
     try:
         raw = _git_show_text(repo_path, commit, rel_path)
         if raw is None:
             return None
         try:
-            return json.loads(raw)
+            parsed = json.loads(raw)
         except Exception as e:
             logger.debug(f"解析 JSON 失败 {commit}:{rel_path}: {e}")
             return None
+        _git_show_json_cache[json_cache_key] = parsed
+        return parsed
     except Exception as e:
         logger.error(f"读取 Git JSON 失败: {e}")
-        return None
         return None
 
 
@@ -1537,6 +1750,19 @@ def _replay_quest_snapshot_entries(
                 previous_snapshot,
                 include_paths=quest_history_include_paths,
             )
+            # 批量预取该快照所有条目涉及的文件内容
+            quest_prefetch: dict[str, list[str]] = {}
+            quest_parent_sha = previous_snapshot.commit_sha if previous_snapshot else None
+            for entry in entries:
+                rel = (entry.get("new_path") or entry.get("old_path") or "").replace("\\", "/")
+                if not rel:
+                    continue
+                quest_prefetch.setdefault(snapshot.commit_sha, []).append(rel)
+                if quest_parent_sha:
+                    quest_prefetch.setdefault(quest_parent_sha, []).append(rel)
+            for pfetch_commit, pfetch_paths in quest_prefetch.items():
+                _prefetch_git_show_texts(repo_path, pfetch_commit, pfetch_paths)
+
             for entry in entries:
                 try:
                     updated_total += _backfill_quest_version_by_commit_entry(
@@ -1568,6 +1794,7 @@ def _replay_quest_snapshot_entries(
         if resume_target_key and resume_done_key and resume_scope:
             set_meta(resume_target_key, resume_scope)
             set_meta(resume_done_key, last_snapshot.commit_sha)
+    _log_git_show_text_cache_stats()
     return updated_total
 
 
@@ -1784,27 +2011,33 @@ def _backfill_quest_phase1_with_progress(
 
     created_total = 0
     updated_total = 0
-    quest_cursor = cursor.execute("SELECT questId FROM quest ORDER BY questId")
+    # 使用独立 cursor 遍历 questId，避免 backfill 内部的 SQL 操作
+    # 污染迭代状态导致 fetchmany 提前返回空结果。
+    iter_cursor = conn.cursor()
+    try:
+        iter_cursor.execute("SELECT questId FROM quest ORDER BY questId")
 
-    with LightweightProgress(total_quests, desc="阶段 1 回填", unit="quests") as pbar:
-        print(f"正在处理 {total_quests} 个任务的阶段 1 回填...")
+        with LightweightProgress(total_quests, desc="阶段 1 回填", unit="quests") as pbar:
+            print(f"正在处理 {total_quests} 个任务的阶段 1 回填...")
 
-        while True:
-            rows = quest_cursor.fetchmany(max(1, int(chunk_size)))
-            if not rows:
-                break
-            quest_ids = [int(row[0]) for row in rows]
-            backfill_result = _backfill_quest_created_version_from_textmap(
-                cursor,
-                quest_ids=quest_ids,
-                overwrite_existing=False,
-                overwrite_updated_existing=True,
-                with_stats=True,
-            )
-            created_rows, updated_rows = _extract_quest_backfill_stats(backfill_result)
-            created_total += created_rows
-            updated_total += updated_rows
-            pbar.update(len(quest_ids))
+            while True:
+                rows = iter_cursor.fetchmany(max(1, int(chunk_size)))
+                if not rows:
+                    break
+                quest_ids = [int(row[0]) for row in rows]
+                backfill_result = _backfill_quest_created_version_from_textmap(
+                    cursor,
+                    quest_ids=quest_ids,
+                    overwrite_existing=False,
+                    overwrite_updated_existing=True,
+                    with_stats=True,
+                )
+                created_rows, updated_rows = _extract_quest_backfill_stats(backfill_result)
+                created_total += created_rows
+                updated_total += updated_rows
+                pbar.update(len(quest_ids))
+    finally:
+        iter_cursor.close()
 
     print(f"阶段 1 回填完成：新增 {created_total}，更新 {updated_total}")
     return created_total, updated_total
@@ -1970,6 +2203,9 @@ def _backfill_versions_from_snapshots(
             else:
                 logger.info(f"{table_name} 版本快照回放：没有需要处理的版本快照。")
             return
+        if target_snapshot is None:
+            logger.warning(f"{table_name} 版本快照回放：目标快照为空，跳过。")
+            return
         total_snapshots = len(snapshots)
         try:
             start_idx = _prepare_resume_for_snapshots(
@@ -2030,6 +2266,19 @@ def _backfill_versions_from_snapshots(
                             logger.error(f"Error getting entries for snapshot {snapshot.version_tag}: {e}")
                             pbar.update(postfix=postfix)
                             continue
+
+                        # 批量预取该快照所有条目涉及的文件内容
+                        prefetch_paths: dict[str, list[str]] = {}
+                        parent_sha = previous_snapshot.commit_sha if previous_snapshot else None
+                        for entry in entries:
+                            rel = (entry.get("new_path") or entry.get("old_path") or "").replace("\\", "/")
+                            if not rel:
+                                continue
+                            prefetch_paths.setdefault(snapshot.commit_sha, []).append(rel)
+                            if parent_sha:
+                                prefetch_paths.setdefault(parent_sha, []).append(rel)
+                        for pfetch_commit, pfetch_paths in prefetch_paths.items():
+                            _prefetch_git_show_texts(repo_path, pfetch_commit, pfetch_paths)
 
                         entry_errors = 0
                         for entry in entries:
@@ -2109,6 +2358,8 @@ def _backfill_versions_from_snapshots(
             rebuild_version_catalog([table_name])
         except Exception as e:
             logger.error(f"Error finalizing metadata: {e}")
+
+        _log_git_show_text_cache_stats()
     except Exception as e:
         logger.error(f"{table_name} 版本快照回放失败: {e}", exc_info=True)
         raise
@@ -2280,7 +2531,6 @@ def backfill_textmap_versions_from_history(
 
     def process_textmap_entry(cursor, repo_path, commit_sha, parent_sha, entry, version_id, version_label, batch_size):
         """处理单个 TextMap 版本快照条目。"""
-        action = entry["action"]
         old_path = entry.get("old_path")
         new_path = entry.get("new_path")
         rel_path = (new_path or old_path or "").replace("\\", "/")
@@ -2312,7 +2562,11 @@ def backfill_textmap_versions_from_history(
         for raw_hash, current_content in current_obj.items():
             if raw_hash not in snapshot_obj:
                 continue
-            candidate_items.append((_to_hash_value(raw_hash), snapshot_obj[raw_hash], current_content))
+            try:
+                hash_value = int(_to_hash_value(raw_hash))
+            except Exception:
+                continue
+            candidate_items.append((hash_value, snapshot_obj[raw_hash], current_content))
         if not candidate_items:
             return
 
@@ -2723,8 +2977,11 @@ def backfill_npc_versions_from_history(
         for row in history_rows:
             if not isinstance(row, dict):
                 continue
+            raw_npc_id = row.get("id")
+            if raw_npc_id is None:
+                continue
             try:
-                npc_id = int(row.get("id"))
+                npc_id = int(raw_npc_id)
             except Exception:
                 continue
             if npc_id not in valid_ids or npc_id in seen_ids:
@@ -2738,8 +2995,11 @@ def backfill_npc_versions_from_history(
             for row in previous_rows:
                 if not isinstance(row, dict):
                     continue
+                raw_npc_id = row.get("id")
+                if raw_npc_id is None:
+                    continue
                 try:
-                    npc_id = int(row.get("id"))
+                    npc_id = int(raw_npc_id)
                 except Exception:
                     continue
                 if npc_id not in valid_ids or npc_id in seen_ids:
