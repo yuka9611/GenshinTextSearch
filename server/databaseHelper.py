@@ -658,7 +658,10 @@ def _execute_with_fallback(
     except sqlite3.Error as exc:
         if not _should_use_fallback(exc):
             raise
-        cursor.execute(sql_fallback, params_fallback if params_fallback is not None else [])
+        if sql_fallback is None:
+            raise
+        fallback_params = params_fallback if params_fallback is not None else []
+        cursor.execute(sql_fallback, fallback_params)
 
 
 def _safe_execute(cursor: sqlite3.Cursor, sql: str, params: list = []) -> list:
@@ -785,19 +788,15 @@ def _build_textmap_query(
             sql += f"and not ({voice_expr}) "
 
     match_sort_sql, match_sort_params = _build_match_sort_case("tm.content", keyword, langCode)
-    normalized_length_sql = f"length({_build_normalized_match_expr('tm.content', langCode)})"
 
-    # 添加排序和分页
+    # 简化排序逻辑：只在SQL中做基本排序
+    # 复杂的子查询（source_presence, dialogue exist check）移到应用层避免性能问题
     if hash_value is not None:
         sql += (
             "order by "
             "case when tm.hash = ? then 0 else 1 end, "
             f"{match_sort_sql}, "
-            f"{_voice_order_expr('tm.hash')}, "
-            "case when exists (select 1 from dialogue d join questTalk qt on d.talkId = qt.talkId and ("
-            + _quest_talk_dialogue_join_condition("qt", "d")
-            + ") join quest q on qt.questId = q.questId where d.textHash = tm.hash limit 1) then 0 else 1 end, "
-            f"{normalized_length_sql} "
+            f"{_voice_order_expr('tm.hash')} "
         )
         params.append(hash_value)
         params.extend(match_sort_params)
@@ -805,11 +804,7 @@ def _build_textmap_query(
         sql += (
             "order by "
             f"{match_sort_sql}, "
-            f"{_voice_order_expr('tm.hash')}, "
-            "case when exists (select 1 from dialogue d join questTalk qt on d.talkId = qt.talkId and ("
-            + _quest_talk_dialogue_join_condition("qt", "d")
-            + ") join quest q on qt.questId = q.questId where d.textHash = tm.hash limit 1) then 0 else 1 end, "
-            f"{normalized_length_sql} "
+            f"{_voice_order_expr('tm.hash')} "
         )
         params.extend(match_sort_params)
 
@@ -2077,6 +2072,132 @@ def countTextMapFromKeyword(
         return int(row[0]) if row else 0
 
 
+# ── 来源类型筛选查询 ──────────────────────────────────────────────
+
+_SOURCE_TYPE_TO_ENTITY_CODE = {
+    "item": 1, "food": 2, "furnishing": 3, "gadget": 4,
+    "costume": 5, "suit": 6,
+    "weapon": 9, "reliquary": 10, "monster": 11, "creature": 12,
+    "material": 13,
+    "blueprint": 14, "gcg": 15, "namecard": 16, "performance": 17,
+    "avatar_intro": 18, "dressing": 19, "music_theme": 20, "other_mat": 21,
+    "avatar_mat": 22, "achievement": 23, "viewpoint": 24, "dungeon": 25,
+    "loading_tip": 26,
+}
+
+
+def _build_source_type_join(source_type: str) -> tuple[str, list]:
+    """根据来源类型构建 JOIN 子句，在数据库层过滤结果。"""
+    if source_type == "dialogue":
+        return "JOIN dialogue _sj ON _sj.textHash = tm.hash ", []
+    elif source_type == "voice":
+        return "JOIN fetters _sj ON _sj.voiceFileTextTextMapHash = tm.hash ", []
+    elif source_type == "quest":
+        return "JOIN quest_hash_map _sj ON _sj.hash = tm.hash ", []
+    elif source_type in _SOURCE_TYPE_TO_ENTITY_CODE:
+        code = _SOURCE_TYPE_TO_ENTITY_CODE[source_type]
+        return "JOIN text_source_entity _sj ON _sj.text_hash = tm.hash AND _sj.source_type_code = ? ", [code]
+    return "", []
+
+
+def selectTextMapFromKeywordBySourceType(
+    keyWord: str,
+    langCode: int,
+    source_type: str,
+    limit: int,
+    offset: int = 0,
+    created_version: str | None = None,
+    updated_version: str | None = None,
+):
+    """在数据库层通过 JOIN 来源表筛选 textMap 关键词搜索结果。"""
+    join_clause, join_params = _build_source_type_join(source_type)
+    if not join_clause:
+        return []
+
+    _ensure_fetter_voice_data()
+    with closing(conn.cursor()) as cursor:
+        exact, fuzzy = _build_like_patterns(keyWord, langCode)
+        fts_match = _build_textmap_fts_match(keyWord, langCode)
+        version_select = _version_select_expr("tm", "textMap")
+
+        # LIKE 查询
+        sql_like = (
+            f"SELECT DISTINCT tm.hash, tm.content, {version_select} FROM textMap tm "
+            f"{join_clause}"
+            "WHERE tm.lang=? AND (tm.content LIKE ? ESCAPE '\\' OR tm.content LIKE ? ESCAPE '\\') "
+        )
+        params_like = [*join_params, langCode, exact, fuzzy]
+        sql_like = _append_version_filter_clause(sql_like, params_like, "tm", created_version, updated_version, "textMap")
+        match_sort_sql, match_sort_params = _build_match_sort_case("tm.content", keyWord, langCode)
+        sql_like += f"ORDER BY {match_sort_sql}, length(tm.content) "
+        params_like.extend(match_sort_params)
+        sql_like += "LIMIT ? OFFSET ?"
+        params_like.extend([limit, offset])
+
+        # FTS 查询
+        if _is_textmap_fts_lang_enabled(langCode) and fts_match is not None:
+            sql_fts = (
+                f"SELECT DISTINCT tm.hash, tm.content, {version_select} FROM textMap tm "
+                f"{join_clause}"
+                f"WHERE tm.id IN (SELECT rowid FROM {_TEXTMAP_FTS_TABLE} WHERE {_TEXTMAP_FTS_TABLE} MATCH ? AND lang=?) "
+                "AND tm.lang=? "
+                "AND (tm.content LIKE ? ESCAPE '\\' OR tm.content LIKE ? ESCAPE '\\') "
+            )
+            params_fts = [*join_params, fts_match, langCode, langCode, exact, fuzzy]
+            sql_fts = _append_version_filter_clause(sql_fts, params_fts, "tm", created_version, updated_version, "textMap")
+            sql_fts += f"ORDER BY {match_sort_sql}, length(tm.content) "
+            params_fts.extend(match_sort_params)
+            sql_fts += "LIMIT ? OFFSET ?"
+            params_fts.extend([limit, offset])
+            _execute_with_fallback(cursor, sql_fts, params_fts, sql_like, params_like)
+        else:
+            cursor.execute(sql_like, params_like)
+
+        return cursor.fetchall()
+
+
+def countTextMapFromKeywordBySourceType(
+    keyWord: str,
+    langCode: int,
+    source_type: str,
+    created_version: str | None = None,
+    updated_version: str | None = None,
+) -> int:
+    """统计带来源类型筛选的 textMap 搜索结果数量。"""
+    join_clause, join_params = _build_source_type_join(source_type)
+    if not join_clause:
+        return 0
+
+    with closing(conn.cursor()) as cursor:
+        exact, fuzzy = _build_like_patterns(keyWord, langCode)
+        fts_match = _build_textmap_fts_match(keyWord, langCode)
+
+        sql_like = (
+            f"SELECT COUNT(DISTINCT tm.hash) FROM textMap tm "
+            f"{join_clause}"
+            "WHERE tm.lang=? AND (tm.content LIKE ? ESCAPE '\\' OR tm.content LIKE ? ESCAPE '\\') "
+        )
+        params_like = [*join_params, langCode, exact, fuzzy]
+        sql_like = _append_version_filter_clause(sql_like, params_like, "tm", created_version, updated_version, "textMap")
+
+        if _is_textmap_fts_lang_enabled(langCode) and fts_match is not None:
+            sql_fts = (
+                f"SELECT COUNT(DISTINCT tm.hash) FROM textMap tm "
+                f"{join_clause}"
+                f"WHERE tm.id IN (SELECT rowid FROM {_TEXTMAP_FTS_TABLE} WHERE {_TEXTMAP_FTS_TABLE} MATCH ? AND lang=?) "
+                "AND tm.lang=? "
+                "AND (tm.content LIKE ? ESCAPE '\\' OR tm.content LIKE ? ESCAPE '\\') "
+            )
+            params_fts = [*join_params, fts_match, langCode, langCode, exact, fuzzy]
+            sql_fts = _append_version_filter_clause(sql_fts, params_fts, "tm", created_version, updated_version, "textMap")
+            _execute_with_fallback(cursor, sql_fts, params_fts, sql_like, params_like)
+        else:
+            cursor.execute(sql_like, params_like)
+
+        row = cursor.fetchone()
+        return int(row[0]) if row else 0
+
+
 def countTextMapFromKeywordVoice(
     keyWord: str,
     langCode: int,
@@ -2328,6 +2449,154 @@ def getSourceFromFetter(textHash: int, langCode: int = 1):
             return None
 
         return "{} · {}".format(avatarName, _normalize_output_text(voiceTitle, langCode))
+
+
+def selectQuestHashSources(text_hash: int, *, source_type: str | None = None) -> list[tuple[int, str]]:
+    with closing(conn.cursor()) as cursor:
+        if source_type:
+            rows = cursor.execute(
+                "SELECT questId, source_type FROM quest_hash_map WHERE hash=? AND source_type=?",
+                (text_hash, source_type),
+            ).fetchall()
+        else:
+            rows = cursor.execute(
+                "SELECT questId, source_type FROM quest_hash_map WHERE hash=?",
+                (text_hash,),
+            ).fetchall()
+    return [(int(row[0]), str(row[1] or "")) for row in rows]
+
+
+def selectEntitySourcesByTextHash(text_hash: int) -> list[tuple[int, int, int, int]]:
+    with closing(conn.cursor()) as cursor:
+        try:
+            rows = cursor.execute(
+                """
+                SELECT source_type_code, entity_id, title_hash, extra
+                FROM text_source_entity
+                WHERE text_hash=?
+                ORDER BY source_type_code, entity_id
+                """,
+                (text_hash,),
+            ).fetchall()
+        except Exception:
+            return []
+    return [
+        (int(row[0]), int(row[1]), int(row[2]), int(row[3] or 0))
+        for row in rows
+        if row and row[0] is not None and row[1] is not None and row[2] is not None
+    ]
+
+
+def selectEntitySourcesByTitleHash(title_hash: int) -> list[tuple[int, int, int, int]]:
+    with closing(conn.cursor()) as cursor:
+        try:
+            rows = cursor.execute(
+                """
+                SELECT source_type_code, entity_id, title_hash, extra
+                FROM text_source_entity
+                WHERE title_hash=?
+                ORDER BY source_type_code, entity_id
+                """,
+                (title_hash,),
+            ).fetchall()
+        except Exception:
+            return []
+    return [
+        (int(row[0]), int(row[1]), int(row[2]), int(row[3] or 0))
+        for row in rows
+        if row and row[0] is not None and row[1] is not None and row[2] is not None
+    ]
+
+
+def selectEntityTextHashesByEntity(source_type_code: int, entity_id: int) -> list[tuple[int, int, int, int]]:
+    with closing(conn.cursor()) as cursor:
+        try:
+            rows = cursor.execute(
+                """
+                SELECT text_hash, title_hash, extra, sub_category
+                FROM text_source_entity
+                WHERE source_type_code=? AND entity_id=?
+                ORDER BY extra, text_hash
+                """,
+                (int(source_type_code), int(entity_id)),
+            ).fetchall()
+        except Exception:
+            return []
+    return [
+        (int(row[0]), int(row[1]), int(row[2] or 0), int(row[3] or 0))
+        for row in rows
+        if row and row[0] is not None and row[1] is not None
+    ]
+
+
+def selectCatalogEntities(
+    keyword: str,
+    lang_code: int,
+    source_type_code: int | None = None,
+    sub_category: int | None = None,
+    limit: int = 50,
+    offset: int = 0,
+) -> list[tuple[int, int, int, int, str]]:
+    """Search entities by title name. Returns (entity_id, source_type_code, title_hash, sub_category, title_text)."""
+    with closing(conn.cursor()) as cursor:
+        exact, fuzzy = _build_like_patterns(keyword, lang_code)
+
+        sql = (
+            "SELECT DISTINCT e.entity_id, e.source_type_code, e.title_hash, e.sub_category, tm.content "
+            "FROM text_source_entity e "
+            "JOIN textMap tm ON tm.hash = e.title_hash AND tm.lang = ? "
+            "WHERE (tm.content LIKE ? ESCAPE '\\' OR tm.content LIKE ? ESCAPE '\\') "
+        )
+        params: list = [lang_code, exact, fuzzy]
+
+        if source_type_code is not None:
+            sql += "AND e.source_type_code = ? "
+            params.append(int(source_type_code))
+        if sub_category is not None:
+            sql += "AND e.sub_category = ? "
+            params.append(int(sub_category))
+
+        sql += "ORDER BY length(tm.content), tm.content LIMIT ? OFFSET ?"
+        params.extend([limit, offset])
+
+        try:
+            cursor.execute(sql, params)
+            return cursor.fetchall()
+        except Exception:
+            return []
+
+
+def countCatalogEntities(
+    keyword: str,
+    lang_code: int,
+    source_type_code: int | None = None,
+    sub_category: int | None = None,
+) -> int:
+    """Count entities matching title name search."""
+    with closing(conn.cursor()) as cursor:
+        exact, fuzzy = _build_like_patterns(keyword, lang_code)
+
+        sql = (
+            "SELECT COUNT(DISTINCT e.entity_id || ',' || e.source_type_code) "
+            "FROM text_source_entity e "
+            "JOIN textMap tm ON tm.hash = e.title_hash AND tm.lang = ? "
+            "WHERE (tm.content LIKE ? ESCAPE '\\' OR tm.content LIKE ? ESCAPE '\\') "
+        )
+        params: list = [lang_code, exact, fuzzy]
+
+        if source_type_code is not None:
+            sql += "AND e.source_type_code = ? "
+            params.append(int(source_type_code))
+        if sub_category is not None:
+            sql += "AND e.sub_category = ? "
+            params.append(int(sub_category))
+
+        try:
+            cursor.execute(sql, params)
+            row = cursor.fetchone()
+            return int(row[0]) if row else 0
+        except Exception:
+            return 0
 
 
 def getCharterName(avatarId: int, langCode: int = 1):
@@ -3063,6 +3332,69 @@ def resolveReadableTitleHash(readableId: int | None = None, fileName: str | None
             if row and row[0] is not None:
                 return row[0]
         return None
+
+
+def getReadableInfoByTitleHash(titleTextMapHash: int, category: str | None = None):
+    with closing(conn.cursor()) as cursor:
+        sql = (
+            "select fileName, titleTextMapHash, readableId "
+            "from readable where titleTextMapHash=? "
+        )
+        params: list[object] = [int(titleTextMapHash)]
+        sql = _append_readable_category_filter_clause(sql, params, "readable", category)
+        sql += (
+            "order by case when readableId is null then 1 else 0 end, "
+            "readableId, fileName limit 1"
+        )
+        row = cursor.execute(sql, params).fetchone()
+        return row if row else None
+
+
+def selectReadableRefsByTitleHash(titleTextMapHash: int, category: str | None = None):
+    with closing(conn.cursor()) as cursor:
+        sql = (
+            "select min(fileName) as fileName, titleTextMapHash, readableId "
+            "from readable where titleTextMapHash=? "
+        )
+        params: list[object] = [int(titleTextMapHash)]
+        sql = _append_readable_category_filter_clause(sql, params, "readable", category)
+        sql += (
+            "group by titleTextMapHash, readableId "
+            "order by case when readableId is null then 1 else 0 end, "
+            "readableId, fileName"
+        )
+        rows = cursor.execute(sql, params).fetchall()
+        return rows
+
+
+def selectReadableRefsByFileNamePrefix(prefix: str | list[str] | tuple[str, ...]):
+    if isinstance(prefix, (list, tuple)):
+        raw_prefixes = prefix
+    else:
+        raw_prefixes = [prefix]
+
+    prefixes: list[str] = []
+    seen: set[str] = set()
+    for value in raw_prefixes:
+        text = str(value or "").strip()
+        if not text or text in seen:
+            continue
+        seen.add(text)
+        prefixes.append(text)
+
+    if not prefixes:
+        return []
+
+    with closing(conn.cursor()) as cursor:
+        clauses = " or ".join(["fileName like ?"] * len(prefixes))
+        params = [f"{item}%" for item in prefixes]
+        sql = (
+            "select min(fileName) as fileName, titleTextMapHash, readableId "
+            f"from readable where {clauses} "
+            "group by titleTextMapHash, readableId "
+            "order by case when readableId is null then 1 else 0 end, readableId, fileName"
+        )
+        return cursor.execute(sql, params).fetchall()
 
 
 def getReadableVersionInfo(readableId: int | None = None, fileName: str | None = None):
