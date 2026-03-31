@@ -1,8 +1,11 @@
 import io
+import json
 import math
+import os
 import re
 import zlib
 from functools import lru_cache
+from typing import TypedDict
 
 import databaseHelper
 import languagePackReader
@@ -239,12 +242,573 @@ def selectVoiceOriginFromTextHash(textHash: int, langCode: int) -> tuple[str, bo
     return "其他文本", False
 
 
+def _build_primary_source(
+    source_type: str,
+    title: str,
+    subtitle: str | None = None,
+    detail_query: dict[str, object] | None = None,
+) -> dict[str, object]:
+    payload: dict[str, object] = {
+        "sourceType": source_type,
+        "title": title,
+    }
+    if subtitle:
+        payload["subtitle"] = subtitle
+    if detail_query:
+        payload["detailQuery"] = detail_query
+    return payload
+
+
+def _normalize_source_type_filter(source_type: str | None) -> str | None:
+    normalized = str(source_type or "").strip().lower()
+    if not normalized or normalized == "all":
+        return None
+    alias_map = {
+        "奇偶装扮": "costume",
+        "装扮套装": "costume",
+        "千星奇域": "costume",
+        "衣装": "dressing",
+        "outfit": "dressing",
+        "武器": "weapon",
+        "圣遗物": "reliquary",
+        "怪物": "monster",
+        "生物": "creature",
+        "小道具": "gadget",
+        "道具": "item",
+        "材料": "material",
+        "食物": "food",
+        "摆设": "furnishing",
+        "图纸": "blueprint",
+        "七圣召唤": "gcg",
+        "名片": "namecard",
+        "表演诀窍": "performance",
+        "角色": "avatar_intro",
+        "装扮": "dressing",
+        "演奏主题": "music_theme",
+        "其他": "other_mat",
+        "角色突破素材": "avatar_mat",
+        "成就": "achievement",
+        "观景点": "viewpoint",
+        "秘境": "dungeon",
+        "过场提示": "loading_tip",
+    }
+    return alias_map.get(normalized, normalized)
+
+
+def _matches_source_type_filter(entry: dict, source_type_filter: str | None) -> bool:
+    normalized_filter = _normalize_source_type_filter(source_type_filter)
+    if normalized_filter is None:
+        return True
+    primary_source = entry.get("primarySource") or {}
+    source_type = str(primary_source.get("sourceType") or "").strip().lower()
+    if normalized_filter == "costume":
+        return source_type in {"costume", "suit"}
+    return source_type == normalized_filter
+
+
+def _filter_entries_by_source_type(entries: list[dict], source_type_filter: str | None) -> list[dict]:
+    normalized_filter = _normalize_source_type_filter(source_type_filter)
+    if normalized_filter is None:
+        return entries
+    return [entry for entry in entries if _matches_source_type_filter(entry, normalized_filter)]
+
+
+# 可以在数据库层直接 JOIN 过滤的来源类型
+_DB_FILTERABLE_SOURCE_TYPES_BUILTIN: frozenset[str] = frozenset({
+    "dialogue", "voice", "quest",
+    "item", "food", "furnishing", "gadget", "material",
+    "costume", "suit",
+    "weapon", "reliquary", "monster", "creature",
+    "blueprint", "gcg", "namecard", "performance",
+    "avatar_intro", "dressing", "music_theme", "other_mat",
+    "avatar_mat", "achievement", "viewpoint", "dungeon",
+    "loading_tip",
+})
+
+
+def _get_db_filterable_source_types() -> frozenset[str]:
+    return _DB_FILTERABLE_SOURCE_TYPES_BUILTIN
+
+
+_ENTITY_SOURCE_META = {
+    1: ("item", "道具"),
+    2: ("food", "食物"),
+    3: ("furnishing", "摆设"),
+    4: ("gadget", "小道具"),
+    5: ("costume", "千星奇域"),
+    6: ("suit", "千星奇域"),
+    9: ("weapon", "武器"),
+    10: ("reliquary", "圣遗物"),
+    11: ("monster", "怪物"),
+    12: ("creature", "生物"),
+    13: ("material", "材料"),
+    14: ("blueprint", "图纸"),
+    15: ("gcg", "七圣召唤"),
+    16: ("namecard", "名片"),
+    17: ("performance", "表演诀窍"),
+    18: ("avatar_intro", "角色"),
+    19: ("dressing", "装扮"),
+    20: ("music_theme", "演奏主题"),
+    21: ("other_mat", "其他"),
+    22: ("avatar_mat", "角色突破素材"),
+    23: ("achievement", "成就"),
+    24: ("viewpoint", "观景点"),
+    25: ("dungeon", "秘境"),
+    26: ("loading_tip", "过场提示"),
+}
+
+_ENTITY_SOURCE_PRIORITY = {
+    2: 1,
+    22: 2,
+    13: 3,
+    14: 4,
+    15: 5,
+    16: 6,
+    17: 7,
+    18: 8,
+    19: 9,
+    20: 10,
+    3: 11,
+    5: 12,
+    6: 15,
+    9: 16,
+    10: 17,
+    11: 18,
+    12: 19,
+    23: 20,
+    24: 21,
+    25: 22,
+    26: 23,
+    21: 24,
+    4: 25,
+    1: 26,
+}
+
+
+def _get_entity_source_meta(source_type_code: int) -> tuple[str, str]:
+    meta = _ENTITY_SOURCE_META.get(int(source_type_code))
+    if meta:
+        return meta
+    return ("item", "道具")
+
+
+_SUB_CATEGORY_LABELS: dict[int, str] = {
+    0: "",
+    1: "任务道具",
+    2: "摆设图纸",
+    3: "牌面",
+    4: "卡牌",
+    5: "消耗品",
+    6: "角色介绍",
+    7: "命之座激活素材",
+    8: "摆设套装图纸",
+    9: "宝箱",
+    10: "活动道具",
+    11: "小道具",
+    12: "种子",
+    13: "牌背",
+    14: "活动食物",
+    15: "木材",
+    16: "经验素材",
+    17: "衣装",
+    18: "游迹",
+    19: "风之翼",
+    20: "烟花",
+    21: "钓竿",
+    22: "武器外观",
+    23: "头像框",
+    24: "头像",
+    25: "牌盒",
+    26: "鱼饵",
+    27: "旋曜玉帛",
+    28: "角色突破素材",
+    29: "奇偶装扮",
+    30: "装扮套装",
+}
+
+
+def _get_sub_category_label(sub_category_code: int) -> str:
+    return _SUB_CATEGORY_LABELS.get(int(sub_category_code), "")
+
+
+_READABLE_LANG_SUFFIX_RE = re.compile(r"_(CHT|DE|EN|ES|FR|ID|IT|JP|KR|PT|RU|TH|TR|VI)$", re.IGNORECASE)
+
+
+class _EntityReadableLookup(TypedDict):
+    outfit_item_to_skin: dict[int, int]
+    reliquary_set_to_id: dict[int, int]
+    reliquary_set_piece_to_id: dict[tuple[int, int], int]
+    book_material_ids: set[int]
+
+
+@lru_cache(maxsize=1)
+def _load_entity_readable_lookup() -> _EntityReadableLookup:
+    asset_dir = str(config.getAssetDir() or "").strip()
+    candidate_roots = [asset_dir]
+    try:
+        project_root = config.project_root()
+        candidate_roots.append(str(project_root / "AnimeGameData"))
+        candidate_roots.append(str(project_root.parent / "AnimeGameData"))
+    except Exception:
+        pass
+
+    data_root = ""
+    for candidate in candidate_roots:
+        if not candidate:
+            continue
+        excel_dir = os.path.join(candidate, "ExcelBinOutput")
+        if os.path.isdir(excel_dir):
+            data_root = candidate
+            break
+
+    if not data_root:
+        return {
+            "outfit_item_to_skin": {},
+            "reliquary_set_to_id": {},
+            "reliquary_set_piece_to_id": {},
+            "book_material_ids": set(),
+        }
+
+    excel_root = os.path.join(data_root, "ExcelBinOutput")
+
+    def _load_rows(file_name: str) -> list[dict]:
+        path = os.path.join(excel_root, file_name)
+        try:
+            with open(path, encoding="utf-8") as fp:
+                data = json.load(fp)
+        except Exception:
+            return []
+        if not isinstance(data, list):
+            return []
+        return [row for row in data if isinstance(row, dict)]
+
+    outfit_item_to_skin: dict[int, int] = {}
+    for row in _load_rows("AvatarCostumeExcelConfigData.json"):
+        skin_id = row.get("skinId")
+        item_id = row.get("itemId")
+        if isinstance(skin_id, int) and skin_id and isinstance(item_id, int) and item_id:
+            outfit_item_to_skin[item_id] = skin_id
+
+    reliquary_set_to_id: dict[int, int] = {}
+    reliquary_set_piece_to_id: dict[tuple[int, int], int] = {}
+    equip_order = {
+        "EQUIP_BRACER": 1,
+        "EQUIP_NECKLACE": 2,
+        "EQUIP_SHOES": 3,
+        "EQUIP_RING": 4,
+        "EQUIP_DRESS": 5,
+    }
+    for row in _load_rows("ReliquaryExcelConfigData.json"):
+        reliquary_id = row.get("id")
+        set_id = row.get("setId")
+        equip_type = str(row.get("equipType") or "").strip().upper()
+        if not isinstance(reliquary_id, int) or not reliquary_id or not isinstance(set_id, int) or not set_id:
+            continue
+        reliquary_set_to_id.setdefault(set_id, reliquary_id)
+        piece_no = equip_order.get(equip_type)
+        if piece_no:
+            reliquary_set_piece_to_id.setdefault((set_id, piece_no), reliquary_id)
+
+    return {
+        "outfit_item_to_skin": outfit_item_to_skin,
+        "reliquary_set_to_id": reliquary_set_to_id,
+        "reliquary_set_piece_to_id": reliquary_set_piece_to_id,
+        "book_material_ids": _build_book_material_ids(_load_rows("BooksCodexExcelConfigData.json")),
+    }
+
+
+def _build_book_material_ids(rows: list[dict]) -> set[int]:
+    ids: set[int] = set()
+    for row in rows:
+        mid = row.get("materialId")
+        if isinstance(mid, int) and mid:
+            ids.add(mid)
+    return ids
+
+
+def _build_entity_source_payload(
+    source_rows: list[tuple[int, int, int, int]],
+    lang_code: int,
+    text_hash: int,
+) -> tuple[dict, str, int]:
+    picked = min(source_rows, key=lambda row: (_ENTITY_SOURCE_PRIORITY.get(row[0], 99), row[1]))
+    source_type_code, entity_id, title_hash, extra = picked
+    source_type, source_label = _get_entity_source_meta(source_type_code)
+    title = _get_text_map_content_with_fallback(title_hash, lang_code, [config.getSourceLanguage()]) or str(entity_id)
+    subtitle = f"{source_label} {entity_id}"
+    gender_code = 0
+    if source_type in ("costume", "suit"):
+        if extra in (1, 2):
+            gender_code = extra
+        else:
+            gender_code = (extra >> 8) & 0xFF
+    if gender_code in (1, 2):
+        subtitle = subtitle + (" · 男" if gender_code == 1 else " · 女")
+    origin = f"{source_label}: {title}"
+    primary = _build_primary_source(
+        source_type,
+        title,
+        subtitle,
+        {"kind": "entity", "sourceTypeCode": source_type_code, "entityId": entity_id, "textHash": text_hash},
+    )
+    return primary, origin, len(source_rows)
+
+
+def _resolve_entity_from_readable_file(file_name: str) -> tuple[int, int] | None:
+    lookup = _load_entity_readable_lookup()
+    stem = os.path.splitext(os.path.basename(str(file_name or "")))[0]
+    stem = _READABLE_LANG_SUFFIX_RE.sub("", stem)
+
+    weapon_match = re.fullmatch(r"Weapon(\d+)", stem, re.IGNORECASE)
+    if weapon_match:
+        return 9, int(weapon_match.group(1))
+
+    wings_match = re.fullmatch(r"Wings(\d+)", stem, re.IGNORECASE)
+    if wings_match:
+        return 19, int(wings_match.group(1))
+
+    costume_match = re.fullmatch(r"Costume(\d+)", stem, re.IGNORECASE)
+    if costume_match:
+        raw_id = int(costume_match.group(1))
+        outfit_skin_id = lookup["outfit_item_to_skin"].get(raw_id)
+        if outfit_skin_id:
+            return 19, outfit_skin_id
+        return 5, raw_id
+
+    relic_match = re.fullmatch(r"Relic(\d+)(?:_(\d+))?", stem, re.IGNORECASE)
+    if relic_match:
+        set_id = int(relic_match.group(1))
+        piece_no = int(relic_match.group(2)) if relic_match.group(2) else None
+        if piece_no is not None:
+            reliquary_id = lookup["reliquary_set_piece_to_id"].get((set_id, piece_no))
+            if reliquary_id:
+                return 10, reliquary_id
+        reliquary_id = lookup["reliquary_set_to_id"].get(set_id)
+        if reliquary_id:
+            return 10, reliquary_id
+
+    return None
+
+
+def _get_entity_readable_category_filters(source_type: str) -> list[str]:
+    mapping = {
+        "costume": ["COSTUME"],
+        "suit": ["COSTUME"],
+        "dressing": ["COSTUME", "WINGS"],
+        "weapon": ["WEAPON"],
+        "reliquary": ["RELIC"],
+    }
+    return mapping.get(source_type, [])
+
+
+def _build_entity_readable_entry(
+    file_name: str,
+    title_text_hash: int | None,
+    readable_id: int | None,
+    field_label: str,
+    subtitle: str,
+    langs: list[int],
+    source_lang_code: int,
+) -> dict | None:
+    lang_map = databaseHelper.getLangCodeMap()
+    target_lang_strs = [lang_map[lang] for lang in langs if lang in lang_map]
+    str_to_lang_id = _build_lang_str_to_id_map()
+
+    if readable_id:
+        translations = databaseHelper.selectReadableFromReadableId(readable_id, target_lang_strs)
+    else:
+        translations = databaseHelper.selectReadableFromFileName(file_name, target_lang_strs)
+
+    translate_map = {}
+    for trans_content, trans_lang_str in translations:
+        if trans_lang_str in str_to_lang_id:
+            lang_id = str_to_lang_id[trans_lang_str]
+            translate_map[str(lang_id)] = _normalize_text_map_content(trans_content, lang_id)
+
+    if not translate_map:
+        return None
+
+    created_raw, updated_raw = databaseHelper.getReadableVersionInfo(readable_id, file_name)
+    readable_hash = int(title_text_hash or 0)
+    return {
+        "fieldLabel": field_label,
+        "subtitle": subtitle,
+        "textHash": readable_hash,
+        "titleHash": readable_hash,
+        "readableId": readable_id,
+        "fileName": file_name,
+        "detailQuery": {
+            "kind": "readable",
+            "readableId": readable_id,
+            "fileName": file_name,
+            "textHash": readable_hash,
+        },
+        "text": {
+            "translates": translate_map,
+            "voicePaths": [],
+            "availableVoiceLangs": [],
+            "hash": readable_hash,
+            **_build_version_fields(created_raw, updated_raw),
+        },
+    }
+
+
+def _collect_entity_readable_entries(
+    source_type: str,
+    entity_id: int,
+    title_text_hash: int | None,
+    subtitle: str,
+    langs: list[int],
+    source_lang_code: int,
+    sub_category: int = 0,
+) -> list[dict]:
+    refs = []
+    prefix_map = {
+        "weapon": [f"Weapon{entity_id}"],
+        "costume": [f"Costume{entity_id}"],
+    }
+    if source_type == "dressing" and sub_category == 19:
+        # 风之翼 (SUB_FLYCLOAK_SUB) → Wings readable
+        prefix_map[source_type] = [f"Wings{entity_id}"]
+    elif source_type == "dressing" and sub_category == 17:
+        # 衣装 (SUB_COSTUME_DRESS) → Costume readable via reverse lookup
+        for raw_item_id, skin_id in _load_entity_readable_lookup()["outfit_item_to_skin"].items():
+            if skin_id == entity_id:
+                prefix_map[source_type] = [f"Costume{raw_item_id}"]
+                break
+    if source_type == "reliquary":
+        lookup = _load_entity_readable_lookup()
+        for set_id, reliquary_id in lookup["reliquary_set_to_id"].items():
+            if reliquary_id == entity_id or any(v == entity_id and k[0] == set_id for k, v in lookup["reliquary_set_piece_to_id"].items()):
+                prefix_map[source_type] = [f"Relic{set_id}_", f"Relic{set_id}"]
+                break
+
+    for prefix in prefix_map.get(source_type, []):
+        refs.extend(databaseHelper.selectReadableRefsByFileNamePrefix(prefix))
+
+    category_filters = _get_entity_readable_category_filters(source_type)
+    if title_text_hash:
+        for category in category_filters:
+            refs.extend(databaseHelper.selectReadableRefsByTitleHash(title_text_hash, category))
+        if not refs:
+            refs.extend(databaseHelper.selectReadableRefsByTitleHash(title_text_hash, None))
+
+    seen_keys: set[int | str] = set()
+    entries: list[dict] = []
+    if source_type in {"costume", "suit", "dressing", "weapon", "reliquary"}:
+        field_label = "故事"
+    else:
+        field_label = _classify_readable_label(None, title_text_hash)
+
+    for file_name, readable_title_hash, readable_id in refs:
+        dedupe_key: int | str
+        if readable_id is not None:
+            dedupe_key = int(readable_id)
+        else:
+            dedupe_key = _READABLE_LANG_SUFFIX_RE.sub("", os.path.splitext(str(file_name))[0])
+        if dedupe_key in seen_keys:
+            continue
+        seen_keys.add(dedupe_key)
+        resolved_title_hash = int(readable_title_hash or title_text_hash or 0)
+        entry = _build_entity_readable_entry(
+            str(file_name),
+            resolved_title_hash,
+            int(readable_id) if readable_id is not None else None,
+            field_label,
+            subtitle,
+            langs,
+            source_lang_code,
+        )
+        if entry is not None:
+            entries.append(entry)
+    return entries
+
+
+def _select_primary_source_from_text_hash(text_hash: int, lang_code: int) -> tuple[dict, str, bool, int]:
+    talk_info = databaseHelper.getTalkInfo(text_hash)
+    if talk_info is not None:
+        talk_id, talker_type, talker_id, coop_quest_id = talk_info
+        talker_name = databaseHelper.getTalkerName(talker_type, talker_id, lang_code)
+        source_lang_code = config.getSourceLanguage()
+        if coop_quest_id is None:
+            quest_title = databaseHelper.getTalkQuestName(talk_id, source_lang_code)
+        else:
+            quest_title = databaseHelper.getCoopTalkQuestName(coop_quest_id, source_lang_code)
+
+        origin = quest_title if not talker_name else f"{talker_name}, {quest_title}"
+        primary = _build_primary_source(
+            "dialogue",
+            quest_title,
+            talker_name,
+            {"kind": "talk", "textHash": text_hash},
+        )
+        return primary, origin, True, 1
+
+    fetter_origin = databaseHelper.getSourceFromFetter(text_hash, lang_code)
+    if fetter_origin is not None:
+        primary = _build_primary_source(
+            "voice",
+            fetter_origin,
+            "角色语音",
+            {"kind": "text", "textHash": text_hash},
+        )
+        return primary, fetter_origin, False, 1
+
+    quest_sources = databaseHelper.selectQuestHashSources(text_hash, source_type="title")
+    if quest_sources:
+        quest_ids = sorted({quest_id for quest_id, _ in quest_sources})
+        quest_id = quest_ids[0]
+        quest_title = databaseHelper.getQuestName(quest_id, lang_code)
+        origin = f"任务: {quest_title}"
+        primary = _build_primary_source(
+            "quest",
+            quest_title,
+            f"Quest {quest_id}",
+            {"kind": "quest", "questId": quest_id},
+        )
+        return primary, origin, False, len(quest_ids)
+
+    entity_sources = databaseHelper.selectEntitySourcesByTextHash(text_hash)
+    if entity_sources:
+        primary, origin, source_count = _build_entity_source_payload(entity_sources, lang_code, text_hash)
+        return primary, origin, False, source_count
+
+    entity_title_sources = databaseHelper.selectEntitySourcesByTitleHash(text_hash)
+    if entity_title_sources:
+        primary, origin, source_count = _build_entity_source_payload(entity_title_sources, lang_code, text_hash)
+        return primary, origin, False, source_count
+
+    readable_info = databaseHelper.getReadableInfoByTitleHash(text_hash)
+    if readable_info:
+        file_name, _title_text_map_hash, readable_id = readable_info
+        readable_title = _get_text_map_content_with_fallback(text_hash, lang_code, [config.getSourceLanguage()]) or str(file_name)
+        readable_refs = databaseHelper.selectReadableRefsByTitleHash(text_hash)
+        readable_origin = f"阅读物: {readable_title}"
+        readable_primary = _build_primary_source(
+            "readable",
+            readable_title,
+            "阅读物",
+            {"kind": "readable", "readableId": readable_id, "fileName": file_name, "textHash": text_hash},
+        )
+        return readable_primary, readable_origin, False, max(len(readable_refs), 1)
+
+    unknown_origin = "其他文本"
+    primary = _build_primary_source(
+        "unknown",
+        "未归类文本",
+        f"TextMap Hash {text_hash}",
+        {"kind": "text", "textHash": text_hash},
+    )
+    return primary, unknown_origin, False, 0
+
+
 def queryTextHashInfo(textHash: int, langs: 'list[int]', sourceLangCode: int, queryOrigin=True):
     """
     查询文本哈希的信息
     - 获取多语言翻译
     - 查询语音路径
     - 获取版本信息
+    - queryOrigin=False 用于搜索阶段，跳过来源查询以大幅减少数据库查询
     """
     obj = {'translates': {}, 'voicePaths': [], 'availableVoiceLangs': [], 'hash': textHash}
     # 去重并添加源语言
@@ -262,9 +826,17 @@ def queryTextHashInfo(textHash: int, langs: 'list[int]', sourceLangCode: int, qu
 
     # 查询来源信息
     if queryOrigin:
-        origin, isTalk = selectVoiceOriginFromTextHash(textHash, sourceLangCode)
-        obj['isTalk'] = isTalk
+        primary_source, origin, is_talk, source_count = _select_primary_source_from_text_hash(textHash, sourceLangCode)
+        obj['isTalk'] = is_talk
         obj['origin'] = origin
+        obj['primarySource'] = primary_source
+        obj['sourceCount'] = source_count
+        if not is_talk:
+            obj['viewAsTextHash'] = True
+    else:
+        # 搜索阶段：跳过昂贵的来源查询，来源筛选在数据库层完成
+        obj['origin'] = "其他文本"
+        obj['isTalk'] = False
 
     # 查询语音路径
     voicePath = selectVoicePathFromTextHash(textHash)
@@ -315,14 +887,33 @@ def _build_quest_source_type_fields(source_type: str | None) -> dict:
     }
 
 
-def _build_readable_category_fields(file_name: str | None) -> dict:
+def _classify_readable_label(file_name: str | None, title_text_hash: int | None = None) -> str:
+    """统一阅读物分类：先按 codex（书籍/任务道具），再按文件名前缀。"""
+    if title_text_hash:
+        lookup = _load_entity_readable_lookup()
+        book_ids = lookup.get("book_material_ids", set())
+        entity_rows = databaseHelper.selectEntitySourcesByTitleHash(title_text_hash)
+        for row in entity_rows:
+            source_type_code, entity_id = row[0], row[1]
+            if entity_id in book_ids:
+                return "书籍"
+            sub_rows = databaseHelper.selectEntityTextHashesByEntity(source_type_code, entity_id)
+            for sub_row in sub_rows:
+                sub_cat = sub_row[3] if len(sub_row) > 3 else 0
+                if sub_cat == 1:  # SUB_QUEST_ITEM
+                    return "任务道具"
+    # 按文件名前缀分类
     category = databaseHelper.getReadableCategoryCode(file_name)
+    label = databaseHelper.READABLE_CATEGORY_LABELS.get(category, "")
+    return label if label and label != "其他" else "阅读物"
+
+
+def _build_readable_category_fields(file_name: str | None, title_text_hash: int | None = None) -> dict:
+    category = databaseHelper.getReadableCategoryCode(file_name)
+    label = _classify_readable_label(file_name, title_text_hash)
     return {
         "readableCategory": category,
-        "readableCategoryLabel": databaseHelper.READABLE_CATEGORY_LABELS.get(
-            category,
-            databaseHelper.READABLE_CATEGORY_LABELS["OTHER"],
-        ),
+        "readableCategoryLabel": label,
     }
 
 
@@ -623,10 +1214,14 @@ def _paginate(entries: list[dict], page: int, page_size: int, total: int | None 
     return entries[start:end], total_count
 
 
-def _handle_speaker_only_query(speaker_keyword: str, langCode: int, page: int, page_size: int, voice_filter: str, created_version_filter: str | None, updated_version_filter: str | None) -> tuple[list[dict], int]:
+def _handle_speaker_only_query(speaker_keyword: str, langCode: int, page: int, page_size: int, voice_filter: str, created_version_filter: str | None, updated_version_filter: str | None, source_type_filter: str | None = None) -> tuple[list[dict], int]:
     """
     处理仅说话者查询
     """
+    normalized_source_type = _normalize_source_type_filter(source_type_filter)
+    if normalized_source_type and normalized_source_type != "dialogue":
+        return [], 0
+
     ans = []
     langs = config.getResultLanguages().copy()
     if langCode not in langs:
@@ -696,10 +1291,14 @@ def _handle_speaker_only_query(speaker_keyword: str, langCode: int, page: int, p
     return _paginate(ans, page, page_size, total)
 
 
-def _handle_speaker_and_keyword_query(speaker_keyword: str, keyword_trim: str, langCode: int, page: int, page_size: int, voice_filter: str, created_version_filter: str | None, updated_version_filter: str | None) -> tuple[list[dict], int]:
+def _handle_speaker_and_keyword_query(speaker_keyword: str, keyword_trim: str, langCode: int, page: int, page_size: int, voice_filter: str, created_version_filter: str | None, updated_version_filter: str | None, source_type_filter: str | None = None) -> tuple[list[dict], int]:
     """
     处理说话者和关键词查询
     """
+    normalized_source_type = _normalize_source_type_filter(source_type_filter)
+    if normalized_source_type and normalized_source_type not in ("dialogue", "voice"):
+        return [], 0
+
     ans = []
     langs = config.getResultLanguages().copy()
     if langCode not in langs:
@@ -725,13 +1324,14 @@ def _handle_speaker_and_keyword_query(speaker_keyword: str, keyword_trim: str, l
         obj['talker'] = databaseHelper.getTalkerName(talkerType, talkerId, langCode)
         ans.append(obj)
 
-    total = _count_dialogue_by_talker_and_keyword_cached(
+    dialogue_total = _count_dialogue_by_talker_and_keyword_cached(
         speaker_keyword,
         keyword_trim,
         langCode,
         created_version_filter,
         updated_version_filter,
     )
+    total = dialogue_total
 
     # 查询特殊说话者类型
     speaker_norm = _normalize_speaker(speaker_keyword, langCode)
@@ -781,15 +1381,22 @@ def _handle_speaker_and_keyword_query(speaker_keyword: str, keyword_trim: str, l
         obj = queryTextHashInfo(textHash, langs, sourceLangCode)
         obj['talker'] = databaseHelper.getCharterName(avatarId, langCode)
         ans.append(obj)
-    total += _count_fetter_by_speaker_and_keyword_cached(
+    voice_total = _count_fetter_by_speaker_and_keyword_cached(
         speaker_keyword,
         keyword_trim,
         langCode,
         created_version_filter,
         updated_version_filter,
     )
+    total += voice_total
 
     ans = _apply_voice_filter(ans, voice_filter)
+    if normalized_source_type:
+        ans = _filter_entries_by_source_type(ans, normalized_source_type)
+        if normalized_source_type == "dialogue":
+            total = dialogue_total
+        elif normalized_source_type == "voice":
+            total = voice_total
     ans.sort(
         key=lambda entry: (
             _best_field_match(
@@ -804,7 +1411,7 @@ def _handle_speaker_and_keyword_query(speaker_keyword: str, keyword_trim: str, l
     return _paginate(ans, page, page_size, total)
 
 
-def _handle_keyword_only_query(keyword: str, keyword_trim: str, langCode: int, page: int, page_size: int, voice_filter: str, created_version_filter: str | None, updated_version_filter: str | None) -> tuple[list[dict], int]:
+def _handle_keyword_only_query(keyword: str, keyword_trim: str, langCode: int, page: int, page_size: int, voice_filter: str, created_version_filter: str | None, updated_version_filter: str | None, source_type_filter: str | None = None) -> tuple[list[dict], int]:
     """
     处理仅关键词查询
     """
@@ -840,7 +1447,7 @@ def _handle_keyword_only_query(keyword: str, keyword_trim: str, langCode: int, p
     strToLangId = _build_lang_str_to_id_map()
     prefix_labels = {
         "Book": "书籍",
-        "Costume": "衣装",
+        "Costume": "装扮",
         "Relic": "圣遗物",
         "Weapon": "武器",
         "Wings": "风之翼",
@@ -850,9 +1457,9 @@ def _handle_keyword_only_query(keyword: str, keyword_trim: str, langCode: int, p
     safe_size = page_size if page_size and page > 0 else 50
 
     if voice_filter == "all":
-        return _handle_all_voice_filter_ranked(keyword, keyword_trim, langCode, safe_page, safe_size, hash_value, is_hash_query, hash_obj, hash_extra, text_hashes_seen, langs, sourceLangCode, langStr, targetLangStrs, strToLangId, prefix_labels, created_version_filter, updated_version_filter)
+        return _handle_all_voice_filter_ranked(keyword, keyword_trim, langCode, safe_page, safe_size, hash_value, is_hash_query, hash_obj, hash_extra, text_hashes_seen, langs, sourceLangCode, langStr, targetLangStrs, strToLangId, prefix_labels, created_version_filter, updated_version_filter, source_type_filter)
     else:
-        return _handle_specific_voice_filter_ranked(keyword, keyword_trim, langCode, safe_page, safe_size, voice_filter, hash_value, is_hash_query, hash_obj, hash_extra, text_hashes_seen, langs, sourceLangCode, langStr, targetLangStrs, strToLangId, prefix_labels, created_version_filter, updated_version_filter)
+        return _handle_specific_voice_filter_ranked(keyword, keyword_trim, langCode, safe_page, safe_size, voice_filter, hash_value, is_hash_query, hash_obj, hash_extra, text_hashes_seen, langs, sourceLangCode, langStr, targetLangStrs, strToLangId, prefix_labels, created_version_filter, updated_version_filter, source_type_filter)
 
 
 def _handle_all_voice_filter(keyword, keyword_trim, langCode, safe_page, safe_size, hash_value, is_hash_query, hash_obj, hash_extra, text_hashes_seen, langs, sourceLangCode, langStr, targetLangStrs, strToLangId, prefix_labels, created_version_filter, updated_version_filter):
@@ -913,7 +1520,7 @@ def _handle_all_voice_filter(keyword, keyword_trim, langCode, safe_page, safe_si
             if text_hash in text_hashes_seen:
                 continue
             text_hashes_seen.add(text_hash)
-            obj = queryTextHashInfo(text_hash, langs, sourceLangCode)
+            obj = queryTextHashInfo(text_hash, langs, sourceLangCode, queryOrigin=False)
             ans.append(obj)
         remaining = safe_size - len(ans)
         offset_after_hash = 0
@@ -932,7 +1539,7 @@ def _handle_all_voice_filter(keyword, keyword_trim, langCode, safe_page, safe_si
             updated_version_filter,
         )
         for fileName, content, titleTextMapHash, readableId, created_raw, updated_raw in readableContents:
-            ans.append(_build_readable_obj(fileName, content, titleTextMapHash, readableId, created_raw, updated_raw, sourceLangCode, langCode, targetLangStrs, strToLangId, prefix_labels))
+            ans.append(_build_readable_obj(fileName, content, titleTextMapHash, readableId, created_raw, updated_raw, sourceLangCode, langCode, targetLangStrs, strToLangId, prefix_labels, isSearchPhase=True))
         remaining = safe_size - len(ans)
         offset_after_hash = 0
     else:
@@ -1024,7 +1631,7 @@ def _handle_specific_voice_filter(keyword, keyword_trim, langCode, safe_page, sa
             if text_hash in text_hashes_seen:
                 continue
             text_hashes_seen.add(text_hash)
-            obj = queryTextHashInfo(text_hash, langs, sourceLangCode)
+            obj = queryTextHashInfo(text_hash, langs, sourceLangCode, queryOrigin=False)
             ans.append(obj)
         remaining = safe_size - len(ans)
         offset_after_hash = 0
@@ -1044,7 +1651,7 @@ def _handle_specific_voice_filter(keyword, keyword_trim, langCode, safe_page, sa
                 updated_version_filter,
             )
             for fileName, content, titleTextMapHash, readableId, created_raw, updated_raw in readableContents:
-                ans.append(_build_readable_obj(fileName, content, titleTextMapHash, readableId, created_raw, updated_raw, sourceLangCode, langCode, targetLangStrs, strToLangId, prefix_labels))
+                ans.append(_build_readable_obj(fileName, content, titleTextMapHash, readableId, created_raw, updated_raw, sourceLangCode, langCode, targetLangStrs, strToLangId, prefix_labels, isSearchPhase=True))
             remaining = safe_size - len(ans)
             offset_after_hash = 0
         else:
@@ -1065,30 +1672,8 @@ def _handle_specific_voice_filter(keyword, keyword_trim, langCode, safe_page, sa
     return ans, total
 
 
-def _handle_all_voice_filter_ranked(keyword, keyword_trim, langCode, safe_page, safe_size, hash_value, is_hash_query, hash_obj, hash_extra, text_hashes_seen, langs, sourceLangCode, langStr, targetLangStrs, strToLangId, prefix_labels, created_version_filter, updated_version_filter):
-    total_textmap = _count_textmap_from_keyword_cached(
-        keyword,
-        langCode,
-        created_version_filter,
-        updated_version_filter,
-    )
-    total_readable = 0
-    if langStr:
-        total_readable = _count_readable_from_keyword_cached(
-            keyword,
-            langCode,
-            langStr,
-            created_version_filter,
-            updated_version_filter,
-        )
-    total_subtitle = _count_subtitle_from_keyword_cached(
-        keyword,
-        langCode,
-        created_version_filter,
-        updated_version_filter,
-    )
-    total = total_textmap + total_readable + total_subtitle + (1 if hash_extra else 0)
-
+def _handle_all_voice_filter_ranked(keyword, keyword_trim, langCode, safe_page, safe_size, hash_value, is_hash_query, hash_obj, hash_extra, text_hashes_seen, langs, sourceLangCode, langStr, targetLangStrs, strToLangId, prefix_labels, created_version_filter, updated_version_filter, source_type_filter=None):
+    normalized_source_type = _normalize_source_type_filter(source_type_filter)
     candidate_limit = max(safe_size, safe_page * safe_size)
     candidates = []
 
@@ -1097,45 +1682,114 @@ def _handle_all_voice_filter_ranked(keyword, keyword_trim, langCode, safe_page, 
         if hash_value is not None:
             text_hashes_seen.add(hash_value)
 
-    rows = databaseHelper.selectTextMapFromKeywordPaged(
-        keyword,
-        langCode,
-        candidate_limit,
-        0,
-        hash_value if is_hash_query else None,
-        None,
-        created_version_filter,
-        updated_version_filter,
-    )
-    for text_hash, _content, _created_raw, _updated_raw in rows:
-        if text_hash in text_hashes_seen:
-            continue
-        text_hashes_seen.add(text_hash)
-        candidates.append(queryTextHashInfo(text_hash, langs, sourceLangCode))
+    if normalized_source_type == "textmap":
+        # textmap 专用路径
+        total = _count_textmap_from_keyword_cached(
+            keyword, langCode, created_version_filter, updated_version_filter,
+        ) + (1 if hash_extra else 0)
 
-    if langStr:
-        readable_contents = databaseHelper.selectReadableFromKeyword(
-            keyword,
-            langCode,
-            langStr,
-            candidate_limit,
-            None,
-            created_version_filter,
-            updated_version_filter,
+        rows = databaseHelper.selectTextMapFromKeywordPaged(
+            keyword, langCode, candidate_limit, 0,
+            hash_value if is_hash_query else None, None,
+            created_version_filter, updated_version_filter,
         )
-        for fileName, content, titleTextMapHash, readableId, created_raw, updated_raw in readable_contents:
-            candidates.append(_build_readable_obj(fileName, content, titleTextMapHash, readableId, created_raw, updated_raw, sourceLangCode, langCode, targetLangStrs, strToLangId, prefix_labels))
+        for text_hash, _content, _created_raw, _updated_raw in rows:
+            if text_hash in text_hashes_seen:
+                continue
+            text_hashes_seen.add(text_hash)
+            candidates.append(queryTextHashInfo(text_hash, langs, sourceLangCode, queryOrigin=False))
 
-    subtitle_contents = databaseHelper.selectSubtitleFromKeyword(
-        keyword,
-        langCode,
-        candidate_limit,
-        None,
-        created_version_filter,
-        updated_version_filter,
-    )
-    for fileName, content, startTime, endTime, subtitleId, created_raw, updated_raw in subtitle_contents:
-        candidates.append(_build_subtitle_obj(fileName, content, startTime, endTime, subtitleId, created_raw, updated_raw, langs))
+    elif normalized_source_type in _get_db_filterable_source_types():
+        # 数据库层 JOIN 过滤：dialogue, voice, quest, entity types
+        db_source_type = normalized_source_type
+        if db_source_type is None:
+            db_source_type = ""
+        total = databaseHelper.countTextMapFromKeywordBySourceType(
+            keyword, langCode, db_source_type,
+            created_version_filter, updated_version_filter,
+        ) + (1 if hash_extra else 0)
+
+        rows = databaseHelper.selectTextMapFromKeywordBySourceType(
+            keyword, langCode, db_source_type, candidate_limit, 0,
+            created_version_filter, updated_version_filter,
+        )
+        for text_hash, _content, _created_raw, _updated_raw in rows:
+            if text_hash in text_hashes_seen:
+                continue
+            text_hashes_seen.add(text_hash)
+            candidates.append(queryTextHashInfo(text_hash, langs, sourceLangCode, queryOrigin=False))
+
+    elif normalized_source_type == "readable":
+        # 仅加载 readable
+        if langStr:
+            total = _count_readable_from_keyword_cached(
+                keyword, langCode, langStr, created_version_filter, updated_version_filter,
+            )
+            readable_contents = databaseHelper.selectReadableFromKeyword(
+                keyword, langCode, langStr, candidate_limit, None,
+                created_version_filter, updated_version_filter,
+            )
+            for fileName, content, titleTextMapHash, readableId, created_raw, updated_raw in readable_contents:
+                candidates.append(_build_readable_obj(fileName, content, titleTextMapHash, readableId, created_raw, updated_raw, sourceLangCode, langCode, targetLangStrs, strToLangId, prefix_labels, isSearchPhase=True))
+        else:
+            total = 0
+
+    elif normalized_source_type == "subtitle":
+        # 仅加载 subtitle
+        total = _count_subtitle_from_keyword_cached(
+            keyword, langCode, created_version_filter, updated_version_filter,
+        )
+        subtitle_contents = databaseHelper.selectSubtitleFromKeyword(
+            keyword, langCode, candidate_limit, None,
+            created_version_filter, updated_version_filter,
+        )
+        for fileName, content, startTime, endTime, subtitleId, created_raw, updated_raw in subtitle_contents:
+            candidates.append(_build_subtitle_obj(fileName, content, startTime, endTime, subtitleId, created_raw, updated_raw, langs))
+
+    else:
+        # 无筛选或 unknown：加载所有来源
+        total_textmap = _count_textmap_from_keyword_cached(
+            keyword, langCode, created_version_filter, updated_version_filter,
+        )
+        total_readable = 0
+        if langStr:
+            total_readable = _count_readable_from_keyword_cached(
+                keyword, langCode, langStr, created_version_filter, updated_version_filter,
+            )
+        total_subtitle = _count_subtitle_from_keyword_cached(
+            keyword, langCode, created_version_filter, updated_version_filter,
+        )
+        total = total_textmap + total_readable + total_subtitle + (1 if hash_extra else 0)
+
+        rows = databaseHelper.selectTextMapFromKeywordPaged(
+            keyword, langCode, candidate_limit, 0,
+            hash_value if is_hash_query else None, None,
+            created_version_filter, updated_version_filter,
+        )
+        for text_hash, _content, _created_raw, _updated_raw in rows:
+            if text_hash in text_hashes_seen:
+                continue
+            text_hashes_seen.add(text_hash)
+            candidates.append(queryTextHashInfo(text_hash, langs, sourceLangCode, queryOrigin=False))
+
+        if langStr:
+            readable_contents = databaseHelper.selectReadableFromKeyword(
+                keyword, langCode, langStr, candidate_limit, None,
+                created_version_filter, updated_version_filter,
+            )
+            for fileName, content, titleTextMapHash, readableId, created_raw, updated_raw in readable_contents:
+                candidates.append(_build_readable_obj(fileName, content, titleTextMapHash, readableId, created_raw, updated_raw, sourceLangCode, langCode, targetLangStrs, strToLangId, prefix_labels, isSearchPhase=True))
+
+        subtitle_contents = databaseHelper.selectSubtitleFromKeyword(
+            keyword, langCode, candidate_limit, None,
+            created_version_filter, updated_version_filter,
+        )
+        for fileName, content, startTime, endTime, subtitleId, created_raw, updated_raw in subtitle_contents:
+            candidates.append(_build_subtitle_obj(fileName, content, startTime, endTime, subtitleId, created_raw, updated_raw, langs))
+
+        if normalized_source_type:
+            candidates = _filter_entries_by_source_type(candidates, normalized_source_type)
+            total = len(candidates)
 
     _sort_search_results(candidates, keyword_trim, langCode, is_hash_query, hash_value)
     start = (safe_page - 1) * safe_size
@@ -1143,7 +1797,8 @@ def _handle_all_voice_filter_ranked(keyword, keyword_trim, langCode, safe_page, 
     return candidates[start:end], total
 
 
-def _handle_specific_voice_filter_ranked(keyword, keyword_trim, langCode, safe_page, safe_size, voice_filter, hash_value, is_hash_query, hash_obj, hash_extra, text_hashes_seen, langs, sourceLangCode, langStr, targetLangStrs, strToLangId, prefix_labels, created_version_filter, updated_version_filter):
+def _handle_specific_voice_filter_ranked(keyword, keyword_trim, langCode, safe_page, safe_size, voice_filter, hash_value, is_hash_query, hash_obj, hash_extra, text_hashes_seen, langs, sourceLangCode, langStr, targetLangStrs, strToLangId, prefix_labels, created_version_filter, updated_version_filter, source_type_filter=None):
+    normalized_source_type = _normalize_source_type_filter(source_type_filter)
     hash_extra_filtered = False
     if hash_extra and hash_obj is not None:
         hash_has_voice = databaseHelper.hasVoiceForTextHashDb(hash_value)
@@ -1152,32 +1807,6 @@ def _handle_specific_voice_filter_ranked(keyword, keyword_trim, langCode, safe_p
         ):
             hash_extra_filtered = True
 
-    total_textmap = _count_textmap_from_keyword_voice_cached(
-        keyword,
-        langCode,
-        voice_filter,
-        created_version_filter,
-        updated_version_filter,
-    )
-    total_readable = 0
-    total_subtitle = 0
-    if voice_filter == "without":
-        if langStr:
-            total_readable = _count_readable_from_keyword_cached(
-                keyword,
-                langCode,
-                langStr,
-                created_version_filter,
-                updated_version_filter,
-            )
-        total_subtitle = _count_subtitle_from_keyword_cached(
-            keyword,
-            langCode,
-            created_version_filter,
-            updated_version_filter,
-        )
-
-    total = total_textmap + total_readable + total_subtitle + (1 if hash_extra_filtered else 0)
     candidate_limit = max(safe_size, safe_page * safe_size)
     candidates = []
 
@@ -1186,46 +1815,117 @@ def _handle_specific_voice_filter_ranked(keyword, keyword_trim, langCode, safe_p
         if hash_value is not None:
             text_hashes_seen.add(hash_value)
 
-    rows = databaseHelper.selectTextMapFromKeywordPaged(
-        keyword,
-        langCode,
-        candidate_limit,
-        0,
-        hash_value if is_hash_query else None,
-        voice_filter,
-        created_version_filter,
-        updated_version_filter,
-    )
-    for text_hash, _content, _created_raw, _updated_raw in rows:
-        if text_hash in text_hashes_seen:
-            continue
-        text_hashes_seen.add(text_hash)
-        candidates.append(queryTextHashInfo(text_hash, langs, sourceLangCode))
+    if normalized_source_type == "textmap":
+        total = _count_textmap_from_keyword_voice_cached(
+            keyword, langCode, voice_filter, created_version_filter, updated_version_filter,
+        ) + (1 if hash_extra_filtered else 0)
 
-    if voice_filter == "without":
-        if langStr:
+        rows = databaseHelper.selectTextMapFromKeywordPaged(
+            keyword, langCode, candidate_limit, 0,
+            hash_value if is_hash_query else None, voice_filter,
+            created_version_filter, updated_version_filter,
+        )
+        for text_hash, _content, _created_raw, _updated_raw in rows:
+            if text_hash in text_hashes_seen:
+                continue
+            text_hashes_seen.add(text_hash)
+            candidates.append(queryTextHashInfo(text_hash, langs, sourceLangCode, queryOrigin=False))
+
+    elif normalized_source_type in _get_db_filterable_source_types():
+        # 数据库层 JOIN 过滤 + 语音过滤
+        # 注意：voice_filter 需要通过 selectTextMapFromKeywordPaged 而非 BySourceType 处理
+        # 先通过 source type JOIN 获取候选，再应用语音过滤
+        db_source_type = normalized_source_type
+        if db_source_type is None:
+            db_source_type = ""
+        rows = databaseHelper.selectTextMapFromKeywordBySourceType(
+            keyword, langCode, db_source_type, candidate_limit * 3, 0,
+            created_version_filter, updated_version_filter,
+        )
+        for text_hash, _content, _created_raw, _updated_raw in rows:
+            if text_hash in text_hashes_seen:
+                continue
+            text_hashes_seen.add(text_hash)
+            obj = queryTextHashInfo(text_hash, langs, sourceLangCode, queryOrigin=False)
+            candidates.append(obj)
+        candidates = _apply_voice_filter(candidates, voice_filter)
+        total = len(candidates) + (1 if hash_extra_filtered else 0)
+
+    elif normalized_source_type == "readable":
+        if voice_filter == "without" and langStr:
+            total = _count_readable_from_keyword_cached(
+                keyword, langCode, langStr, created_version_filter, updated_version_filter,
+            )
             readable_contents = databaseHelper.selectReadableFromKeyword(
-                keyword,
-                langCode,
-                langStr,
-                candidate_limit,
-                None,
-                created_version_filter,
-                updated_version_filter,
+                keyword, langCode, langStr, candidate_limit, None,
+                created_version_filter, updated_version_filter,
             )
             for fileName, content, titleTextMapHash, readableId, created_raw, updated_raw in readable_contents:
-                candidates.append(_build_readable_obj(fileName, content, titleTextMapHash, readableId, created_raw, updated_raw, sourceLangCode, langCode, targetLangStrs, strToLangId, prefix_labels))
+                candidates.append(_build_readable_obj(fileName, content, titleTextMapHash, readableId, created_raw, updated_raw, sourceLangCode, langCode, targetLangStrs, strToLangId, prefix_labels, isSearchPhase=True))
+        else:
+            total = 0
 
-        subtitle_contents = databaseHelper.selectSubtitleFromKeyword(
-            keyword,
-            langCode,
-            candidate_limit,
-            None,
-            created_version_filter,
-            updated_version_filter,
+    elif normalized_source_type == "subtitle":
+        if voice_filter == "without":
+            total = _count_subtitle_from_keyword_cached(
+                keyword, langCode, created_version_filter, updated_version_filter,
+            )
+            subtitle_contents = databaseHelper.selectSubtitleFromKeyword(
+                keyword, langCode, candidate_limit, None,
+                created_version_filter, updated_version_filter,
+            )
+            for fileName, content, startTime, endTime, subtitleId, created_raw, updated_raw in subtitle_contents:
+                candidates.append(_build_subtitle_obj(fileName, content, startTime, endTime, subtitleId, created_raw, updated_raw, langs))
+        else:
+            total = 0
+
+    else:
+        # 无筛选或 unknown
+        total_textmap = _count_textmap_from_keyword_voice_cached(
+            keyword, langCode, voice_filter, created_version_filter, updated_version_filter,
         )
-        for fileName, content, startTime, endTime, subtitleId, created_raw, updated_raw in subtitle_contents:
-            candidates.append(_build_subtitle_obj(fileName, content, startTime, endTime, subtitleId, created_raw, updated_raw, langs))
+        total_readable = 0
+        total_subtitle = 0
+        if voice_filter == "without":
+            if langStr:
+                total_readable = _count_readable_from_keyword_cached(
+                    keyword, langCode, langStr, created_version_filter, updated_version_filter,
+                )
+            total_subtitle = _count_subtitle_from_keyword_cached(
+                keyword, langCode, created_version_filter, updated_version_filter,
+            )
+        total = total_textmap + total_readable + total_subtitle + (1 if hash_extra_filtered else 0)
+
+        rows = databaseHelper.selectTextMapFromKeywordPaged(
+            keyword, langCode, candidate_limit, 0,
+            hash_value if is_hash_query else None, voice_filter,
+            created_version_filter, updated_version_filter,
+        )
+        for text_hash, _content, _created_raw, _updated_raw in rows:
+            if text_hash in text_hashes_seen:
+                continue
+            text_hashes_seen.add(text_hash)
+            candidates.append(queryTextHashInfo(text_hash, langs, sourceLangCode, queryOrigin=False))
+
+        if voice_filter == "without":
+            if langStr:
+                readable_contents = databaseHelper.selectReadableFromKeyword(
+                    keyword, langCode, langStr, candidate_limit, None,
+                    created_version_filter, updated_version_filter,
+                )
+                for fileName, content, titleTextMapHash, readableId, created_raw, updated_raw in readable_contents:
+                    candidates.append(_build_readable_obj(fileName, content, titleTextMapHash, readableId, created_raw, updated_raw, sourceLangCode, langCode, targetLangStrs, strToLangId, prefix_labels, isSearchPhase=True))
+
+            subtitle_contents = databaseHelper.selectSubtitleFromKeyword(
+                keyword, langCode, candidate_limit, None,
+                created_version_filter, updated_version_filter,
+            )
+            for fileName, content, startTime, endTime, subtitleId, created_raw, updated_raw in subtitle_contents:
+                candidates.append(_build_subtitle_obj(fileName, content, startTime, endTime, subtitleId, created_raw, updated_raw, langs))
+
+        if normalized_source_type:
+            candidates = _filter_entries_by_source_type(candidates, normalized_source_type)
+            total = len(candidates)
 
     _sort_search_results(candidates, keyword_trim, langCode, is_hash_query, hash_value)
     start = (safe_page - 1) * safe_size
@@ -1233,20 +1933,60 @@ def _handle_specific_voice_filter_ranked(keyword, keyword_trim, langCode, safe_p
     return candidates[start:end], total
 
 
-def _build_readable_obj(fileName, content, titleTextMapHash, readableId, created_raw, updated_raw, sourceLangCode, langCode, targetLangStrs, strToLangId, prefix_labels):
+def _build_readable_obj(fileName, content, titleTextMapHash, readableId, created_raw, updated_raw, sourceLangCode, langCode, targetLangStrs, strToLangId, prefix_labels, isSearchPhase=False):
     """
     构建可读内容对象
+    isSearchPhase=True 时仅返回基本信息以提高搜索性能
     """
     fileHash = zlib.crc32(fileName.encode('utf-8'))
-    readable_category_fields = _build_readable_category_fields(fileName)
+    readable_category_fields = _build_readable_category_fields(fileName, titleTextMapHash)
     origin_label = readable_category_fields["readableCategoryLabel"]
 
+    # 搜索阶段：返回最小化信息
+    if isSearchPhase:
+        obj = {
+            'translates': {},
+            'voicePaths': [],
+            'hash': fileHash,
+            'isTalk': False,
+            'isReadable': True,
+            'readableId': readableId,
+            'fileName': fileName,
+            'origin': f"{origin_label}: {fileName}",
+            'primarySource': _build_primary_source(
+                "readable",
+                fileName,
+                origin_label,
+                {"kind": "readable", "readableId": readableId, "fileName": fileName},
+            ),
+            'sourceCount': 1,
+            **readable_category_fields,
+        }
+        obj.update(_build_version_fields(created_raw, updated_raw))
+
+        # 只获取必要的翻译信息
+        translations = databaseHelper.selectReadableFromFileName(fileName, targetLangStrs)
+        for transContent, transLangStr in translations:
+            if transLangStr in strToLangId:
+                lang_id = strToLangId[transLangStr]
+                obj['translates'][str(lang_id)] = _normalize_text_map_content(transContent, lang_id)
+        return obj
+
+    # 详情页面：获取完整源信息
     title = _get_text_map_content_with_fallback(
         titleTextMapHash,
         sourceLangCode,
         [langCode],
     )
-    origin = f"{origin_label}: {title}" if title else f"{origin_label}: {fileName}"
+    fallback_origin = f"{origin_label}: {title}" if title else f"{origin_label}: {fileName}"
+    primary_source = _build_primary_source(
+        "readable",
+        title or fileName,
+        origin_label,
+        {"kind": "readable", "readableId": readableId, "fileName": fileName},
+    )
+    origin = fallback_origin
+    source_count = 1
 
     obj = {
         'translates': {},
@@ -1257,6 +1997,8 @@ def _build_readable_obj(fileName, content, titleTextMapHash, readableId, created
         'readableId': readableId,
         'fileName': fileName,
         'origin': origin,
+        'primarySource': primary_source,
+        'sourceCount': source_count,
         **readable_category_fields,
     }
     obj.update(_build_version_fields(created_raw, updated_raw))
@@ -1285,7 +2027,14 @@ def _build_subtitle_obj(fileName, content, startTime, endTime, subtitleId, creat
         'origin': origin,
         'isSubtitle': True,
         'fileName': fileName,
-        'subtitleId': subtitleId
+        'subtitleId': subtitleId,
+        'primarySource': _build_primary_source(
+            "subtitle",
+            fileName,
+            "字幕",
+            {"kind": "subtitle", "fileName": fileName, "subtitleId": subtitleId},
+        ),
+        'sourceCount': 1,
     }
     obj.update(_build_version_fields(created_raw, updated_raw))
     translations = []
@@ -1330,6 +2079,7 @@ def getTranslateObj(
     voice_filter: str = "all",
     created_version: str | None = None,
     updated_version: str | None = None,
+    source_type: str | None = None,
 ):
     """
     获取翻译对象
@@ -1338,6 +2088,7 @@ def getTranslateObj(
     keyword_trim = keyword.strip()
     created_version_filter = _normalize_version_filter(created_version)
     updated_version_filter = _normalize_version_filter(updated_version)
+    source_type_filter = _normalize_source_type_filter(source_type)
 
     # 生成缓存键
     cache_key = (
@@ -1348,7 +2099,8 @@ def getTranslateObj(
         page_size,
         voice_filter,
         created_version_filter,
-        updated_version_filter
+        updated_version_filter,
+        source_type_filter,
     )
 
     # 尝试从缓存中获取结果
@@ -1359,13 +2111,13 @@ def getTranslateObj(
     # 使用原有的查询逻辑
     if keyword_trim == "" and speaker_keyword:
         # 仅说话者查询
-        result = _handle_speaker_only_query(speaker_keyword, langCode, page, page_size, voice_filter, created_version_filter, updated_version_filter)
+        result = _handle_speaker_only_query(speaker_keyword, langCode, page, page_size, voice_filter, created_version_filter, updated_version_filter, source_type_filter)
     elif keyword_trim != "" and speaker_keyword:
         # 说话者和关键词查询
-        result = _handle_speaker_and_keyword_query(speaker_keyword, keyword_trim, langCode, page, page_size, voice_filter, created_version_filter, updated_version_filter)
+        result = _handle_speaker_and_keyword_query(speaker_keyword, keyword_trim, langCode, page, page_size, voice_filter, created_version_filter, updated_version_filter, source_type_filter)
     else:
         # 仅关键词查询
-        result = _handle_keyword_only_query(keyword, keyword_trim, langCode, page, page_size, voice_filter, created_version_filter, updated_version_filter)
+        result = _handle_keyword_only_query(keyword, keyword_trim, langCode, page, page_size, voice_filter, created_version_filter, updated_version_filter, source_type_filter)
 
     # 将结果缓存
     search_cache.set(cache_key, result)
@@ -2582,6 +3334,136 @@ def getSubtitleContext(fileName: str, _subtitleId: int | None = None, searchLang
         "talkId": 0,
         "dialogues": dialogues,
         **_build_version_fields(created_raw, updated_raw),
+    }
+
+
+def searchCatalog(keyword: str, langCode: int, sourceTypeCode: int | None = None,
+                  subCategory: int | None = None, page: int = 1, pageSize: int = 50):
+    import time
+    start = time.time()
+    offset = (max(1, page) - 1) * pageSize
+    rows = databaseHelper.selectCatalogEntities(
+        keyword, langCode,
+        source_type_code=sourceTypeCode,
+        sub_category=subCategory,
+        limit=pageSize,
+        offset=offset,
+    )
+    total = databaseHelper.countCatalogEntities(
+        keyword, langCode,
+        source_type_code=sourceTypeCode,
+        sub_category=subCategory,
+    )
+    results = []
+    for entity_id, stc, title_hash, sub_cat, title_text in rows:
+        _, source_label = _get_entity_source_meta(stc)
+        sub_label = _get_sub_category_label(sub_cat)
+        results.append({
+            "entityId": int(entity_id),
+            "sourceTypeCode": int(stc),
+            "sourceTypeLabel": source_label,
+            "subCategoryLabel": sub_label,
+            "title": title_text or str(entity_id),
+        })
+    elapsed = (time.time() - start) * 1000
+    return {
+        "contents": results,
+        "total": total,
+        "page": page,
+        "pageSize": pageSize,
+        "time": elapsed,
+    }
+
+
+def getCatalogSubCategories():
+    """Return the full sub-category mapping for the frontend dropdown."""
+    return {str(k): v for k, v in _SUB_CATEGORY_LABELS.items() if v}
+
+
+def getCatalogMainCategories():
+    """Return main categories that exist in the entity source system."""
+    result: dict[str, str] = {}
+    seen_labels: set[str] = set()
+    for code, (_, label) in _ENTITY_SOURCE_META.items():
+        if not label or label in seen_labels:
+            continue
+        result[str(code)] = label
+        seen_labels.add(label)
+    return result
+
+
+def getEntityTexts(sourceTypeCode: int, entityId: int, searchLang: int | None = None):
+    langs = config.getResultLanguages().copy()
+    if searchLang and searchLang not in langs:
+        langs.append(searchLang)
+    sourceLangCode = config.getSourceLanguage()
+
+    source_type_code = int(sourceTypeCode)
+    entity_id = int(entityId)
+    rows = databaseHelper.selectEntityTextHashesByEntity(source_type_code, entity_id)
+    if not rows:
+        return {
+            "sourceTypeCode": source_type_code,
+            "entityId": entity_id,
+            "title": None,
+            "entries": [],
+        }
+
+    source_type, source_label = _get_entity_source_meta(source_type_code)
+
+    _first_title_hash = rows[0][1]
+    _first_sub_category = rows[0][3] if len(rows[0]) > 3 else 0
+    sub_category_label = _get_sub_category_label(_first_sub_category)
+    title_lang = searchLang or sourceLangCode
+    title = _get_text_map_content_with_fallback(_first_title_hash, title_lang, [sourceLangCode])
+    if not title:
+        title = str(entity_id)
+
+    entries = []
+    for row in rows:
+        text_hash, title_hash, extra = row[0], row[1], row[2]
+        field_code = extra & 0xFF
+        gender_code = (extra >> 8) & 0xFF
+        if source_type in ("costume", "suit") and extra in (1, 2):
+            gender_code = extra
+            field_code = 1
+
+        if source_type in ("costume", "suit", "dressing"):
+            field_label = "介绍"
+        else:
+            field_label_map = {
+                1: "描述",
+                2: "效果",
+                3: "特殊",
+                4: "类型",
+                5: "标题",
+                6: "图鉴描述",
+            }
+            field_label = field_label_map.get(field_code, "描述")
+
+        subtitle = f"{source_label} {entity_id}"
+        if gender_code in (1, 2):
+            subtitle = subtitle + (" · 男" if gender_code == 1 else " · 女")
+
+        text_obj = queryTextHashInfo(int(text_hash), langs, sourceLangCode, queryOrigin=True)
+        entries.append({
+            "fieldLabel": field_label,
+            "subtitle": subtitle,
+            "textHash": int(text_hash),
+            "titleHash": int(title_hash),
+            "text": text_obj,
+        })
+
+    entries.extend(_collect_entity_readable_entries(source_type, entity_id, _first_title_hash, f"{source_label} {entity_id}", langs, sourceLangCode, _first_sub_category))
+
+    return {
+        "sourceType": source_type,
+        "sourceTypeLabel": source_label,
+        "subCategoryLabel": sub_category_label,
+        "sourceTypeCode": source_type_code,
+        "entityId": entity_id,
+        "title": title,
+        "entries": entries,
     }
 
 
