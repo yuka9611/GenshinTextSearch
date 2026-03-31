@@ -2,8 +2,8 @@
     <div class="viewWrapper pageShell pageShell--compact">
         <h1 class="pageTitle">关键词搜索</h1>
         <div class="helpText">
-            <p>支持关键词、说话人、语音存在性、创建版本、更新版本组合筛选。</p>
-            <p>当关键词留空时，只要填写了版本或说话人也可以查询。</p>
+            <p>支持关键词、说话人、来源类别、语音存在性、创建版本、更新版本组合筛选。</p>
+            <p>当关键词留空时，只要填写了说话人、来源类别或版本也可以查询。</p>
         </div>
 
         <div class="stickySearchSection">
@@ -33,6 +33,21 @@
                     <el-option label="全部(语音)" value="all" />
                     <el-option label="有语音" value="with" />
                     <el-option label="无语音" value="without" />
+                </el-select>
+
+                <el-select
+                    v-model="sourceTypeFilter"
+                    class="sourceFilter"
+                    placeholder="来源类别"
+                    clearable
+                    @change="onQueryButtonClicked"
+                >
+                    <el-option
+                        v-for="option in sourceTypeOptions"
+                        :key="`source-type-${option.value || 'all'}`"
+                        :label="option.label"
+                        :value="option.value"
+                    />
                 </el-select>
 
                 <VersionFilter
@@ -123,9 +138,11 @@ const {
   keywordLast,
   speakerKeyword,
   voiceFilter,
+  sourceTypeFilter,
   createdVersionFilter,
   updatedVersionFilter,
   versionOptions,
+  sourceTypeOptions,
   selectedInputLanguage,
   supportedInputLanguage,
   searchLangLast,
@@ -179,7 +196,8 @@ onBeforeMount(async () => {
     margin-top: 0;
 }
 
-.voiceFilter {
+.voiceFilter,
+.sourceFilter {
     flex: 1 1 150px;
     min-width: 150px;
     margin-top: 0;
@@ -223,7 +241,8 @@ onBeforeMount(async () => {
 
 @media (max-width: 720px) {
     .speakerInput,
-    .voiceFilter {
+    .voiceFilter,
+    .sourceFilter {
         flex-basis: calc(50% - 4px);
         min-width: 0;
     }

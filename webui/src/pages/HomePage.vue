@@ -17,6 +17,7 @@ const menus = reactive({
         { "title": "NPC 对话查询", "icon": "fi-rr-comment", "path": "/npc-dialogue-search" },
         { "title": "角色语音查询", "icon": "fi-rr-volume", "path": "/voice-search" },
         { "title": "角色故事查询", "icon": "fi-rr-book-open-cover", "path": "/story-search" },
+        { "title": "图鉴搜索", "icon": "fi-rr-apps", "path": "/catalog-search" },
         { "title": "设置", "icon": "fi-rr-settings", "path": "/settings" },
     ]
 });
@@ -38,7 +39,8 @@ let contentDom = undefined;
 const loaded = ref(false)
 const initError = ref("")
 const scrollPositions = new Map()
-const talkOriginRouteKey = ref(null)
+const detailOriginRouteKey = ref(null)
+const detailRouteNames = new Set(["talkView", "entityView"])
 
 const getContentDom = () => {
     if (contentDom && document.body.contains(contentDom)) {
@@ -100,27 +102,27 @@ watch(router.currentRoute, async (to, from) => {
         scrollPositions.set(from.fullPath, currentContent.scrollTop)
     }
 
-    if (from?.name !== "talkView" && to?.name === "talkView") {
-        talkOriginRouteKey.value = from?.fullPath || null
+    if (!detailRouteNames.has(String(from?.name || "")) && detailRouteNames.has(String(to?.name || ""))) {
+        detailOriginRouteKey.value = from?.fullPath || null
     }
 
     await waitForContentPaint()
 
     const nextContent = getContentDom()
     if (!nextContent) {
-        talkOriginRouteKey.value = from?.name === "talkView" ? null : talkOriginRouteKey.value
+        detailOriginRouteKey.value = detailRouteNames.has(String(from?.name || "")) ? null : detailOriginRouteKey.value
         return
     }
 
-    if (from?.name === "talkView") {
-        const shouldRestoreScroll = !!talkOriginRouteKey.value && to?.fullPath === talkOriginRouteKey.value
+    if (detailRouteNames.has(String(from?.name || ""))) {
+        const shouldRestoreScroll = !!detailOriginRouteKey.value && to?.fullPath === detailOriginRouteKey.value
         if (shouldRestoreScroll) {
             const savedTop = scrollPositions.get(to.fullPath) ?? 0
             nextContent.scrollTo({ left: 0, top: savedTop, behavior: "auto" })
         } else {
             nextContent.scrollTo({ left: 0, top: 0, behavior: "auto" })
         }
-        talkOriginRouteKey.value = null
+        detailOriginRouteKey.value = null
         return
     }
 
@@ -262,7 +264,7 @@ watch(router.currentRoute, async (to, from) => {
     -webkit-overflow-scrolling: var(--content-scroll);
     scrollbar-gutter: stable;
     padding-right: var(--content-scrollbar-padding);
-    padding: 18px 22px 30px 0;
+    padding: 14px 22px 30px 0;
 }
 
 .content.dialogueContent {
@@ -358,13 +360,13 @@ watch(router.currentRoute, async (to, from) => {
     }
 
     .sideBarPanel {
-        margin: 10px 16px 0;
+        margin: 0;
         padding: 8px 8px 4px;
         border-radius: 20px;
     }
 
     .content {
-        padding: 8px 0 24px;
+        padding: 0 0 24px;
     }
 
     :deep(.sideBarMenu .el-sub-menu) {

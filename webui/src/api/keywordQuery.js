@@ -21,6 +21,7 @@ const queryByKeyword = (
     voiceFilter = "all",
     createdVersion = "",
     updatedVersion = "",
+    sourceType = "",
 ) => {
     return request.post("/api/keywordQuery", {
         keyword: keyword,
@@ -31,6 +32,7 @@ const queryByKeyword = (
         voiceFilter: voiceFilter,
         createdVersion: createdVersion,
         updatedVersion: updatedVersion,
+        sourceType: sourceType,
     });
 };
 
@@ -187,6 +189,29 @@ const getQuestDialogues = withCache((questId, searchLang, page = 1, pageSize = 2
     });
 });
 
+const getEntityTexts = withCache((sourceTypeCode, entityId, searchLang) => {
+    return request.post("/api/getEntityTexts", {
+        sourceTypeCode: sourceTypeCode,
+        entityId: entityId,
+        searchLang: searchLang,
+    });
+});
+
+const catalogSearch = (keyword, langCode, sourceTypeCode, subCategory, page = 1, pageSize = 50) => {
+    return request.post("/api/catalogSearch", {
+        keyword: keyword,
+        langCode: langCode,
+        sourceTypeCode: sourceTypeCode,
+        subCategory: subCategory,
+        page: page,
+        pageSize: pageSize,
+    });
+};
+
+const getCatalogMeta = () => {
+    return request.get("/api/catalogMeta");
+};
+
 export default {
     queryBaidu,
     queryByKeyword,
@@ -203,5 +228,8 @@ export default {
     getAvatarStories,
     searchAvatarStories,
     getReadableContent,
-    getQuestDialogues
+    getQuestDialogues,
+    getEntityTexts,
+    catalogSearch,
+    getCatalogMeta,
 };
