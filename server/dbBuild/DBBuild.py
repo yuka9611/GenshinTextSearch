@@ -12,6 +12,7 @@ import readableImport
 import subtitleImport
 import textMapImport
 import questImport
+import entitySourceImport
 from import_utils import DEFAULT_BATCH_SIZE, executemany_batched, fast_import_pragmas, load_json_file
 from version_control import (
     ensure_version_schema,
@@ -509,6 +510,7 @@ def main(
         "readable",
         "subtitles",
         "textmap",
+        "entity_sources",
         "version_catalog"
     ]
 
@@ -588,6 +590,13 @@ def main(
                     stage,
                     textMapImport.importAllTextMap,
                     prune_missing=prune_missing,
+                    skip_asking=True,
+                )
+            elif stage == "entity_sources":
+                _run_stage(
+                    stage_timer,
+                    stage,
+                    entitySourceImport.importEntitySources,
                     skip_asking=True,
                 )
             elif stage == "version_catalog":

@@ -11,6 +11,7 @@ import DBBuild
 import voiceItemImport
 import readableImport
 import subtitleImport
+import entitySourceImport
 import textMapImport
 from git_utils import resolve_commit as _resolve_commit, run_git as _run_git
 from import_utils import print_skip_summary as _print_skip_summary
@@ -430,6 +431,7 @@ def _analyze_diff(diff_entries: list[dict]) -> dict:
         "subtitle_deleted": set(),  # 删除的subtitle文件
         "subtitle_mapping_changed": False,  # 是否有subtitle映射变更
         "textmap_bases": set(),     # 变更的textmap基础名称
+        "entity_sources": False,    # 是否有entity_source相关Excel变更
     }
 
     def handle(action: str, rel: str, old_side: bool):
@@ -543,6 +545,14 @@ def _analyze_diff(diff_entries: list[dict]) -> dict:
             plan["subtitle_mapping_changed"] = True
             plan["readable_mapping_changed"] = True
             return
+
+        # 处理Entity Source相关的Excel文件
+        _entity_prefix = "ExcelBinOutput/"
+        if rel.startswith(_entity_prefix) and rel.endswith(".json"):
+            basename = rel[len(_entity_prefix):]
+            if basename in entitySourceImport._ENTITY_EXCEL_FILES:
+                plan["entity_sources"] = True
+                # don't return – let other detectors run too
 
         # 处理TextMap文件
         if rel.startswith("TextMap/") and rel.endswith(".json"):
@@ -886,6 +896,14 @@ def _process_core_tables_stage(plan, target_version):
         DBBuild.importFetterStories()
     if plan["chapter"]:
         DBBuild.importChapters()
+
+
+def _process_entity_sources_stage(plan):
+    """
+    处理entity_sources阶段
+    """
+    if plan["entity_sources"]:
+        entitySourceImport.insertEntitySourcesDelta(commit=True, interactive=True)
 
 
 def _process_voice_stage(plan, prune_missing):
@@ -1234,6 +1252,7 @@ def run_diff_update(
         "quest",
         "quest_by_textmap",
         "core_tables",
+        "entity_sources",
         "voice",
         "readable",
         "subtitle",
@@ -1292,6 +1311,10 @@ def run_diff_update(
     if not stage_done("core_tables"):
         _process_core_tables_stage(plan, target_version)
         mark_stage("core_tables")
+
+    if not stage_done("entity_sources"):
+        _process_entity_sources_stage(plan)
+        mark_stage("entity_sources")
 
     if not stage_done("voice"):
         _process_voice_stage(plan, prune_missing)
