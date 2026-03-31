@@ -42,6 +42,16 @@ const router = createRouter({
                     path: "talk",
                     name: "talkView",
                     component: () => import("@/views/TalkView.vue"),
+                },
+                {
+                    path: "entity",
+                    name: "entityView",
+                    component: () => import("@/views/EntityView.vue"),
+                },
+                {
+                    path: "catalog-search",
+                    name: "catalogSearchView",
+                    component: () => import("@/views/CatalogSearchView.vue"),
                 }
             ]
         },
