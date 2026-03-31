@@ -395,6 +395,7 @@ def keywordQuery():
     speaker = request.json.get("speaker")
     createdVersion = request.json.get("createdVersion")
     updatedVersion = request.json.get("updatedVersion")
+    sourceType = request.json.get("sourceType")
     page = request.json.get("page", 1)
     pageSize = request.json.get("pageSize", 50)
     voiceFilter = request.json.get("voiceFilter", "all")
@@ -409,8 +410,9 @@ def keywordQuery():
     has_speaker = speaker and speaker.strip() != ""
     has_created = createdVersion and str(createdVersion).strip() != ""
     has_updated = updatedVersion and str(updatedVersion).strip() != ""
+    has_source_type = sourceType and str(sourceType).strip() != ""
     has_voice_filter = voiceFilter in ("with", "without")
-    if not has_keyword and not has_speaker and not has_created and not has_updated and not has_voice_filter:
+    if not has_keyword and not has_speaker and not has_created and not has_updated and not has_source_type and not has_voice_filter:
         return jsonify({
             "data": {
                 "contents": [],
@@ -433,6 +435,7 @@ def keywordQuery():
         voice_filter=voiceFilter,
         created_version=createdVersion,
         updated_version=updatedVersion,
+        source_type=sourceType,
     )
     end = time.time()
 
@@ -1001,6 +1004,64 @@ def getQuestDialogues():
             "page": page,
             "pageSize": pageSize,
             "time": (end - start) * 1000
+        },
+        "code": 200,
+        "msg": "ok"
+    })
+
+
+@api_bp.route("/api/getEntityTexts", methods=["POST"])
+def getEntityTexts():
+    import time
+
+    sourceTypeCode = request.json.get("sourceTypeCode")
+    entityId = request.json.get("entityId")
+    searchLang = request.json.get("searchLang")
+    if searchLang:
+        searchLang = int(searchLang)
+
+    if sourceTypeCode is None or entityId is None:
+        return jsonify({"data": None, "code": 400, "msg": "sourceTypeCode and entityId are required"})
+
+    start = time.time()
+    contents = controllers_module.getEntityTexts(int(sourceTypeCode), int(entityId), searchLang) # type: ignore
+    end = time.time()
+
+    return jsonify({
+        "data": {
+            "contents": contents,
+            "time": (end - start) * 1000
+        },
+        "code": 200,
+        "msg": "ok"
+    })
+
+
+@api_bp.route("/api/catalogSearch", methods=["POST"])
+def catalogSearch():
+    keyword = request.json.get("keyword", "").strip()
+    langCode = request.json.get("langCode")
+    sourceTypeCode = request.json.get("sourceTypeCode")
+    subCategory = request.json.get("subCategory")
+    page = int(request.json.get("page", 1))
+    pageSize = int(request.json.get("pageSize", 50))
+
+    if not keyword or langCode is None:
+        return jsonify({"data": None, "code": 400, "msg": "keyword and langCode are required"})
+
+    stc = int(sourceTypeCode) if sourceTypeCode is not None and sourceTypeCode != "" else None
+    sub = int(subCategory) if subCategory is not None and subCategory != "" else None
+
+    result = controllers_module.searchCatalog(keyword, int(langCode), stc, sub, page, pageSize)  # type: ignore
+    return jsonify({"data": result, "code": 200, "msg": "ok"})
+
+
+@api_bp.route("/api/catalogMeta", methods=["GET"])
+def catalogMeta():
+    return jsonify({
+        "data": {
+            "mainCategories": controllers_module.getCatalogMainCategories(),  # type: ignore
+            "subCategories": controllers_module.getCatalogSubCategories(),  # type: ignore
         },
         "code": 200,
         "msg": "ok"
