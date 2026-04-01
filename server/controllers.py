@@ -1214,6 +1214,27 @@ def _paginate(entries: list[dict], page: int, page_size: int, total: int | None 
     return entries[start:end], total_count
 
 
+def _enrich_primary_sources(results: list[dict], source_lang_code: int):
+    """
+    为搜索结果中缺少 primarySource 的条目补充来源信息。
+    仅对分页后的最终结果调用，避免对全部候选做昂贵查询。
+    已有 primarySource 的条目（readable/subtitle）会被跳过。
+    """
+    for entry in results:
+        if entry.get('primarySource'):
+            continue
+        text_hash = entry.get('hash')
+        if text_hash is None:
+            continue
+        primary_source, origin, is_talk, source_count = _select_primary_source_from_text_hash(text_hash, source_lang_code)
+        entry['primarySource'] = primary_source
+        entry['origin'] = origin
+        entry['isTalk'] = is_talk
+        entry['sourceCount'] = source_count
+        if not is_talk and not entry.get('isReadable') and not entry.get('isSubtitle'):
+            entry['viewAsTextHash'] = True
+
+
 def _handle_speaker_only_query(speaker_keyword: str, langCode: int, page: int, page_size: int, voice_filter: str, created_version_filter: str | None, updated_version_filter: str | None, source_type_filter: str | None = None) -> tuple[list[dict], int]:
     """
     处理仅说话者查询
@@ -2118,6 +2139,12 @@ def getTranslateObj(
     else:
         # 仅关键词查询
         result = _handle_keyword_only_query(keyword, keyword_trim, langCode, page, page_size, voice_filter, created_version_filter, updated_version_filter, source_type_filter)
+
+    # 为搜索阶段跳过来源查询的条目补充 primarySource
+    contents, total = result
+    source_lang_code = config.getSourceLanguage()
+    _enrich_primary_sources(contents, source_lang_code)
+    result = (contents, total)
 
     # 将结果缓存
     search_cache.set(cache_key, result)

@@ -16,39 +16,48 @@
             />
 
             <div class="searchBarAdditional">
-                <el-input
-                    v-model="speakerKeyword"
-                    placeholder="说话人（可选）"
-                    class="speakerInput"
-                    @keyup.enter.native="onQueryButtonClicked"
-                    clearable
-                />
-
-                <el-select
-                    v-model="voiceFilter"
-                    class="voiceFilter"
-                    placeholder="语音筛选"
-                    @change="onQueryButtonClicked"
-                >
-                    <el-option label="全部(语音)" value="all" />
-                    <el-option label="有语音" value="with" />
-                    <el-option label="无语音" value="without" />
-                </el-select>
-
-                <el-select
-                    v-model="sourceTypeFilter"
-                    class="sourceFilter"
-                    placeholder="来源类别"
-                    clearable
-                    @change="onQueryButtonClicked"
-                >
-                    <el-option
-                        v-for="option in sourceTypeOptions"
-                        :key="`source-type-${option.value || 'all'}`"
-                        :label="option.label"
-                        :value="option.value"
+                <div class="filterItem">
+                    <span class="filterLabel">说话人</span>
+                    <el-input
+                        v-model="speakerKeyword"
+                        placeholder="角色名..."
+                        class="speakerInput"
+                        @keyup.enter.native="onQueryButtonClicked"
+                        clearable
                     />
-                </el-select>
+                </div>
+
+                <div class="filterItem">
+                    <span class="filterLabel">语音</span>
+                    <el-select
+                        v-model="voiceFilter"
+                        class="voiceFilter"
+                        placeholder="语音筛选"
+                        @change="onQueryButtonClicked"
+                    >
+                        <el-option label="全部(语音)" value="all" />
+                        <el-option label="有语音" value="with" />
+                        <el-option label="无语音" value="without" />
+                    </el-select>
+                </div>
+
+                <div class="filterItem">
+                    <span class="filterLabel">来源类型</span>
+                    <el-select
+                        v-model="sourceTypeFilter"
+                        class="sourceFilter"
+                        placeholder="来源类别"
+                        clearable
+                        @change="onQueryButtonClicked"
+                    >
+                        <el-option
+                            v-for="option in sourceTypeOptions"
+                            :key="`source-type-${option.value || 'all'}`"
+                            :label="option.label"
+                            :value="option.value"
+                        />
+                    </el-select>
+                </div>
 
                 <VersionFilter
                     v-model:createdVersion="createdVersionFilter"
@@ -182,32 +191,44 @@ onBeforeMount(async () => {
 }
 
 .searchBarAdditional {
-    display: flex;
-    align-items: flex-start;
-    flex-wrap: wrap;
-    gap: 10px;
+    display: grid;
+    grid-template-columns: minmax(0, 1.35fr) repeat(2, minmax(0, 1fr)) repeat(2, minmax(0, 0.85fr));
+    align-items: end;
+    gap: 12px;
     width: 100%;
-    max-width: 100%;
+}
+
+.filterItem {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    min-width: 0;
+}
+
+.filterLabel {
+    font-size: 0.75rem;
+    color: var(--theme-text-muted);
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    font-weight: 600;
 }
 
 .speakerInput {
-    flex: 1 1 150px;
-    min-width: 150px;
+    width: 100%;
+    min-width: 0;
     margin-top: 0;
 }
 
 .voiceFilter,
 .sourceFilter {
-    flex: 1 1 150px;
-    min-width: 150px;
+    width: 100%;
+    min-width: 0;
     margin-top: 0;
     margin-left: 0;
 }
 
 :deep(.versionFilterGroup) {
-    flex: 2 1 308px;
-    min-width: 308px;
-    margin-top: 0;
+    grid-column: span 2;
 }
 
 .resultControls {
@@ -222,6 +243,11 @@ onBeforeMount(async () => {
     background: rgba(255, 255, 255, 0.46);
     color: var(--theme-text-muted);
     font-size: 13px;
+}
+
+:global([data-theme="dark"]) .resultControls {
+    background: rgba(30, 40, 37, 0.46);
+    border-color: var(--theme-border);
 }
 
 .resultCount {
@@ -239,17 +265,19 @@ onBeforeMount(async () => {
     text-align: center;
 }
 
-@media (max-width: 720px) {
-    .speakerInput,
-    .voiceFilter,
-    .sourceFilter {
-        flex-basis: calc(50% - 4px);
-        min-width: 0;
+@media (max-width: 860px) {
+    .searchBarAdditional {
+        grid-template-columns: repeat(5, minmax(0, 1fr));
+    }
+}
+
+@media (max-width: 680px) {
+    .searchBarAdditional {
+        grid-template-columns: minmax(0, 1.2fr) repeat(2, minmax(0, 1fr));
     }
 
-    :deep(.versionFilterGroup) {
-        flex-basis: 100%;
-        min-width: 0;
+    .filterLabel {
+        display: none;
     }
 
     .loading-container {

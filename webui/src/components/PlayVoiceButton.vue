@@ -98,30 +98,33 @@ defineExpose({ getAudioUrl, scrollTo });
     display: inline-flex;
     align-items: center;
     justify-content: center;
-    width: 28px;
-    height: 28px;
-    border-radius: 999px;
-    background: rgba(47, 105, 101, 0.08);
-    border: 1px solid rgba(47, 105, 101, 0.16);
+    width: 32px;
+    height: 32px;
+    border-radius: 50%;
+    background: transparent;
+    border: 1px solid rgba(190, 164, 124, 0.32);
     color: var(--theme-primary);
-    transition: transform 0.18s ease, background-color 0.18s ease, border-color 0.18s ease, color 0.18s ease;
+    cursor: pointer;
+    position: relative;
+    overflow: hidden;
+    transition: transform 0.18s ease, background-color 0.18s ease, border-color 0.18s ease, color 0.18s ease, box-shadow 0.18s ease;
 }
 
 .voiceButtonWrapper:not(.isDisabled):hover {
+    background: var(--theme-primary);
+    border-color: var(--theme-primary);
+    color: #fff;
+    box-shadow: 0 4px 14px rgba(47, 105, 101, 0.25);
     transform: translateY(-1px);
-    background: rgba(47, 105, 101, 0.14);
-    border-color: rgba(47, 105, 101, 0.24);
 }
 
 .voiceButtonWrapper :deep(.el-icon) {
-    font-size: 14px;
+    font-size: 15px;
     cursor: pointer;
 }
 
 .voiceButtonWrapper.isDisabled {
-    opacity: 0.5;
-    color: var(--theme-text-soft);
-    background: rgba(233, 225, 210, 0.8);
-    border-color: rgba(190, 164, 124, 0.22);
+    opacity: 0.35;
+    cursor: not-allowed;
 }
 </style>

@@ -1,23 +1,29 @@
 <template>
   <div class="versionFilterGroup">
-    <el-select 
-      v-model="localCreatedVersion" 
-      placeholder="创建版本" 
-      class="versionFilter" 
-      clearable 
-      filterable
-    >
-      <el-option v-for="version in versionOptions" :key="`created-${version}`" :label="version" :value="version" />
-    </el-select>
-    <el-select 
-      v-model="localUpdatedVersion" 
-      placeholder="更新版本" 
-      class="versionFilter" 
-      clearable 
-      filterable
-    >
-      <el-option v-for="version in versionOptions" :key="`updated-${version}`" :label="version" :value="version" />
-    </el-select>
+    <div class="versionFilterItem">
+      <span class="versionFilterLabel">创建版本</span>
+      <el-select
+        v-model="localCreatedVersion"
+        placeholder="创建版本"
+        class="versionFilter"
+        clearable
+        filterable
+      >
+        <el-option v-for="version in versionOptions" :key="`created-${version}`" :label="version" :value="version" />
+      </el-select>
+    </div>
+    <div class="versionFilterItem">
+      <span class="versionFilterLabel">更新版本</span>
+      <el-select
+        v-model="localUpdatedVersion"
+        placeholder="更新版本"
+        class="versionFilter"
+        clearable
+        filterable
+      >
+        <el-option v-for="version in versionOptions" :key="`updated-${version}`" :label="version" :value="version" />
+      </el-select>
+    </div>
   </div>
 </template>
 
@@ -67,24 +73,36 @@ watch(() => props.updatedVersion, (newValue) => {
 .versionFilterGroup {
   display: flex;
   flex-direction: row;
+  align-items: end;
   gap: 10px;
   margin: 0;
   width: 100%;
 }
 
-.versionFilter {
-  flex: 1 1 168px;
-  min-width: 168px;
+.versionFilterItem {
+  flex: 1 1 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
 }
 
-@media (max-width: 720px) {
-  .versionFilterGroup {
-    width: 100%;
-    flex-wrap: wrap;
-  }
+.versionFilterLabel {
+  font-size: 0.75rem;
+  color: var(--theme-text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  font-weight: 600;
+}
 
-  .versionFilter {
-    min-width: 0;
+.versionFilter {
+  width: 100%;
+  min-width: 0;
+}
+
+@media (max-width: 680px) {
+  .versionFilterLabel {
+    display: none;
   }
 }
 </style>
