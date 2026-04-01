@@ -255,10 +255,10 @@ const save = async () => {
       selectedSourceLanguage.value,
       selectedTwin.value
     )
-    
+
     if (response.json) {
       const newConfig = response.json
-      
+
       global.config.resultLanguages = newConfig.resultLanguages
       global.config.defaultSearchLanguage = newConfig.defaultSearchLanguage
       global.config.sourceLanguage = newConfig.sourceLanguage
@@ -441,7 +441,7 @@ const save = async () => {
   padding-top: 4px;
 }
 
-@media (max-width: 720px) {
+@media (max-width: 680px) {
   .resultLanguageTransfer {
     flex-wrap: wrap;
   }

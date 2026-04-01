@@ -362,7 +362,7 @@ const gotoDialogueDetail = (group) => {
   color: var(--theme-text-muted);
 }
 
-@media (max-width: 720px) {
+@media (max-width: 680px) {
   .versionInput {
     width: 100%;
   }

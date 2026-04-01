@@ -292,10 +292,10 @@ const showUpdatedVersionTag = () => {
 </script>
 
 <template>
-    <div class="entry" :class="{ 'entry-with-voice': hasVoicePaths() }">
+    <div class="entry" :class="{ 'entry-with-voice': hasVoicePaths() }" :data-source-type="primarySource?.sourceType || undefined">
         <div v-if="showSourcePanel" class="sourcePanel">
+            <span class="sourceType">{{ sourceTypeLabel }}</span>
             <div class="sourceText">
-                <span class="sourceType">{{ sourceTypeLabel }}</span>
                 <StylizedText :text="sourceTitle" :keyword="$props.keyword" class="sourceTitle" />
                 <StylizedText v-if="sourceSubtitle" :text="sourceSubtitle" :keyword="$props.keyword" class="sourceSubtitle" />
             </div>
@@ -359,17 +359,26 @@ const showUpdatedVersionTag = () => {
 
 <style scoped>
 .translate {
-    margin-bottom: 14px;
+    padding: 12px 0 12px 8px;
+}
+
+.translate + .translate {
+    border-top: 1px solid rgba(190, 164, 124, 0.18);
+}
+
+:global([data-theme="dark"]) .translate + .translate {
+    border-top-color: var(--theme-border);
 }
 
 .translate:last-child {
-    margin-bottom: 0;
+    border-bottom: none;
 }
 
 .entry {
     position: relative;
-    line-height: 30px;
-    transition: all 0.3s ease;
+    overflow: hidden;
+    line-height: 1.6;
+    transition: transform 0.25s ease, box-shadow 0.25s ease, background 0.25s ease, border-color 0.25s ease;
     border-radius: 22px;
     padding: 20px 20px 18px;
     margin-bottom: 14px;
@@ -379,21 +388,44 @@ const showUpdatedVersionTag = () => {
     box-shadow: 0 12px 26px rgba(44, 57, 54, 0.07);
 }
 
+:global([data-theme="dark"]) .entry {
+    background:
+        linear-gradient(180deg, rgba(30, 40, 37, 0.98), rgba(24, 34, 31, 0.94));
+    border-color: var(--theme-border);
+    box-shadow: 0 12px 26px rgba(0, 0, 0, 0.14);
+}
+
 .entry:hover {
     box-shadow: 0 18px 32px rgba(44, 57, 54, 0.10);
     transform: translateY(-2px);
 }
 
-.entry-with-voice::before {
+:global([data-theme="dark"]) .entry:hover {
+    box-shadow: 0 18px 32px rgba(0, 0, 0, 0.20);
+}
+
+/* left color strip */
+.entry-with-voice::before,
+.entry[data-source-type]::before {
     content: "";
     position: absolute;
     left: 0;
     top: 18px;
     bottom: 18px;
     width: 4px;
-    border-radius: 999px;
+    border-radius: 0 4px 4px 0;
     background: linear-gradient(180deg, var(--theme-primary), var(--theme-accent));
 }
+
+.entry[data-source-type="dialogue"]::before,
+.entry[data-source-type="voice"]::before { background: var(--theme-primary); }
+.entry[data-source-type="quest"]::before { background: #4a7ab5; }
+.entry[data-source-type="readable"]::before { background: var(--theme-accent); }
+.entry[data-source-type="subtitle"]::before { background: #5c7f58; }
+.entry[data-source-type="weapon"]::before,
+.entry[data-source-type="reliquary"]::before { background: #7a5cb5; }
+.entry[data-source-type="item"]::before,
+.entry[data-source-type="material"]::before { background: var(--theme-accent); }
 
 .info {
     font-size: 14px;
@@ -407,13 +439,17 @@ const showUpdatedVersionTag = () => {
 .language-label {
     display: inline-flex;
     align-items: center;
-    min-height: 28px;
-    padding: 0 10px;
+    padding: 2px 8px;
     border-radius: 999px;
-    font-weight: 700;
-    color: var(--theme-ink);
+    font-weight: 600;
+    font-size: 12px;
+    color: var(--theme-text-muted);
     background: rgba(183, 140, 79, 0.12);
     font-family: var(--font-title);
+}
+
+:global([data-theme="dark"]) .language-label {
+    background: rgba(212, 168, 98, 0.12);
 }
 
 .voice-buttons {
@@ -434,37 +470,61 @@ const showUpdatedVersionTag = () => {
 .sourcePanel {
     display: flex;
     align-items: flex-start;
-    justify-content: space-between;
     gap: 12px;
-    flex-wrap: wrap;
-    padding: 14px 14px 12px;
-    border-radius: 18px;
-    background: rgba(47, 105, 101, 0.06);
-    border: 1px solid rgba(47, 105, 101, 0.10);
-    margin-bottom: 16px;
+    margin: -20px -20px 16px;
+    padding: 12px 14px 12px 28px;
+    background: rgba(47, 105, 101, 0.05);
+    border-bottom: 1px solid rgba(190, 164, 124, 0.18);
+}
+
+:global([data-theme="dark"]) .sourcePanel {
+    background: rgba(74, 154, 149, 0.07);
+    border-bottom-color: rgba(74, 154, 149, 0.14);
 }
 
 .sourceText {
+    flex: 1;
     min-width: 0;
 }
 
 .sourceType {
     display: inline-flex;
     align-items: center;
-    padding: 2px 10px;
+    padding: 3px 10px;
     border-radius: 999px;
     background: rgba(183, 140, 79, 0.12);
-    color: var(--theme-ink);
+    color: var(--theme-accent);
     font-size: 12px;
-    font-family: var(--font-title);
-    font-weight: 700;
-    margin-bottom: 8px;
+    font-weight: 600;
+    white-space: nowrap;
+    flex-shrink: 0;
+    align-self: flex-start;
+}
+
+.entry[data-source-type="dialogue"] .sourceType,
+.entry[data-source-type="voice"] .sourceType {
+    background: rgba(47, 105, 101, 0.12);
+    color: var(--theme-primary);
+}
+.entry[data-source-type="quest"] .sourceType {
+    background: rgba(74, 122, 181, 0.12);
+    color: #4a7ab5;
+}
+.entry[data-source-type="weapon"] .sourceType,
+.entry[data-source-type="reliquary"] .sourceType {
+    background: rgba(122, 92, 181, 0.12);
+    color: #7a5cb5;
+}
+.entry[data-source-type="subtitle"] .sourceType {
+    background: rgba(92, 127, 88, 0.12);
+    color: #5c7f58;
 }
 
 .sourceTitle {
-    font-size: 18px;
-    font-weight: 700;
+    font-size: 14px;
+    font-weight: 600;
     color: var(--theme-text);
+    line-height: 1.4;
 }
 
 .sourceTitle:deep(p),
@@ -483,6 +543,7 @@ const showUpdatedVersionTag = () => {
     align-items: center;
     gap: 10px;
     flex-wrap: wrap;
+    flex-shrink: 0;
 }
 
 .sourceCount {
@@ -493,31 +554,53 @@ const showUpdatedVersionTag = () => {
     background: rgba(183, 140, 79, 0.10);
 }
 
+:global([data-theme="dark"]) .sourceCount {
+    background: rgba(212, 168, 98, 0.10);
+}
+
 .versionTags {
     display: flex;
     gap: 8px;
     flex-wrap: wrap;
-    margin: 12px 0 10px;
+    margin: 14px 0 4px 8px;
 }
 
-.versionTag {
-    font-size: 12px;
-    padding: 2px 10px;
+.versionTags :deep(.el-tag--info.is-plain) {
+    --el-tag-text-color: #5c7f58;
+    --el-tag-border-color: rgba(92, 127, 88, 0.35);
+    --el-tag-bg-color: transparent;
+    border-radius: 999px;
+}
+
+.versionTags :deep(.el-tag--warning.is-plain) {
+    --el-tag-text-color: #4a7ab5;
+    --el-tag-border-color: rgba(74, 122, 181, 0.35);
+    --el-tag-bg-color: transparent;
+    border-radius: 999px;
+}
+
+:global([data-theme="dark"]) .versionTags :deep(.el-tag--info.is-plain) {
+    --el-tag-text-color: var(--theme-success);
+}
+
+:global([data-theme="dark"]) .versionTags :deep(.el-tag--warning.is-plain) {
+    --el-tag-text-color: #6aa0d8;
+    --el-tag-border-color: rgba(74, 122, 181, 0.35);
 }
 
 .translate :deep(p) {
     margin: 0;
 }
 
-@media (max-width: 720px) {
+@media (max-width: 680px) {
     .entry {
-        padding: 12px;
+        padding: 14px 14px 12px;
         margin-bottom: 10px;
     }
 
     .sourcePanel {
-        padding: 12px 12px 10px;
-        margin-bottom: 12px;
+        margin: -14px -14px 12px;
+        padding: 10px 12px 10px 22px;
     }
 
     .info {
@@ -530,7 +613,7 @@ const showUpdatedVersionTag = () => {
     }
 
     .versionTags {
-        margin: 8px 0;
+        margin: 10px 0 2px 8px;
     }
 }
 </style>
