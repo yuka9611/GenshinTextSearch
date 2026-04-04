@@ -197,7 +197,7 @@ const getEntityTexts = withCache((sourceTypeCode, entityId, searchLang) => {
     });
 });
 
-const catalogSearch = (keyword, langCode, sourceTypeCode, subCategory, page = 1, pageSize = 50) => {
+const catalogSearch = (keyword, langCode, sourceTypeCode, subCategory, page = 1, pageSize = 50, createdVersion = "", updatedVersion = "") => {
     return request.post("/api/catalogSearch", {
         keyword: keyword,
         langCode: langCode,
@@ -205,7 +205,9 @@ const catalogSearch = (keyword, langCode, sourceTypeCode, subCategory, page = 1,
         subCategory: subCategory,
         page: page,
         pageSize: pageSize,
-    });
+        createdVersion: createdVersion,
+        updatedVersion: updatedVersion,
+    }, { timeout: 30000 });
 };
 
 const getCatalogMeta = () => {

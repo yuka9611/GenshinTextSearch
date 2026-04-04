@@ -943,6 +943,76 @@ button { font-family: inherit; cursor: pointer; }
 
 
 /* ============================================================
+   BOTTOM NAVIGATION — Mobile (shown only at ≤680px)
+   ============================================================ */
+.bottom-nav {
+  display: none;
+  position: fixed;
+  bottom: 0;
+  left: 0;
+  right: 0;
+  z-index: 200;
+  height: 64px;
+  background: var(--color-bg-card);
+  border-top: 1px solid var(--color-border);
+  box-shadow: 0 -4px 16px rgba(44,57,54,0.08);
+  align-items: stretch;
+  justify-content: space-around;
+  padding: 0 var(--sp-1);
+  padding-bottom: env(safe-area-inset-bottom, 0);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+}
+
+[data-theme="dark"] .bottom-nav {
+  background: rgba(22,30,28,0.96);
+  box-shadow: 0 -4px 16px rgba(0,0,0,0.25);
+}
+
+.bottom-nav-item {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 3px;
+  flex: 1;
+  min-width: 0;
+  color: var(--color-text-soft);
+  font-size: 10px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: color var(--duration-fast) var(--ease-out);
+  -webkit-tap-highlight-color: transparent;
+  user-select: none;
+}
+
+.bottom-nav-item i {
+  font-size: 18px;
+  line-height: 1;
+  transition: transform var(--duration-fast) var(--ease-out);
+}
+
+.bottom-nav-item span {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 100%;
+}
+
+.bottom-nav-item:active {
+  opacity: 0.7;
+}
+
+.bottom-nav-item.active {
+  color: var(--color-primary);
+  font-weight: 600;
+}
+
+.bottom-nav-item.active i {
+  transform: scale(1.1);
+}
+
+/* ============================================================
    RESPONSIVE — Narrow screen adaptation
    ============================================================ */
 
@@ -982,7 +1052,8 @@ button { font-family: inherit; cursor: pointer; }
   .header-title { font-size: var(--text-lg); }
   .header-icon { width: 36px; height: 36px; border-radius: 10px; font-size: 15px; }
 
-  .main { padding: var(--sp-3) var(--sp-4) var(--sp-6); }
+  .main { padding: var(--sp-3) var(--sp-4) calc(var(--sp-6) + 72px); }
+  .bottom-nav { display: flex; }
   .search-section { border-radius: var(--r-md); padding: var(--sp-2) var(--sp-3); }
   .page-title { display: none; }
   .search-bar { flex-direction: column; margin-bottom: var(--sp-2); gap: var(--sp-2); }
@@ -1408,6 +1479,15 @@ button { font-family: inherit; cursor: pointer; }
     </main>
   </div>
 
+  <!-- BOTTOM NAV — Mobile only -->
+  <nav class="bottom-nav" id="bottomNav">
+    <div class="bottom-nav-item active"><i class="fi fi-rr-search"></i><span>文本检索</span></div>
+    <div class="bottom-nav-item"><i class="fi fi-rr-book"></i><span>任务查询</span></div>
+    <div class="bottom-nav-item"><i class="fi fi-rr-comment"></i><span>NPC对话</span></div>
+    <div class="bottom-nav-item"><i class="fi fi-rr-volume"></i><span>语音</span></div>
+    <div class="bottom-nav-item"><i class="fi fi-rr-settings"></i><span>更多</span></div>
+  </nav>
+
 </div>
 
 <!-- ============================================================
@@ -1432,6 +1512,14 @@ document.querySelectorAll('.page-btn:not(.disabled)').forEach(btn => {
   btn.addEventListener('click', () => {
     document.querySelectorAll('.page-btn').forEach(b => b.classList.remove('active'));
     btn.classList.add('active');
+  });
+});
+
+// Bottom nav click simulation
+document.querySelectorAll('.bottom-nav-item').forEach(item => {
+  item.addEventListener('click', () => {
+    document.querySelectorAll('.bottom-nav-item').forEach(i => i.classList.remove('active'));
+    item.classList.add('active');
   });
 });
 </script>

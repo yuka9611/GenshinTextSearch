@@ -28,13 +28,24 @@
           </el-select>
         </el-form-item>
 
-        <el-form-item label="结果语言" class="transferFormItem">
-          <el-transfer
+        <el-form-item label="结果语言">
+          <el-select
             v-model="transferComponentValue"
-            :data="transferComponentData"
-            :titles="['可选语言', '已选语言']"
-            class="resultLanguageTransfer"
-          />
+            multiple
+            collapse-tags
+            collapse-tags-tooltip
+            filterable
+            clearable
+            placeholder="选择结果语言"
+            class="languageSelector"
+          >
+            <el-option
+              v-for="item in transferComponentData"
+              :key="item.key"
+              :label="item.label"
+              :value="item.key"
+            />
+          </el-select>
         </el-form-item>
 
         <el-form-item label="双子">
@@ -52,18 +63,27 @@
         </div>
 
         <el-form-item label="游戏资源路径">
-          <div class="assetRow">
-            <div class="assetInfo statusCard">
-              <div class="assetPath">{{ global.config.assetDir || "(未设置)" }}</div>
-              <div class="assetHint">
-                <span v-if="assetDirValid" class="ok">✅ 路径有效</span>
-                <span v-else class="bad">❌ 路径无效（请选择 GenshinImpact_Data 或包含 StreamingAssets 的目录）</span>
-              </div>
+          <div class="assetControls">
+            <div class="assetPathRow">
+              <el-input
+                v-model="assetDirDraft"
+                :title="assetDirDraft || '(未设置)'"
+                placeholder="填写 GenshinImpact_Data 或包含 StreamingAssets 的目录"
+                clearable
+                class="assetPathInput"
+                @keydown.enter.prevent="save"
+              >
+                <template #append>
+                  <el-button class="assetPathPickerButton" @click="pickDir" :loading="picking" :disabled="savingAssetDir || saving">
+                    选择目录
+                  </el-button>
+                </template>
+              </el-input>
             </div>
-
-            <el-button @click="pickDir" :loading="picking">
-              选择目录
-            </el-button>
+            <div class="assetHint">
+              <span v-if="assetDirValid" class="ok">✅ 路径有效</span>
+              <span v-else class="bad">❌ 路径无效（请选择 GenshinImpact_Data 或包含 StreamingAssets 的目录）</span>
+            </div>
           </div>
         </el-form-item>
 
@@ -102,7 +122,7 @@
       </section>
 
       <div class="actionBar">
-        <el-button type="primary" @click="save">
+        <el-button type="primary" @click="save" :loading="saving" :disabled="picking || savingAssetDir">
           保存
         </el-button>
       </div>
@@ -129,6 +149,9 @@ const transferComponentValue = ref([])
 
 const picking = ref(false)
 const refreshingVoice = ref(false)
+const savingAssetDir = ref(false)
+const saving = ref(false)
+const assetDirDraft = ref(global.config.assetDir || "")
 
 // 使用语言处理组合式API
 const {
@@ -151,6 +174,14 @@ const voiceTagList = computed(() => {
     .map(([code, name]) => ({ code, name }))
     .sort((a, b) => Number(a.code) - Number(b.code))
 })
+const assetDirDirty = computed(() => assetDirDraft.value.trim() !== String(global.config.assetDir || "").trim())
+
+const syncAssetDirState = (data = {}) => {
+  global.config.assetDir = data.assetDir || ""
+  global.config.assetDirValid = !!data.assetDirValid
+  assetDirValid.value = !!data.assetDirValid
+  assetDirDraft.value = global.config.assetDir || ""
+}
 
 onBeforeMount(async () => {
   await loadLanguages()
@@ -164,6 +195,7 @@ onBeforeMount(async () => {
       selectedSourceLanguage.value = global.config.sourceLanguage + ""
       selectedTwin.value = global.config.isMale
       assetDirValid.value = !!global.config.assetDirValid
+      assetDirDraft.value = global.config.assetDir || ""
     }
   } catch (e) {
     console.error("获取配置失败:", e)
@@ -217,21 +249,26 @@ const pickDir = async () => {
       body: JSON.stringify({}),
     })
     const payload = await resp.json()
+    const data = payload.data || {}
+
     if (payload.code !== 200) {
-      ElMessage({ type: "error", message: payload.msg || "选择目录失败" })
+      if (data.dialogUnavailable) {
+        ElMessage({
+          type: "warning",
+          message: "当前运行环境不支持目录选择弹窗，请手动填写资源路径后点击下方“保存”。",
+        })
+      } else {
+        ElMessage({ type: "error", message: payload.msg || "选择目录失败" })
+      }
       return
     }
 
-    const data = payload.data || {}
     if (data.cancel) {
       ElMessage({ type: "info", message: "已取消选择" })
       return
     }
 
-    // 更新全局 config
-    global.config.assetDir = data.assetDir || ""
-    global.config.assetDirValid = !!data.assetDirValid
-    assetDirValid.value = !!data.assetDirValid
+    syncAssetDirState(data)
 
     // ✅ 选完目录立即刷新语音包 UI
     await refreshVoicePacks()
@@ -247,8 +284,57 @@ const pickDir = async () => {
   }
 }
 
-const save = async () => {
+const saveAssetDir = async ({ silentSuccess = false } = {}) => {
+  const nextPath = assetDirDraft.value.trim()
+  if (!nextPath) {
+    ElMessage({ type: "warning", message: "请先填写资源路径" })
+    return false
+  }
+
+  savingAssetDir.value = true
   try {
+    const resp = await fetch("/api/setAssetDir", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ assetDir: nextPath }),
+    })
+    const payload = await resp.json()
+    if (payload.code !== 200) {
+      ElMessage({
+        type: "error",
+        message: payload.msg === "Invalid directory"
+          ? "路径无效，请填写 GenshinImpact_Data 或包含 StreamingAssets 的目录"
+          : (payload.msg || "保存资源路径失败"),
+      })
+      return false
+    }
+
+    syncAssetDirState(payload.data || {})
+    await refreshVoicePacks()
+    if (!silentSuccess) {
+      ElMessage({
+        type: assetDirValid.value ? "success" : "warning",
+        message: assetDirValid.value ? "资源路径已保存 ✅" : "路径已保存，但校验未通过（请确认目录层级）",
+      })
+    }
+    return true
+  } catch (error) {
+    console.error("保存资源路径失败:", error)
+    ElMessage({ type: "error", message: "保存资源路径失败（后端未响应）" })
+    return false
+  } finally {
+    savingAssetDir.value = false
+  }
+}
+
+const save = async () => {
+  saving.value = true
+  try {
+    if (assetDirDirty.value) {
+      const savedAssetDir = await saveAssetDir({ silentSuccess: true })
+      if (!savedAssetDir) return
+    }
+
     const response = await api.saveConfig(
       transferComponentValue.value,
       selectedInputLanguage.value,
@@ -277,6 +363,8 @@ const save = async () => {
   } catch (error) {
     console.error("保存配置失败:", error)
     ElMessage({ type: "error", message: "保存失败：网络错误" })
+  } finally {
+    saving.value = false
   }
 }
 </script>
@@ -298,8 +386,8 @@ const save = async () => {
 
 .settingsSection {
   padding: 20px;
-  border-radius: 22px;
-  border: 1px solid rgba(190, 164, 124, 0.28);
+  border-radius: 24px;
+  border: 1px solid var(--theme-border);
   background: rgba(255, 255, 255, 0.42);
 }
 
@@ -331,74 +419,63 @@ const save = async () => {
   width: 260px;
 }
 
-.transferFormItem .el-form-item__content {
-  min-width: 0;
-  max-width: 100%;
-}
-
-.resultLanguageTransfer {
-  display: flex;
-  align-items: center;
-  gap: clamp(8px, 1.6vw, 16px);
-  flex-wrap: nowrap;
-  width: 100%;
-  max-width: 100%;
-  overflow: hidden;
-}
-
-.resultLanguageTransfer .el-transfer-panel {
-  flex: 1 1 0;
-  width: 0;
-  min-width: 0;
-}
-
-.resultLanguageTransfer .el-transfer__buttons {
-  flex: 0 0 auto;
+.assetControls {
   display: flex;
   flex-direction: column;
-  gap: 10px;
-  padding: 0;
-}
-
-.resultLanguageTransfer .el-transfer-panel .el-transfer-panel__header .el-checkbox__label {
-  min-width: 0;
-}
-
-.resultLanguageTransfer .el-transfer__button {
-  margin: 0;
-}
-
-.resultLanguageTransfer .el-transfer__button:nth-child(2) {
-  margin: 0;
-}
-
-.assetRow {
-  display: flex;
-  gap: 12px;
-  align-items: center;
+  gap: 8px;
   width: 100%;
 }
 
-.assetInfo {
-  flex: 1;
+.assetPathInput {
+  flex: 1 1 auto;
   min-width: 0;
+  width: 100%;
+}
+
+.assetPathRow {
+  display: flex;
+  align-items: stretch;
+  gap: 8px;
+  width: 100%;
 }
 
 .statusCard {
   padding: 14px 16px;
-  border-radius: 18px;
+  border-radius: 16px;
   background: linear-gradient(180deg, rgba(255, 255, 255, 0.66), rgba(243, 231, 211, 0.40));
-  border: 1px solid rgba(190, 164, 124, 0.22);
+  border: 1px solid var(--theme-border);
 }
 
-.assetPath {
-  word-break: break-all;
+.assetPathInput :deep(.el-input__inner) {
   color: var(--theme-text);
   font-weight: 600;
 }
 
+.assetPathInput :deep(.el-input-group__append) {
+  padding: 0;
+  overflow: hidden;
+  background: rgba(255, 250, 242, 0.88);
+}
+
+.assetPathPickerButton {
+  margin: 0;
+  height: 100%;
+  padding: 0 18px;
+  border: none;
+  border-radius: 0;
+  background: transparent;
+  box-shadow: none;
+  transform: none;
+}
+
+.assetPathPickerButton:hover,
+.assetPathPickerButton:focus-visible {
+  background: rgba(255, 255, 255, 0.42);
+  color: var(--theme-primary);
+  transform: none;
+}
+
 .assetHint {
-  margin-top: 6px;
   font-size: 12px;
 }
 
@@ -442,20 +519,6 @@ const save = async () => {
 }
 
 @media (max-width: 680px) {
-  .resultLanguageTransfer {
-    flex-wrap: wrap;
-  }
-
-  .resultLanguageTransfer .el-transfer-panel {
-    min-width: 100%;
-  }
-
-  .resultLanguageTransfer .el-transfer__buttons {
-    width: 100%;
-    flex-direction: row;
-    justify-content: center;
-  }
-
   .settingsSection {
     padding: 16px;
   }
@@ -473,4 +536,23 @@ const save = async () => {
     width: 100%;
   }
 }
+
+/* Dark mode overrides */
+[data-theme="dark"] .settingsSection {
+    background: rgba(30, 40, 37, 0.42);
+}
+
+[data-theme="dark"] .statusCard {
+    background: linear-gradient(180deg, rgba(30, 40, 37, 0.66), rgba(22, 32, 30, 0.40));
+}
+
+[data-theme="dark"] .assetPathInput :deep(.el-input-group__append) {
+    background: rgba(30, 40, 37, 0.88);
+}
+
+[data-theme="dark"] .assetPathPickerButton:hover,
+[data-theme="dark"] .assetPathPickerButton:focus-visible {
+    background: rgba(42, 56, 52, 0.95);
+}
+
 </style>

@@ -7,6 +7,7 @@ import StylizedText from '@/components/StylizedText.vue'
 import useLanguage from '@/composables/useLanguage'
 import useVersion from '@/composables/useVersion'
 import useSearchCommon from '@/composables/useSearchCommon'
+import ActiveFilterTags from '@/components/ActiveFilterTags.vue'
 import formatText from '@/utils/formatText'
 
 const router = useRouter()
@@ -100,13 +101,12 @@ onBeforeMount(async () => {
   await loadVersionOptions()
 })
 
-const currentResultsTitle = computed(() => (mode.value === 'quest' ? uiText.questResults : uiText.readableResults))
 const currentResults = computed(() => (mode.value === 'quest' ? filteredQuestResults.value : filteredReadableResults.value))
 const currentSearchPlaceholder = computed(() => (
   mode.value === 'quest' ? uiText.questSearchPlaceholder : uiText.readableSearchPlaceholder
 ))
+const currentResultLabel = computed(() => (mode.value === 'quest' ? uiText.modeQuest : uiText.modeReadable))
 const currentEmptyDescription = computed(() => {
-  if (!hasSearched.value) return uiText.waitingResults
   return mode.value === 'quest' ? uiText.noQuestResults : uiText.noReadableResults
 })
 const showQuestSpecificFilters = computed(() => mode.value === 'quest')
@@ -237,16 +237,59 @@ const gotoReadable = (entry) => {
 }
 
 setupVersionWatchers(onSearchClicked)
+
+const activeFilters = computed(() => {
+  const filters = []
+  if (mode.value === 'quest') {
+    if (speakerKeyword.value?.trim()) {
+      filters.push({ key: 'speaker', label: `出场角色: ${speakerKeyword.value.trim()}` })
+    }
+    if (questSourceTypeFilter.value) {
+      const opt = questSourceTypeOptions.find(o => o.value === questSourceTypeFilter.value)
+      filters.push({ key: 'questSourceType', label: `任务类别: ${opt?.label || questSourceTypeFilter.value}` })
+    }
+  } else {
+    if (readableCategoryFilter.value) {
+      const opt = readableCategoryOptions.find(o => o.value === readableCategoryFilter.value)
+      filters.push({ key: 'readableCategory', label: `阅读物类别: ${opt?.label || readableCategoryFilter.value}` })
+    }
+  }
+  if (createdVersionFilter.value) {
+    filters.push({ key: 'createdVersion', label: `创建版本: ${createdVersionFilter.value}` })
+  }
+  if (updatedVersionFilter.value) {
+    filters.push({ key: 'updatedVersion', label: `更新版本: ${updatedVersionFilter.value}` })
+  }
+  return filters
+})
+
+const clearFilter = (key) => {
+  const map = {
+    speaker: () => { speakerKeyword.value = '' },
+    questSourceType: () => { questSourceTypeFilter.value = '' },
+    readableCategory: () => { readableCategoryFilter.value = '' },
+    createdVersion: () => { createdVersionFilter.value = '' },
+    updatedVersion: () => { updatedVersionFilter.value = '' },
+  }
+  map[key]?.()
+  onSearchClicked()
+}
+
+const clearAllFilters = () => {
+  speakerKeyword.value = ''
+  questSourceTypeFilter.value = ''
+  readableCategoryFilter.value = ''
+  createdVersionFilter.value = ''
+  updatedVersionFilter.value = ''
+  onSearchClicked()
+}
 </script>
 
 <template>
-  <div class="viewWrapper pageShell">
-    <h1 class="pageTitle">{{ uiText.pageTitle }}</h1>
-    <div class="helpText">
-      <p>{{ uiText.helpText }}</p>
-    </div>
-
+  <div class="viewWrapper">
     <div class="stickySearchSection">
+      <h1 class="pageTitle">{{ uiText.pageTitle }}</h1>
+      <p class="helpText">{{ uiText.helpText }}</p>
       <div class="filterTopRow">
         <el-radio-group v-model="mode" size="large" class="modeSwitch">
           <el-radio-button label="quest">{{ uiText.modeQuest }}</el-radio-button>
@@ -258,49 +301,71 @@ setupVersionWatchers(onSearchClicked)
         v-model:keyword="keyword"
         v-model:selectedLanguage="selectedInputLanguage"
         :supportedLanguages="supportedInputLanguage"
-        :summary="searchSummary"
         :inputPlaceholder="currentSearchPlaceholder"
         :languagePlaceholder="uiText.searchLanguage"
+        historyKey="name"
         @search="onSearchClicked"
       />
 
       <div class="filterBar">
-        <el-input
-          v-if="showQuestSpecificFilters"
-          v-model="speakerKeyword"
-          :placeholder="uiText.speakerKeyword"
-          class="speakerInput"
-          clearable
-          @keyup.enter.native="onSearchClicked"
-        />
-        <el-select v-model="createdVersionFilter" :placeholder="uiText.createdVersion" class="versionInput" clearable filterable>
-          <el-option v-for="version in versionOptions" :key="`created-${version}`" :label="version" :value="version" />
-        </el-select>
-        <el-select v-model="updatedVersionFilter" :placeholder="uiText.updatedVersion" class="versionInput" clearable filterable>
-          <el-option v-for="version in versionOptions" :key="`updated-${version}`" :label="version" :value="version" />
-        </el-select>
-        <el-select v-if="showQuestSpecificFilters" v-model="questSourceTypeFilter" placeholder="任务类别" class="versionInput" clearable>
-          <el-option
-            v-for="option in questSourceTypeOptions"
-            :key="`quest-type-${option.value || 'all'}`"
-            :label="option.label"
-            :value="option.value"
+        <div v-if="showQuestSpecificFilters" class="filterItem">
+          <span class="filterLabel">{{ uiText.speakerKeyword }}</span>
+          <el-input
+            v-model="speakerKeyword"
+            :placeholder="uiText.speakerKeyword"
+            class="speakerInput"
+            clearable
+            @keyup.enter.native="onSearchClicked"
           />
-        </el-select>
-        <el-select v-if="showReadableSpecificFilters" v-model="readableCategoryFilter" :placeholder="uiText.readableCategory" class="versionInput" clearable>
-          <el-option
-            v-for="option in readableCategoryOptions"
-            :key="`readable-type-${option.value || 'all'}`"
-            :label="option.label"
-            :value="option.value"
-          />
-        </el-select>
+        </div>
+        <div class="filterItem">
+          <span class="filterLabel">{{ uiText.createdVersion }}</span>
+          <el-select v-model="createdVersionFilter" :placeholder="uiText.createdVersion" clearable filterable>
+            <el-option v-for="version in versionOptions" :key="`created-${version}`" :label="version" :value="version" />
+          </el-select>
+        </div>
+        <div class="filterItem">
+          <span class="filterLabel">{{ uiText.updatedVersion }}</span>
+          <el-select v-model="updatedVersionFilter" :placeholder="uiText.updatedVersion" clearable filterable>
+            <el-option v-for="version in versionOptions" :key="`updated-${version}`" :label="version" :value="version" />
+          </el-select>
+        </div>
+        <div v-if="showQuestSpecificFilters" class="filterItem">
+          <span class="filterLabel">{{ uiText.category }}</span>
+          <el-select v-model="questSourceTypeFilter" placeholder="任务类别" clearable>
+            <el-option
+              v-for="option in questSourceTypeOptions"
+              :key="`quest-type-${option.value || 'all'}`"
+              :label="option.label"
+              :value="option.value"
+            />
+          </el-select>
+        </div>
+        <div v-if="showReadableSpecificFilters" class="filterItem">
+          <span class="filterLabel">{{ uiText.readableCategory }}</span>
+          <el-select v-model="readableCategoryFilter" :placeholder="uiText.readableCategory" clearable>
+            <el-option
+              v-for="option in readableCategoryOptions"
+              :key="`readable-type-${option.value || 'all'}`"
+              :label="option.label"
+              :value="option.value"
+            />
+          </el-select>
+        </div>
       </div>
+
+      <ActiveFilterTags
+        :filters="activeFilters"
+        @clear-filter="clearFilter"
+        @clear-all="clearAllFilters"
+      />
     </div>
 
     <div class="resultSection resultsSection">
-      <h2 class="resultsSectionTitle">{{ currentResultsTitle }}</h2>
-      <el-empty v-if="currentResults.length === 0" :description="currentEmptyDescription" />
+      <div v-if="currentResults.length > 0" class="resultSummary">
+        <span class="resultCount">{{ currentResultLabel }}共 <strong>{{ currentResults.length }}</strong> 条结果</span>
+      </div>
+      <el-empty v-if="hasSearched && currentResults.length === 0" :description="currentEmptyDescription" />
       <div v-else class="resultGrid cardGrid">
         <template v-if="mode === 'quest'">
           <el-card v-for="quest in currentResults" :key="quest.questId" class="resultCard cardPanel">
@@ -314,8 +379,8 @@ setupVersionWatchers(onSearchClicked)
             <div class="cardMeta cardMetaText">{{ uiText.questId }}: {{ quest.questId }}</div>
             <div class="versionTags tagRow">
               <el-tag v-if="quest.sourceTypeLabel" size="small" effect="plain" type="success">{{ quest.sourceTypeLabel }}</el-tag>
-              <el-tag size="small" effect="plain">{{ uiText.created }}: {{ displayVersion(quest, 'created') }}</el-tag>
-              <el-tag v-if="showUpdatedVersionTag(quest)" size="small" effect="plain">{{ uiText.updated }}: {{ displayVersion(quest, 'updated') }}</el-tag>
+              <span class="versionTag created">✦ {{ uiText.created }}: {{ displayVersion(quest, 'created') }}</span>
+              <span v-if="showUpdatedVersionTag(quest)" class="versionTag updated">↻ {{ uiText.updated }}: {{ displayVersion(quest, 'updated') }}</span>
             </div>
             <el-button size="small" type="primary" @click="gotoQuest(quest.questId)">{{ uiText.viewDetails }}</el-button>
           </el-card>
@@ -331,8 +396,8 @@ setupVersionWatchers(onSearchClicked)
             </div>
             <div class="versionTags tagRow">
               <el-tag v-if="readable.readableCategoryLabel" size="small" effect="plain" type="success">{{ readable.readableCategoryLabel }}</el-tag>
-              <el-tag size="small" effect="plain">{{ uiText.created }}: {{ displayVersion(readable, 'created') }}</el-tag>
-              <el-tag v-if="showUpdatedVersionTag(readable)" size="small" effect="plain">{{ uiText.updated }}: {{ displayVersion(readable, 'updated') }}</el-tag>
+              <span class="versionTag created">✦ {{ uiText.created }}: {{ displayVersion(readable, 'created') }}</span>
+              <span v-if="showUpdatedVersionTag(readable)" class="versionTag updated">↻ {{ uiText.updated }}: {{ displayVersion(readable, 'updated') }}</span>
             </div>
             <el-button size="small" type="primary" @click="gotoReadable(readable)">{{ uiText.viewDetails }}</el-button>
           </el-card>
@@ -359,6 +424,7 @@ setupVersionWatchers(onSearchClicked)
   border-color: rgba(190, 164, 124, 0.32);
   color: var(--theme-text-muted);
   box-shadow: none;
+  transition: background-color 0.12s ease, border-color 0.12s ease, color 0.12s ease, box-shadow 0.12s ease;
 }
 
 .modeSwitch:deep(.el-radio-button__inner:hover) {
@@ -373,20 +439,12 @@ setupVersionWatchers(onSearchClicked)
 }
 
 .filterBar {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 10px;
-  width: 100%;
-  max-width: 100%;
-}
-
-.versionInput {
-  width: 188px;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
 }
 
 .speakerInput {
-  width: 188px;
-  min-width: 188px;
+  width: 100%;
+  min-width: 0;
 }
 
 .cardPreview {
@@ -403,4 +461,21 @@ setupVersionWatchers(onSearchClicked)
   margin: 0;
 }
 
+</style>
+
+<style>
+/* Dark-mode overrides for mode switch — unscoped */
+[data-theme="dark"] .modeSwitch .el-radio-button__inner {
+    background: rgba(30, 40, 37, 0.9);
+    border-color: var(--theme-border);
+    color: var(--theme-text-muted);
+}
+[data-theme="dark"] .modeSwitch .el-radio-button__inner:hover {
+    color: var(--theme-primary);
+}
+[data-theme="dark"] .modeSwitch .el-radio-button__original-radio:checked + .el-radio-button__inner {
+    background: linear-gradient(135deg, var(--theme-primary), var(--theme-primary-strong));
+    border-color: transparent;
+    color: #fff;
+}
 </style>
