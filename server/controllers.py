@@ -168,6 +168,10 @@ def _count_subtitle_from_keyword_cached(
     )
 
 
+class AssetDirDialogUnavailableError(RuntimeError):
+    """Raised when the native asset-directory picker cannot be opened."""
+
+
 def pickAssetDirViaDialog() -> str | None:
     """
     弹出选择文件夹对话框（Windows/macOS/Linux）
@@ -179,20 +183,34 @@ def pickAssetDirViaDialog() -> str | None:
     try:
         import tkinter as tk
         from tkinter import filedialog
-    except Exception:
-        return None
+    except ModuleNotFoundError as exc:
+        if exc.name == "_tkinter":
+            raise AssetDirDialogUnavailableError("_tkinter module is unavailable") from exc
+        raise AssetDirDialogUnavailableError("tkinter is unavailable") from exc
+    except Exception as exc:
+        raise AssetDirDialogUnavailableError("tkinter is unavailable") from exc
 
+    root = None
     try:
         root = tk.Tk()
         root.withdraw()
-        root.attributes("-topmost", True)
+        try:
+            root.attributes("-topmost", True)
+        except Exception:
+            pass
         picked = filedialog.askdirectory(title="请选择原神资源目录（包含 StreamingAssets 或 Persistent）")
-        root.destroy()
-        if not picked:
-            return None
-        return picked
-    except Exception:
+    except Exception as exc:
+        raise AssetDirDialogUnavailableError("failed to open directory picker") from exc
+    finally:
+        if root is not None:
+            try:
+                root.destroy()
+            except Exception:
+                pass
+
+    if not picked:
         return None
+    return picked
 
 
 def selectVoicePathFromTextHash(textHash: int):
@@ -327,7 +345,11 @@ _DB_FILTERABLE_SOURCE_TYPES_BUILTIN: frozenset[str] = frozenset({
 
 
 def _get_db_filterable_source_types() -> frozenset[str]:
-    return _DB_FILTERABLE_SOURCE_TYPES_BUILTIN
+    custom = _load_custom_categories()
+    extras = {f"custom_{code}" for code in custom.get("source_types", {})}
+    if not extras:
+        return _DB_FILTERABLE_SOURCE_TYPES_BUILTIN
+    return _DB_FILTERABLE_SOURCE_TYPES_BUILTIN | extras
 
 
 _ENTITY_SOURCE_META = {
@@ -389,7 +411,25 @@ def _get_entity_source_meta(source_type_code: int) -> tuple[str, str]:
     meta = _ENTITY_SOURCE_META.get(int(source_type_code))
     if meta:
         return meta
+    custom = _load_custom_categories()
+    label = custom.get("source_types", {}).get(str(source_type_code))
+    if label:
+        return (f"custom_{source_type_code}", label)
     return ("item", "道具")
+
+
+def _load_custom_categories() -> dict:
+    """Load custom categories from material_type_overrides.json."""
+    base = os.path.join(os.path.dirname(__file__), "dbBuild", "material_type_overrides.json")
+    try:
+        with open(base, "r", encoding="utf-8") as f:
+            data = json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError):
+        return {"source_types": {}, "sub_categories": {}}
+    return {
+        "source_types": data.get("_source_types") or {},
+        "sub_categories": data.get("_sub_categories") or {},
+    }
 
 
 _SUB_CATEGORY_LABELS: dict[int, str] = {
@@ -432,6 +472,7 @@ def _get_sub_category_label(sub_category_code: int) -> str:
 
 
 _READABLE_LANG_SUFFIX_RE = re.compile(r"_(CHT|DE|EN|ES|FR|ID|IT|JP|KR|PT|RU|TH|TR|VI)$", re.IGNORECASE)
+_ENTITY_EMPTY_BODY_MESSAGE = "暂无可用描述文本"
 
 
 class _EntityReadableLookup(TypedDict):
@@ -902,10 +943,10 @@ def _classify_readable_label(file_name: str | None, title_text_hash: int | None 
                 sub_cat = sub_row[3] if len(sub_row) > 3 else 0
                 if sub_cat == 1:  # SUB_QUEST_ITEM
                     return "任务道具"
-    # 按文件名前缀分类
+    # 按文件名前缀分类（Book* 前缀不授予书籍标签，仅 codex 才能）
     category = databaseHelper.getReadableCategoryCode(file_name)
     label = databaseHelper.READABLE_CATEGORY_LABELS.get(category, "")
-    return label if label and label != "其他" else "阅读物"
+    return label if label and label not in {"其他", "书籍"} else "阅读物"
 
 
 def _build_readable_category_fields(file_name: str | None, title_text_hash: int | None = None) -> dict:
@@ -3131,6 +3172,7 @@ def getQuestDialogues(
     questCompleteName = databaseHelper.getQuestName(questId, sourceLangCode)
     questDescription = databaseHelper.getQuestDescription(questId, sourceLangCode)
     stepTitleMap = databaseHelper.getQuestStepTitleMap(questId, sourceLangCode)
+    created_raw, updated_raw = databaseHelper.getQuestVersionInfo(questId, sourceLangCode)
 
     if page < 1:
         page = 1
@@ -3156,6 +3198,7 @@ def getQuestDialogues(
         "questDescription": questDescription,
         "talkId": 0,
         "dialogues": dialogues,
+        **_build_version_fields(created_raw, updated_raw),
     }, total
 
 
@@ -3365,7 +3408,8 @@ def getSubtitleContext(fileName: str, _subtitleId: int | None = None, searchLang
 
 
 def searchCatalog(keyword: str, langCode: int, sourceTypeCode: int | None = None,
-                  subCategory: int | None = None, page: int = 1, pageSize: int = 50):
+                  subCategory: int | None = None, page: int = 1, pageSize: int = 50,
+                  createdVersion: str | None = None, updatedVersion: str | None = None):
     import time
     start = time.time()
     offset = (max(1, page) - 1) * pageSize
@@ -3375,22 +3419,39 @@ def searchCatalog(keyword: str, langCode: int, sourceTypeCode: int | None = None
         sub_category=subCategory,
         limit=pageSize,
         offset=offset,
+        created_version=createdVersion,
+        updated_version=updatedVersion,
     )
     total = databaseHelper.countCatalogEntities(
         keyword, langCode,
         source_type_code=sourceTypeCode,
         sub_category=subCategory,
+        created_version=createdVersion,
+        updated_version=updatedVersion,
     )
     results = []
-    for entity_id, stc, title_hash, sub_cat, title_text in rows:
+    for entity_id, stc, title_hash, sub_cat, title_text, created_raw, updated_raw in rows:
         _, source_label = _get_entity_source_meta(stc)
         sub_label = _get_sub_category_label(sub_cat)
+        # enrichment: 构建 primarySource
+        primary_source = _build_primary_source(
+            source_type=str(stc),
+            title=title_text or str(entity_id),
+            subtitle=sub_label,
+            detail_query={
+                "kind": "entity",
+                "sourceTypeCode": int(stc),
+                "entityId": int(entity_id),
+            },
+        )
         results.append({
             "entityId": int(entity_id),
             "sourceTypeCode": int(stc),
             "sourceTypeLabel": source_label,
             "subCategoryLabel": sub_label,
             "title": title_text or str(entity_id),
+            "primarySource": primary_source,
+            **_build_version_fields(created_raw, updated_raw),
         })
     elapsed = (time.time() - start) * 1000
     return {
@@ -3404,7 +3465,11 @@ def searchCatalog(keyword: str, langCode: int, sourceTypeCode: int | None = None
 
 def getCatalogSubCategories():
     """Return the full sub-category mapping for the frontend dropdown."""
-    return {str(k): v for k, v in _SUB_CATEGORY_LABELS.items() if v}
+    result = {str(k): v for k, v in _SUB_CATEGORY_LABELS.items() if v}
+    custom = _load_custom_categories()
+    for code, label in custom.get("sub_categories", {}).items():
+        result.setdefault(str(code), label)
+    return result
 
 
 def getCatalogMainCategories():
@@ -3416,6 +3481,9 @@ def getCatalogMainCategories():
             continue
         result[str(code)] = label
         seen_labels.add(label)
+    custom = _load_custom_categories()
+    for code, label in custom.get("source_types", {}).items():
+        result.setdefault(str(code), label)
     return result
 
 
@@ -3434,6 +3502,9 @@ def getEntityTexts(sourceTypeCode: int, entityId: int, searchLang: int | None = 
             "entityId": entity_id,
             "title": None,
             "entries": [],
+            "missingBody": False,
+            "emptyMessage": "",
+            **_build_version_fields(None, None),
         }
 
     source_type, source_label = _get_entity_source_meta(source_type_code)
@@ -3446,6 +3517,7 @@ def getEntityTexts(sourceTypeCode: int, entityId: int, searchLang: int | None = 
     if not title:
         title = str(entity_id)
 
+    created_raw, updated_raw = databaseHelper.getCatalogEntityVersionInfo(source_type_code, entity_id, sourceLangCode)
     entries = []
     for row in rows:
         text_hash, title_hash, extra = row[0], row[1], row[2]
@@ -3473,6 +3545,8 @@ def getEntityTexts(sourceTypeCode: int, entityId: int, searchLang: int | None = 
             subtitle = subtitle + (" · 男" if gender_code == 1 else " · 女")
 
         text_obj = queryTextHashInfo(int(text_hash), langs, sourceLangCode, queryOrigin=True)
+        if not text_obj or not text_obj.get("translates"):
+            continue
         entries.append({
             "fieldLabel": field_label,
             "subtitle": subtitle,
@@ -3481,7 +3555,9 @@ def getEntityTexts(sourceTypeCode: int, entityId: int, searchLang: int | None = 
             "text": text_obj,
         })
 
+    has_direct_text_entries = len(entries) > 0
     entries.extend(_collect_entity_readable_entries(source_type, entity_id, _first_title_hash, f"{source_label} {entity_id}", langs, sourceLangCode, _first_sub_category))
+    missing_body = not has_direct_text_entries and len(entries) == 0
 
     return {
         "sourceType": source_type,
@@ -3491,6 +3567,9 @@ def getEntityTexts(sourceTypeCode: int, entityId: int, searchLang: int | None = 
         "entityId": entity_id,
         "title": title,
         "entries": entries,
+        "missingBody": missing_body,
+        "emptyMessage": _ENTITY_EMPTY_BODY_MESSAGE if missing_body else "",
+        **_build_version_fields(created_raw, updated_raw),
     }
 
 

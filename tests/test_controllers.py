@@ -1,5 +1,6 @@
 """Tests for selected pure/internal logic in server/controllers.py."""
 import importlib.util
+import sqlite3
 from pathlib import Path
 
 import pytest
@@ -165,6 +166,47 @@ class TestVersionHelpers:
         assert controllers._entry_version_match(entry, None, "4.2") is False
 
 
+class TestQuestDialogueVersions:
+    def test_get_quest_dialogues_includes_quest_version_fields(self, monkeypatch):
+        monkeypatch.setattr(controllers.config, "getResultLanguages", lambda: [1])
+        monkeypatch.setattr(controllers.config, "getSourceLanguage", lambda: 1)
+        monkeypatch.setattr(controllers.databaseHelper, "getQuestName", lambda quest_id, lang_code: "风起鹤归")
+        monkeypatch.setattr(controllers.databaseHelper, "getQuestDescription", lambda quest_id, lang_code: "任务描述")
+        monkeypatch.setattr(controllers.databaseHelper, "getQuestStepTitleMap", lambda quest_id, lang_code: {1001: "第一幕"})
+        version_calls = []
+        monkeypatch.setattr(
+            controllers.databaseHelper,
+            "getQuestVersionInfo",
+            lambda quest_id, lang_code=None: version_calls.append((quest_id, lang_code)) or ("Version 4.4", "Version 4.7"),
+        )
+        monkeypatch.setattr(controllers.databaseHelper, "countQuestDialogues", lambda quest_id: 1)
+        monkeypatch.setattr(
+            controllers.databaseHelper,
+            "selectQuestDialoguesPaged",
+            lambda quest_id, page_size, offset: [(123456, "NPC", 2001, 3001, 1001)],
+        )
+        monkeypatch.setattr(
+            controllers,
+            "queryTextHashInfo",
+            lambda *args, **kwargs: {
+                "hash": 123456,
+                "translates": {"1": "测试对白"},
+                "createdVersion": "9.9",
+                "updatedVersion": "9.9",
+            },
+        )
+        monkeypatch.setattr(controllers.databaseHelper, "getTalkerName", lambda *args, **kwargs: "派蒙")
+
+        result, total = controllers.getQuestDialogues(42, searchLang=1, page=1, page_size=20)
+
+        assert total == 1
+        assert version_calls == [(42, 1)]
+        assert result["createdVersionRaw"] == "Version 4.4"
+        assert result["updatedVersionRaw"] == "Version 4.7"
+        assert result["createdVersion"] == "4.4"
+        assert result["updatedVersion"] == "4.7"
+
+
 # ---------------------------------------------------------------------------
 # content normalization
 # ---------------------------------------------------------------------------
@@ -186,3 +228,158 @@ class TestNormalizeTextMapContent:
 
     def test_normalize_text_map_content_none(self):
         assert controllers._normalize_text_map_content(None, 1) is None
+
+
+class TestCatalogEntityVersionInfo:
+    def test_get_catalog_entity_version_info_aggregates_title_and_body(self, monkeypatch):
+        conn = sqlite3.connect(":memory:")
+        try:
+            conn.executescript(
+                """
+                CREATE TABLE text_source_entity (
+                    text_hash INTEGER NOT NULL,
+                    source_type_code INTEGER NOT NULL,
+                    entity_id INTEGER NOT NULL,
+                    title_hash INTEGER NOT NULL,
+                    extra INTEGER NOT NULL DEFAULT 0,
+                    sub_category INTEGER NOT NULL DEFAULT 0
+                );
+                CREATE TABLE textMap (
+                    hash INTEGER,
+                    lang INTEGER,
+                    created_version_id INTEGER,
+                    updated_version_id INTEGER
+                );
+                CREATE TABLE version_dim (
+                    id INTEGER PRIMARY KEY,
+                    raw_version TEXT,
+                    version_tag TEXT,
+                    version_sort_key INTEGER
+                );
+                """
+            )
+            conn.executemany(
+                "INSERT INTO version_dim(id, raw_version, version_tag, version_sort_key) VALUES (?, ?, ?, ?)",
+                [
+                    (1, "Version 1.0", "1.0", 100),
+                    (2, "Version 2.0", "2.0", 200),
+                    (3, "Version 3.0", "3.0", 300),
+                ],
+            )
+            conn.executemany(
+                "INSERT INTO text_source_entity(text_hash, source_type_code, entity_id, title_hash, extra, sub_category) VALUES (?, ?, ?, ?, ?, ?)",
+                [
+                    (200, 5, 264106, 100, 1, 29),
+                    (201, 5, 264106, 100, 2, 29),
+                ],
+            )
+            conn.executemany(
+                "INSERT INTO textMap(hash, lang, created_version_id, updated_version_id) VALUES (?, ?, ?, ?)",
+                [
+                    (100, 4, 1, 3),
+                    (200, 4, 2, 2),
+                    (201, 4, 2, 2),
+                    (100, 1, 3, 3),
+                    (200, 1, 3, 3),
+                ],
+            )
+
+            monkeypatch.setattr(controllers.databaseHelper, "conn", conn)
+            monkeypatch.setattr(controllers.databaseHelper, "_has_version_dim", lambda: True)
+            monkeypatch.setattr(controllers.databaseHelper, "_has_version_id_columns", lambda table_name: table_name == "textMap")
+            monkeypatch.setattr(controllers.databaseHelper.config, "getSourceLanguage", lambda: 4)
+
+            created_raw, updated_raw = controllers.databaseHelper.getCatalogEntityVersionInfo(5, 264106)
+
+            assert created_raw == "Version 1.0"
+            assert updated_raw == "Version 3.0"
+        finally:
+            conn.close()
+
+    def test_get_catalog_entity_version_info_strictly_uses_source_language(self, monkeypatch):
+        conn = sqlite3.connect(":memory:")
+        try:
+            conn.executescript(
+                """
+                CREATE TABLE text_source_entity (
+                    text_hash INTEGER NOT NULL,
+                    source_type_code INTEGER NOT NULL,
+                    entity_id INTEGER NOT NULL,
+                    title_hash INTEGER NOT NULL,
+                    extra INTEGER NOT NULL DEFAULT 0,
+                    sub_category INTEGER NOT NULL DEFAULT 0
+                );
+                CREATE TABLE textMap (
+                    hash INTEGER,
+                    lang INTEGER,
+                    created_version_id INTEGER,
+                    updated_version_id INTEGER
+                );
+                CREATE TABLE version_dim (
+                    id INTEGER PRIMARY KEY,
+                    raw_version TEXT,
+                    version_tag TEXT,
+                    version_sort_key INTEGER
+                );
+                """
+            )
+            conn.execute(
+                "INSERT INTO text_source_entity(text_hash, source_type_code, entity_id, title_hash, extra, sub_category) VALUES (?, ?, ?, ?, ?, ?)",
+                (200, 5, 264106, 100, 1, 29),
+            )
+            conn.executemany(
+                "INSERT INTO version_dim(id, raw_version, version_tag, version_sort_key) VALUES (?, ?, ?, ?)",
+                [
+                    (1, "Version 1.0", "1.0", 100),
+                    (2, "Version 2.0", "2.0", 200),
+                ],
+            )
+            conn.executemany(
+                "INSERT INTO textMap(hash, lang, created_version_id, updated_version_id) VALUES (?, ?, ?, ?)",
+                [
+                    (100, 1, 1, 2),
+                    (200, 1, 1, 2),
+                ],
+            )
+
+            monkeypatch.setattr(controllers.databaseHelper, "conn", conn)
+            monkeypatch.setattr(controllers.databaseHelper, "_has_version_dim", lambda: True)
+            monkeypatch.setattr(controllers.databaseHelper, "_has_version_id_columns", lambda table_name: table_name == "textMap")
+            monkeypatch.setattr(controllers.databaseHelper.config, "getSourceLanguage", lambda: 4)
+
+            created_raw, updated_raw = controllers.databaseHelper.getCatalogEntityVersionInfo(5, 264106)
+
+            assert created_raw is None
+            assert updated_raw is None
+        finally:
+            conn.close()
+
+
+class TestEntityTexts:
+    def test_get_entity_texts_returns_missing_body_with_top_level_versions(self, monkeypatch):
+        monkeypatch.setattr(controllers.config, "getResultLanguages", lambda: [1, 4])
+        monkeypatch.setattr(controllers.config, "getSourceLanguage", lambda: 4)
+        monkeypatch.setattr(
+            controllers.databaseHelper,
+            "selectEntityTextHashesByEntity",
+            lambda source_type_code, entity_id: [(1700897759, 1192942058, 257, 29)],
+        )
+        monkeypatch.setattr(
+            controllers.databaseHelper,
+            "getCatalogEntityVersionInfo",
+            lambda source_type_code, entity_id, version_lang_code=None: ("Version 1.0", "Version 2.0"),
+        )
+        monkeypatch.setattr(controllers, "_get_entity_source_meta", lambda code: ("costume", "千星奇域"))
+        monkeypatch.setattr(controllers, "_get_sub_category_label", lambda code: "奇偶装扮")
+        monkeypatch.setattr(controllers, "_get_text_map_content_with_fallback", lambda *args, **kwargs: "凝脂白")
+        monkeypatch.setattr(controllers, "queryTextHashInfo", lambda *args, **kwargs: {"translates": {}})
+        monkeypatch.setattr(controllers, "_collect_entity_readable_entries", lambda *args, **kwargs: [])
+
+        result = controllers.getEntityTexts(5, 264106, searchLang=1)
+
+        assert result["title"] == "凝脂白"
+        assert result["entries"] == []
+        assert result["missingBody"] is True
+        assert result["emptyMessage"] == "暂无可用描述文本"
+        assert result["createdVersion"] == "1.0"
+        assert result["updatedVersion"] == "2.0"

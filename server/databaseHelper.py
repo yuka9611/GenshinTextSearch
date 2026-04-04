@@ -2089,7 +2089,12 @@ _SOURCE_TYPE_TO_ENTITY_CODE = {
 def _build_source_type_join(source_type: str) -> tuple[str, list]:
     """根据来源类型构建 JOIN 子句，在数据库层过滤结果。"""
     if source_type == "dialogue":
-        return "JOIN dialogue _sj ON _sj.textHash = tm.hash ", []
+        return (
+            "JOIN dialogue _sj ON _sj.textHash = tm.hash "
+            "AND NOT EXISTS (SELECT 1 FROM questTalk _qt WHERE _qt.talkId = _sj.talkId) "
+            "AND (_sj.coopQuestId IS NULL OR _sj.coopQuestId = 0) ",
+            [],
+        )
     elif source_type == "voice":
         return "JOIN fetters _sj ON _sj.voiceFileTextTextMapHash = tm.hash ", []
     elif source_type == "quest":
@@ -2097,6 +2102,12 @@ def _build_source_type_join(source_type: str) -> tuple[str, list]:
     elif source_type in _SOURCE_TYPE_TO_ENTITY_CODE:
         code = _SOURCE_TYPE_TO_ENTITY_CODE[source_type]
         return "JOIN text_source_entity _sj ON _sj.text_hash = tm.hash AND _sj.source_type_code = ? ", [code]
+    elif source_type.startswith("custom_"):
+        try:
+            code = int(source_type[len("custom_"):])
+            return "JOIN text_source_entity _sj ON _sj.text_hash = tm.hash AND _sj.source_type_code = ? ", [code]
+        except ValueError:
+            pass
     return "", []
 
 
@@ -2529,6 +2540,116 @@ def selectEntityTextHashesByEntity(source_type_code: int, entity_id: int) -> lis
     ]
 
 
+def _build_catalog_entity_base_query(
+    keyword: str,
+    lang_code: int,
+    source_type_code: int | None = None,
+    sub_category: int | None = None,
+    created_version: str | None = None,
+    updated_version: str | None = None,
+) -> tuple[str, list]:
+    has_version = _has_version_dim() and _has_version_id_columns("textMap")
+    version_lang_code = config.getSourceLanguage()
+
+    sql = (
+        "WITH catalog_base AS ("
+        "SELECT "
+        "e.entity_id, "
+        "e.source_type_code, "
+        "MIN(e.title_hash) AS title_hash, "
+        "MIN(e.sub_category) AS sub_category, "
+        "MIN(tm_title.content) AS title_text, "
+    )
+    params: list = []
+
+    if has_version:
+        title_actual_update_expr = (
+            "lower(trim(coalesce(vdtc.version_tag, vdtc.raw_version, ''))) "
+            "!= lower(trim(coalesce(vdtu.version_tag, vdtu.raw_version, '')))"
+        )
+        body_actual_update_expr = (
+            "lower(trim(coalesce(vdbc.version_tag, vdbc.raw_version, ''))) "
+            "!= lower(trim(coalesce(vdbu.version_tag, vdbu.raw_version, '')))"
+        )
+        sql += (
+            "MIN(CASE WHEN tm_title_version.created_version_id IS NOT NULL THEN tm_title_version.created_version_id END) AS title_created_version_id, "
+            "MIN(CASE WHEN vdtc.version_sort_key IS NOT NULL THEN vdtc.version_sort_key END) AS title_created_sort_key, "
+            "MIN(CASE WHEN tm_body_version.created_version_id IS NOT NULL THEN tm_body_version.created_version_id END) AS body_created_version_id, "
+            "MIN(CASE WHEN vdbc.version_sort_key IS NOT NULL THEN vdbc.version_sort_key END) AS body_created_sort_key, "
+            f"MAX(CASE WHEN tm_title_version.updated_version_id IS NOT NULL AND {title_actual_update_expr} "
+            "THEN tm_title_version.updated_version_id END) AS title_updated_version_id, "
+            f"MAX(CASE WHEN tm_title_version.updated_version_id IS NOT NULL AND {title_actual_update_expr} "
+            "THEN vdtu.version_sort_key END) AS title_updated_sort_key, "
+            f"MAX(CASE WHEN tm_body_version.updated_version_id IS NOT NULL AND {body_actual_update_expr} "
+            "THEN tm_body_version.updated_version_id END) AS body_updated_version_id, "
+            f"MAX(CASE WHEN tm_body_version.updated_version_id IS NOT NULL AND {body_actual_update_expr} "
+            "THEN vdbu.version_sort_key END) AS body_updated_sort_key "
+        )
+    else:
+        sql += (
+            "NULL AS title_created_version_id, NULL AS title_created_sort_key, "
+            "NULL AS body_created_version_id, NULL AS body_created_sort_key, "
+            "NULL AS title_updated_version_id, NULL AS title_updated_sort_key, "
+            "NULL AS body_updated_version_id, NULL AS body_updated_sort_key "
+        )
+
+    sql += (
+        "FROM text_source_entity e "
+        "JOIN textMap tm_title ON tm_title.hash = e.title_hash AND tm_title.lang = ? "
+    )
+    params.append(lang_code)
+
+    if has_version:
+        sql += (
+            "LEFT JOIN textMap tm_title_version ON tm_title_version.hash = e.title_hash AND tm_title_version.lang = ? "
+            "LEFT JOIN textMap tm_body_version ON tm_body_version.hash = e.text_hash AND tm_body_version.lang = ? "
+            f"LEFT JOIN {_VERSION_DIM_TABLE} vdtc ON vdtc.id = tm_title_version.created_version_id "
+            f"LEFT JOIN {_VERSION_DIM_TABLE} vdtu ON vdtu.id = tm_title_version.updated_version_id "
+            f"LEFT JOIN {_VERSION_DIM_TABLE} vdbc ON vdbc.id = tm_body_version.created_version_id "
+            f"LEFT JOIN {_VERSION_DIM_TABLE} vdbu ON vdbu.id = tm_body_version.updated_version_id "
+        )
+        params.extend([version_lang_code, version_lang_code])
+
+    sql += "WHERE 1=1 "
+
+    if keyword:
+        exact, fuzzy = _build_like_patterns(keyword, lang_code)
+        sql += "AND (tm_title.content LIKE ? ESCAPE '\\' OR tm_title.content LIKE ? ESCAPE '\\') "
+        params.extend([exact, fuzzy])
+
+    if source_type_code is not None:
+        sql += "AND e.source_type_code = ? "
+        params.append(int(source_type_code))
+    if sub_category is not None:
+        sql += "AND e.sub_category = ? "
+        params.append(int(sub_category))
+
+    sql += (
+        "GROUP BY e.entity_id, e.source_type_code), "
+        "catalog_final AS ("
+        "SELECT "
+        "base.entity_id, "
+        "base.source_type_code, "
+        "base.title_hash, "
+        "base.sub_category, "
+        "base.title_text, "
+        "CASE "
+        "WHEN base.title_created_sort_key IS NULL THEN base.body_created_version_id "
+        "WHEN base.body_created_sort_key IS NULL THEN base.title_created_version_id "
+        "WHEN base.title_created_sort_key <= base.body_created_sort_key THEN base.title_created_version_id "
+        "ELSE base.body_created_version_id "
+        "END AS created_version_id, "
+        "CASE "
+        "WHEN base.title_updated_sort_key IS NULL THEN base.body_updated_version_id "
+        "WHEN base.body_updated_sort_key IS NULL THEN base.title_updated_version_id "
+        "WHEN base.title_updated_sort_key >= base.body_updated_sort_key THEN base.title_updated_version_id "
+        "ELSE base.body_updated_version_id "
+        "END AS updated_version_id "
+        "FROM catalog_base base) "
+    )
+    return sql, params
+
+
 def selectCatalogEntities(
     keyword: str,
     lang_code: int,
@@ -2536,27 +2657,65 @@ def selectCatalogEntities(
     sub_category: int | None = None,
     limit: int = 50,
     offset: int = 0,
-) -> list[tuple[int, int, int, int, str]]:
-    """Search entities by title name. Returns (entity_id, source_type_code, title_hash, sub_category, title_text)."""
+    created_version: str | None = None,
+    updated_version: str | None = None,
+) -> list[tuple]:
+    """Search entities by title name. Returns (entity_id, source_type_code, title_hash, sub_category, title_text, created_version, updated_version)."""
+    created = _normalize_version_filter(created_version)
+    updated = _normalize_version_filter(updated_version)
+    has_version = _has_version_dim() and _has_version_id_columns("textMap")
+    if not has_version and (created or updated):
+        return []
+
+    base_sql, params = _build_catalog_entity_base_query(
+        keyword,
+        lang_code,
+        source_type_code=source_type_code,
+        sub_category=sub_category,
+        created_version=created_version,
+        updated_version=updated_version,
+    )
+
     with closing(conn.cursor()) as cursor:
-        exact, fuzzy = _build_like_patterns(keyword, lang_code)
+        if has_version:
+            sql = (
+                base_sql +
+                "SELECT "
+                "base.entity_id, "
+                "base.source_type_code, "
+                "base.title_hash, "
+                "base.sub_category, "
+                "base.title_text, "
+                "vdc.raw_version AS created_version, "
+                "vdu.raw_version AS updated_version "
+                "FROM catalog_final base "
+                f"LEFT JOIN {_VERSION_DIM_TABLE} vdc ON vdc.id = base.created_version_id "
+                f"LEFT JOIN {_VERSION_DIM_TABLE} vdu ON vdu.id = base.updated_version_id "
+                "WHERE 1=1 "
+            )
+        else:
+            sql = (
+                base_sql +
+                "SELECT "
+                "base.entity_id, "
+                "base.source_type_code, "
+                "base.title_hash, "
+                "base.sub_category, "
+                "base.title_text, "
+                "NULL AS created_version, "
+                "NULL AS updated_version "
+                "FROM catalog_final base "
+                "WHERE 1=1 "
+            )
 
-        sql = (
-            "SELECT DISTINCT e.entity_id, e.source_type_code, e.title_hash, e.sub_category, tm.content "
-            "FROM text_source_entity e "
-            "JOIN textMap tm ON tm.hash = e.title_hash AND tm.lang = ? "
-            "WHERE (tm.content LIKE ? ESCAPE '\\' OR tm.content LIKE ? ESCAPE '\\') "
-        )
-        params: list = [lang_code, exact, fuzzy]
+        if created:
+            sql += "AND coalesce(vdc.version_tag, '') = ? "
+            params.append(created)
+        if updated:
+            sql += "AND coalesce(vdu.version_tag, '') = ? "
+            params.append(updated)
 
-        if source_type_code is not None:
-            sql += "AND e.source_type_code = ? "
-            params.append(int(source_type_code))
-        if sub_category is not None:
-            sql += "AND e.sub_category = ? "
-            params.append(int(sub_category))
-
-        sql += "ORDER BY length(tm.content), tm.content LIMIT ? OFFSET ?"
+        sql += "ORDER BY length(coalesce(base.title_text, '')), coalesce(base.title_text, '') LIMIT ? OFFSET ?"
         params.extend([limit, offset])
 
         try:
@@ -2571,32 +2730,124 @@ def countCatalogEntities(
     lang_code: int,
     source_type_code: int | None = None,
     sub_category: int | None = None,
+    created_version: str | None = None,
+    updated_version: str | None = None,
 ) -> int:
     """Count entities matching title name search."""
-    with closing(conn.cursor()) as cursor:
-        exact, fuzzy = _build_like_patterns(keyword, lang_code)
+    created = _normalize_version_filter(created_version)
+    updated = _normalize_version_filter(updated_version)
+    has_version = _has_version_dim() and _has_version_id_columns("textMap")
+    if not has_version and (created or updated):
+        return 0
 
-        sql = (
-            "SELECT COUNT(DISTINCT e.entity_id || ',' || e.source_type_code) "
-            "FROM text_source_entity e "
-            "JOIN textMap tm ON tm.hash = e.title_hash AND tm.lang = ? "
-            "WHERE (tm.content LIKE ? ESCAPE '\\' OR tm.content LIKE ? ESCAPE '\\') "
+    sql, params = _build_catalog_entity_base_query(
+        keyword,
+        lang_code,
+        source_type_code=source_type_code,
+        sub_category=sub_category,
+        created_version=created_version,
+        updated_version=updated_version,
+    )
+    if has_version:
+        sql += (
+            "SELECT COUNT(*) FROM catalog_final base "
+            f"LEFT JOIN {_VERSION_DIM_TABLE} vdc ON vdc.id = base.created_version_id "
+            f"LEFT JOIN {_VERSION_DIM_TABLE} vdu ON vdu.id = base.updated_version_id "
+            "WHERE 1=1 "
         )
-        params: list = [lang_code, exact, fuzzy]
+    else:
+        sql += "SELECT COUNT(*) FROM catalog_final base WHERE 1=1 "
+    if created:
+        sql += "AND coalesce(vdc.version_tag, '') = ? "
+        params.append(created)
+    if updated:
+        sql += "AND coalesce(vdu.version_tag, '') = ? "
+        params.append(updated)
 
-        if source_type_code is not None:
-            sql += "AND e.source_type_code = ? "
-            params.append(int(source_type_code))
-        if sub_category is not None:
-            sql += "AND e.sub_category = ? "
-            params.append(int(sub_category))
-
+    with closing(conn.cursor()) as cursor:
         try:
             cursor.execute(sql, params)
             row = cursor.fetchone()
             return int(row[0]) if row else 0
         except Exception:
             return 0
+
+
+def getCatalogEntityVersionInfo(source_type_code: int, entity_id: int, version_lang_code: int | None = None):
+    has_version = _has_version_dim() and _has_version_id_columns("textMap")
+    if not has_version:
+        return None, None
+
+    try:
+        source_type_code = int(source_type_code)
+        entity_id = int(entity_id)
+    except (TypeError, ValueError):
+        return None, None
+
+    version_lang = config.getSourceLanguage() if version_lang_code is None else version_lang_code
+    try:
+        version_lang = int(version_lang)
+    except (TypeError, ValueError):
+        version_lang = config.getSourceLanguage()
+
+    title_actual_update_expr = (
+        "lower(trim(coalesce(vdtc.version_tag, vdtc.raw_version, ''))) "
+        "!= lower(trim(coalesce(vdtu.version_tag, vdtu.raw_version, '')))"
+    )
+    body_actual_update_expr = (
+        "lower(trim(coalesce(vdbc.version_tag, vdbc.raw_version, ''))) "
+        "!= lower(trim(coalesce(vdbu.version_tag, vdbu.raw_version, '')))"
+    )
+
+    sql = (
+        "WITH entity_versions AS ("
+        "SELECT "
+        "MIN(CASE WHEN tm_title.created_version_id IS NOT NULL THEN tm_title.created_version_id END) AS title_created_version_id, "
+        "MIN(CASE WHEN vdtc.version_sort_key IS NOT NULL THEN vdtc.version_sort_key END) AS title_created_sort_key, "
+        "MIN(CASE WHEN tm_body.created_version_id IS NOT NULL THEN tm_body.created_version_id END) AS body_created_version_id, "
+        "MIN(CASE WHEN vdbc.version_sort_key IS NOT NULL THEN vdbc.version_sort_key END) AS body_created_sort_key, "
+        f"MAX(CASE WHEN tm_title.updated_version_id IS NOT NULL AND {title_actual_update_expr} THEN tm_title.updated_version_id END) AS title_updated_version_id, "
+        f"MAX(CASE WHEN tm_title.updated_version_id IS NOT NULL AND {title_actual_update_expr} THEN vdtu.version_sort_key END) AS title_updated_sort_key, "
+        f"MAX(CASE WHEN tm_body.updated_version_id IS NOT NULL AND {body_actual_update_expr} THEN tm_body.updated_version_id END) AS body_updated_version_id, "
+        f"MAX(CASE WHEN tm_body.updated_version_id IS NOT NULL AND {body_actual_update_expr} THEN vdbu.version_sort_key END) AS body_updated_sort_key "
+        "FROM text_source_entity e "
+        "LEFT JOIN textMap tm_title ON tm_title.hash = e.title_hash AND tm_title.lang = ? "
+        "LEFT JOIN textMap tm_body ON tm_body.hash = e.text_hash AND tm_body.lang = ? "
+        f"LEFT JOIN {_VERSION_DIM_TABLE} vdtc ON vdtc.id = tm_title.created_version_id "
+        f"LEFT JOIN {_VERSION_DIM_TABLE} vdtu ON vdtu.id = tm_title.updated_version_id "
+        f"LEFT JOIN {_VERSION_DIM_TABLE} vdbc ON vdbc.id = tm_body.created_version_id "
+        f"LEFT JOIN {_VERSION_DIM_TABLE} vdbu ON vdbu.id = tm_body.updated_version_id "
+        "WHERE e.source_type_code = ? AND e.entity_id = ?), "
+        "catalog_final AS ("
+        "SELECT "
+        "CASE "
+        "WHEN base.title_created_sort_key IS NULL THEN base.body_created_version_id "
+        "WHEN base.body_created_sort_key IS NULL THEN base.title_created_version_id "
+        "WHEN base.title_created_sort_key <= base.body_created_sort_key THEN base.title_created_version_id "
+        "ELSE base.body_created_version_id "
+        "END AS created_version_id, "
+        "CASE "
+        "WHEN base.title_updated_sort_key IS NULL THEN base.body_updated_version_id "
+        "WHEN base.body_updated_sort_key IS NULL THEN base.title_updated_version_id "
+        "WHEN base.title_updated_sort_key >= base.body_updated_sort_key THEN base.title_updated_version_id "
+        "ELSE base.body_updated_version_id "
+        "END AS updated_version_id "
+        "FROM entity_versions base) "
+        "SELECT vdc.raw_version AS created_version, vdu.raw_version AS updated_version "
+        "FROM catalog_final base "
+        f"LEFT JOIN {_VERSION_DIM_TABLE} vdc ON vdc.id = base.created_version_id "
+        f"LEFT JOIN {_VERSION_DIM_TABLE} vdu ON vdu.id = base.updated_version_id"
+    )
+
+    with closing(conn.cursor()) as cursor:
+        try:
+            cursor.execute(sql, (version_lang, version_lang, source_type_code, entity_id))
+            row = cursor.fetchone()
+            if not row:
+                return None, None
+            return row[0], row[1]
+        except Exception:
+            return None, None
 
 
 def getCharterName(avatarId: int, langCode: int = 1):
@@ -4491,11 +4742,11 @@ def getQuestChapterName(questId: int, langCode: int):
         return chapterTitleText
 
 
-def getQuestVersionInfo(questId: int):
+def getQuestVersionInfo(questId: int, langCode: int | None = None):
     if not _has_version_id_columns("quest"):
         return None, None
     with closing(conn.cursor()) as cursor:
-        version_select = _version_select_expr("q", "quest")
+        version_select = _version_select_expr("q", "quest", langCode)
         sql = f"select {version_select} from quest q where q.questId=? limit 1"
         cursor.execute(sql, (questId,))
         row = cursor.fetchone()
