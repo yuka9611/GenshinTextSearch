@@ -191,7 +191,223 @@ class TestKeywordQueryEndpoint:
         assert data["data"]["total"] == 1
 
 
+class TestCatalogSearchEndpoint:
+    def test_catalog_search_rejects_empty_payload(self):
+        app = _app()
+        payload = {"langCode": 1}
+        with _request_context(app, "/api/catalogSearch", method="POST", json_body=payload):
+            resp = api.catalogSearch()
+
+        data = resp.get_json()
+        assert resp.status_code == 200
+        assert data["code"] == 400
+        assert data["msg"] == "keyword or a filter is required"
+
+    def test_catalog_search_accepts_created_version_only(self, monkeypatch):
+        calls = {}
+
+        def fake_search_catalog(*args, **kwargs):
+            calls["args"] = args
+            calls["kwargs"] = kwargs
+            return {"contents": [], "total": 0, "page": 1, "pageSize": 50, "time": 1.23}
+
+        monkeypatch.setattr(api.controllers_module, "searchCatalog", fake_search_catalog)
+
+        app = _app()
+        payload = {"langCode": 1, "createdVersion": "5.0"}
+        with _request_context(app, "/api/catalogSearch", method="POST", json_body=payload):
+            resp = api.catalogSearch()
+
+        data = resp.get_json()
+        assert resp.status_code == 200
+        assert data["code"] == 200
+        assert calls["args"] == ("", 1, None, None, 1, 50)
+        assert calls["kwargs"] == {"createdVersion": "5.0", "updatedVersion": None}
+
+    def test_catalog_search_accepts_updated_version_only(self, monkeypatch):
+        calls = {}
+
+        def fake_search_catalog(*args, **kwargs):
+            calls["args"] = args
+            calls["kwargs"] = kwargs
+            return {"contents": [], "total": 0, "page": 1, "pageSize": 50, "time": 1.23}
+
+        monkeypatch.setattr(api.controllers_module, "searchCatalog", fake_search_catalog)
+
+        app = _app()
+        payload = {"langCode": 1, "updatedVersion": "5.1"}
+        with _request_context(app, "/api/catalogSearch", method="POST", json_body=payload):
+            resp = api.catalogSearch()
+
+        data = resp.get_json()
+        assert resp.status_code == 200
+        assert data["code"] == 200
+        assert calls["args"] == ("", 1, None, None, 1, 50)
+        assert calls["kwargs"] == {"createdVersion": None, "updatedVersion": "5.1"}
+
+    def test_catalog_search_accepts_keyword_search(self, monkeypatch):
+        calls = {}
+
+        def fake_search_catalog(*args, **kwargs):
+            calls["args"] = args
+            calls["kwargs"] = kwargs
+            return {"contents": [{"entityId": 1}], "total": 1, "page": 1, "pageSize": 50, "time": 1.23}
+
+        monkeypatch.setattr(api.controllers_module, "searchCatalog", fake_search_catalog)
+
+        app = _app()
+        payload = {"langCode": 1, "keyword": "风神"}
+        with _request_context(app, "/api/catalogSearch", method="POST", json_body=payload):
+            resp = api.catalogSearch()
+
+        data = resp.get_json()
+        assert resp.status_code == 200
+        assert data["code"] == 200
+        assert calls["args"] == ("风神", 1, None, None, 1, 50)
+        assert calls["kwargs"] == {"createdVersion": None, "updatedVersion": None}
+
+
+class TestAssetDirEndpoints:
+    def test_set_asset_dir_rejects_invalid_directory(self, monkeypatch):
+        monkeypatch.setattr(api.os.path, "isdir", lambda path: False)
+
+        app = _app()
+        payload = {"assetDir": "/invalid/path"}
+        with _request_context(app, "/api/setAssetDir", method="POST", json_body=payload):
+            resp = api.setAssetDir()
+
+        data = resp.get_json()
+        assert resp.status_code == 200
+        assert data["code"] == 400
+        assert data["msg"] == "Invalid directory"
+
+    def test_set_asset_dir_returns_normalized_path(self, monkeypatch):
+        import config
+        import languagePackReader
+
+        state = {"assetDir": "", "saved": False, "reloaded": False}
+
+        monkeypatch.setattr(api.os.path, "isdir", lambda path: True)
+        monkeypatch.setattr(config, "setAssetDir", lambda path: state.__setitem__("assetDir", "/game/GenshinImpact_Data"))
+        monkeypatch.setattr(config, "getAssetDir", lambda: state["assetDir"])
+        monkeypatch.setattr(config, "isAssetDirValid", lambda: True)
+        monkeypatch.setattr(config, "saveConfig", lambda: state.__setitem__("saved", True))
+        monkeypatch.setattr(languagePackReader, "reloadLangPackages", lambda: state.__setitem__("reloaded", True))
+
+        app = _app()
+        payload = {"assetDir": "/game/GenshinImpact_Data/StreamingAssets"}
+        with _request_context(app, "/api/setAssetDir", method="POST", json_body=payload):
+            resp = api.setAssetDir()
+
+        data = resp.get_json()
+        assert resp.status_code == 200
+        assert data["code"] == 200
+        assert data["data"]["assetDir"] == "/game/GenshinImpact_Data"
+        assert data["data"]["assetDirValid"] is True
+        assert state["saved"] is True
+        assert state["reloaded"] is True
+
+    def test_pick_asset_dir_cancel_returns_cancel_flag(self, monkeypatch):
+        import config
+
+        monkeypatch.setattr(api.controllers_module, "pickAssetDirViaDialog", lambda: None)
+        monkeypatch.setattr(config, "getAssetDir", lambda: "/existing/path")
+        monkeypatch.setattr(config, "isAssetDirValid", lambda: True)
+
+        app = _app()
+        with _request_context(app, "/api/pickAssetDir", method="POST", json_body={}):
+            resp = api.pickAssetDir()
+
+        data = resp.get_json()
+        assert resp.status_code == 200
+        assert data["code"] == 200
+        assert data["data"]["cancel"] is True
+        assert data["data"]["dialogUnavailable"] is False
+        assert data["data"]["assetDir"] == "/existing/path"
+
+    def test_pick_asset_dir_reports_dialog_unavailable(self, monkeypatch):
+        import config
+
+        class FakeDialogError(RuntimeError):
+            pass
+
+        def _raise():
+            raise FakeDialogError("no gui")
+
+        monkeypatch.setattr(api.controllers_module, "AssetDirDialogUnavailableError", FakeDialogError, raising=False)
+        monkeypatch.setattr(api.controllers_module, "pickAssetDirViaDialog", _raise)
+        monkeypatch.setattr(config, "getAssetDir", lambda: "/existing/path")
+        monkeypatch.setattr(config, "isAssetDirValid", lambda: False)
+
+        app = _app()
+        with _request_context(app, "/api/pickAssetDir", method="POST", json_body={}):
+            resp = api.pickAssetDir()
+
+        data = resp.get_json()
+        assert resp.status_code == 200
+        assert data["code"] == 501
+        assert data["data"]["cancel"] is False
+        assert data["data"]["dialogUnavailable"] is True
+        assert data["data"]["assetDir"] == "/existing/path"
+
+    def test_pick_asset_dir_returns_normalized_path(self, monkeypatch):
+        import config
+        import languagePackReader
+
+        state = {"assetDir": "", "saved": False, "reloaded": False}
+
+        monkeypatch.setattr(api.os.path, "isdir", lambda path: True)
+        monkeypatch.setattr(api.controllers_module, "pickAssetDirViaDialog", lambda: "/game/GenshinImpact_Data/StreamingAssets")
+        monkeypatch.setattr(config, "setAssetDir", lambda path: state.__setitem__("assetDir", "/game/GenshinImpact_Data"))
+        monkeypatch.setattr(config, "getAssetDir", lambda: state["assetDir"])
+        monkeypatch.setattr(config, "isAssetDirValid", lambda: True)
+        monkeypatch.setattr(config, "saveConfig", lambda: state.__setitem__("saved", True))
+        monkeypatch.setattr(languagePackReader, "reloadLangPackages", lambda: state.__setitem__("reloaded", True))
+
+        app = _app()
+        with _request_context(app, "/api/pickAssetDir", method="POST", json_body={}):
+            resp = api.pickAssetDir()
+
+        data = resp.get_json()
+        assert resp.status_code == 200
+        assert data["code"] == 200
+        assert data["data"]["cancel"] is False
+        assert data["data"]["dialogUnavailable"] is False
+        assert data["data"]["assetDir"] == "/game/GenshinImpact_Data"
+        assert state["saved"] is True
+        assert state["reloaded"] is True
+
+
 class TestImportedEndpoints:
+    def test_get_quest_dialogues_preserves_version_fields(self, monkeypatch):
+        monkeypatch.setattr(
+            api.controllers_module,
+            "getQuestDialogues",
+            lambda quest_id, search_lang, page, page_size: (
+                {
+                    "talkQuestName": "风起鹤归",
+                    "questId": quest_id,
+                    "dialogues": [],
+                    "createdVersion": "4.4",
+                    "updatedVersion": "4.7",
+                    "createdVersionRaw": "Version 4.4",
+                    "updatedVersionRaw": "Version 4.7",
+                },
+                0,
+            ),
+        )
+
+        app = _app()
+        payload = {"questId": 42, "searchLang": 1}
+        with _request_context(app, "/api/getQuestDialogues", method="POST", json_body=payload):
+            resp = api.getQuestDialogues()
+
+        data = resp.get_json()
+        assert resp.status_code == 200
+        assert data["code"] == 200
+        assert data["data"]["contents"]["createdVersion"] == "4.4"
+        assert data["data"]["contents"]["updatedVersion"] == "4.7"
+
     def test_available_versions(self, monkeypatch):
         monkeypatch.setattr(api.controllers_module, "getAvailableVersions", lambda: ["4.0", "4.1", "4.2"])
 

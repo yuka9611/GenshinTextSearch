@@ -318,7 +318,7 @@ def setAssetDir():
 
     return jsonify({
         "data": {
-            "assetDir": assetDir,
+            "assetDir": config.getAssetDir(),
             "assetDirValid": config.isAssetDirValid()
         },
         "code": 200,
@@ -330,11 +330,27 @@ def pickAssetDir():
     import config
     import languagePackReader
 
-    picked = controllers_module.pickAssetDirViaDialog() # type: ignore
+    dialog_error = getattr(controllers_module, "AssetDirDialogUnavailableError", RuntimeError)
+    try:
+        picked = controllers_module.pickAssetDirViaDialog() # type: ignore
+    except dialog_error as exc:
+        current_app.logger.warning("Asset directory dialog is unavailable: %s", exc)
+        return jsonify({
+            "data": {
+                "cancel": False,
+                "dialogUnavailable": True,
+                "assetDir": config.getAssetDir(),
+                "assetDirValid": config.isAssetDirValid()
+            },
+            "code": 501,
+            "msg": "Asset directory dialog is unavailable"
+        })
+
     if not picked:
         return jsonify({
             "data": {
                 "cancel": True,
+                "dialogUnavailable": False,
                 "assetDir": config.getAssetDir(),
                 "assetDirValid": config.isAssetDirValid()
             },
@@ -352,7 +368,8 @@ def pickAssetDir():
     return jsonify({
         "data": {
             "cancel": False,
-            "assetDir": picked,
+            "dialogUnavailable": False,
+            "assetDir": config.getAssetDir(),
             "assetDirValid": config.isAssetDirValid()
         },
         "code": 200,
@@ -1043,16 +1060,27 @@ def catalogSearch():
     langCode = request.json.get("langCode")
     sourceTypeCode = request.json.get("sourceTypeCode")
     subCategory = request.json.get("subCategory")
+    createdVersion = request.json.get("createdVersion", "")
+    updatedVersion = request.json.get("updatedVersion", "")
     page = int(request.json.get("page", 1))
     pageSize = int(request.json.get("pageSize", 50))
 
-    if not keyword or langCode is None:
-        return jsonify({"data": None, "code": 400, "msg": "keyword and langCode are required"})
+    if langCode is None:
+        return jsonify({"data": None, "code": 400, "msg": "langCode is required"})
 
     stc = int(sourceTypeCode) if sourceTypeCode is not None and sourceTypeCode != "" else None
     sub = int(subCategory) if subCategory is not None and subCategory != "" else None
+    has_created = bool(str(createdVersion or "").strip())
+    has_updated = bool(str(updatedVersion or "").strip())
 
-    result = controllers_module.searchCatalog(keyword, int(langCode), stc, sub, page, pageSize)  # type: ignore
+    if not keyword and stc is None and sub is None and not has_created and not has_updated:
+        return jsonify({"data": None, "code": 400, "msg": "keyword or a filter is required"})
+
+    result = controllers_module.searchCatalog(
+        keyword, int(langCode), stc, sub, page, pageSize,
+        createdVersion=createdVersion or None,
+        updatedVersion=updatedVersion or None,
+    )
     return jsonify({"data": result, "code": 200, "msg": "ok"})
 
 
