@@ -9,12 +9,17 @@ html {
     color-scheme: light;
 }
 
+html[data-theme="dark"] {
+    color-scheme: dark;
+}
+
 body {
     overflow-y: hidden;
     overflow-x: hidden;
     font-family: var(--font-body);
     color: var(--theme-text);
     background: var(--app-background);
+    transition: background 0.4s ease, color 0.25s ease;
 }
 
 body::before {
@@ -27,6 +32,14 @@ body::before {
         radial-gradient(circle at bottom left, rgba(183, 140, 79, 0.10), transparent 25%),
         linear-gradient(135deg, rgba(47, 105, 101, 0.06), transparent 36%);
     z-index: -1;
+    transition: background 0.4s ease;
+}
+
+[data-theme="dark"] body::before {
+    background:
+        radial-gradient(circle at top right, rgba(74, 154, 149, 0.08), transparent 32%),
+        radial-gradient(circle at bottom left, rgba(212, 168, 98, 0.04), transparent 25%),
+        linear-gradient(135deg, rgba(74, 154, 149, 0.03), transparent 36%);
 }
 
 #app {
@@ -118,6 +131,51 @@ body::before {
     --el-box-shadow-light: 0 16px 32px rgba(44, 57, 54, 0.12);
 }
 
+/* ============================================================
+   DARK THEME OVERRIDES
+   ============================================================ */
+[data-theme="dark"] {
+    --theme-primary: #4a9a95;
+    --theme-primary-rgb: 74, 154, 149;
+    --theme-primary-strong: #3a8480;
+    --theme-primary-soft: rgba(74, 154, 149, 0.12);
+    --theme-accent: #d4a862;
+    --theme-accent-soft: rgba(212, 168, 98, 0.12);
+    --theme-ink: #e0e5e4;
+    --theme-text: #e0e5e4;
+    --theme-text-muted: #8fa19d;
+    --theme-text-soft: #5d706c;
+    --theme-border: rgba(74, 154, 149, 0.18);
+    --theme-border-strong: rgba(74, 154, 149, 0.32);
+    --theme-card: rgba(30, 40, 37, 0.96);
+    --theme-card-strong: #1e2826;
+    --theme-surface: #1e2826;
+    --theme-surface-strong: #2a3834;
+    --theme-highlight: #2a3834;
+    --theme-danger: #cf6e63;
+    --theme-warning: #d49a4e;
+    --theme-success: #7aab74;
+    --app-background:
+        linear-gradient(180deg, #141c1b, #1a2422);
+
+    /* Element Plus dark overrides */
+    --el-color-primary: #4a9a95;
+    --el-text-color-primary: #e0e5e4;
+    --el-text-color-regular: #8fa19d;
+    --el-text-color-secondary: #5d706c;
+    --el-border-color: rgba(74, 154, 149, 0.18);
+    --el-border-color-light: rgba(74, 154, 149, 0.14);
+    --el-border-color-lighter: rgba(74, 154, 149, 0.10);
+    --el-bg-color: #1e2826;
+    --el-bg-color-page: transparent;
+    --el-fill-color-blank: rgba(30, 40, 37, 0.94);
+    --el-fill-color-light: rgba(74, 154, 149, 0.08);
+    --el-fill-color-lighter: rgba(30, 40, 37, 0.6);
+    --el-fill-color-extra-light: rgba(30, 40, 37, 0.4);
+    --el-mask-color-extra-light: rgba(0, 0, 0, 0.60);
+    --el-box-shadow-light: 0 16px 32px rgba(0, 0, 0, 0.24);
+}
+
 @media (max-width: 1024px) {
     :root {
         --page-width: calc(100% - 32px);
@@ -127,7 +185,20 @@ body::before {
     }
 }
 
-@media (max-width: 720px) {
+/* Narrow window — sidebar collapses to icon-only */
+@media (max-width: 860px) {
+    :root {
+        --sidebar-width: 64px;
+        --sidebar-min-width: 64px;
+        --sidebar-max-width: 64px;
+        --sidebarmenu-padding: 4px 4px 12px;
+        --sidebarmenu-item-padding: 0;
+        --sidebarmenu-icon-margin: 0;
+    }
+}
+
+/* Very narrow window — sidebar hidden */
+@media (max-width: 680px) {
     :root {
         --page-width: 100%;
         --page-padding: 18px;
@@ -137,30 +208,7 @@ body::before {
         --page-border: none;
         --page-gap: 18px;
         --header-padding-x: 16px;
-        --header-height: 60px;
-        --sidebar-width: 100%;
-        --sidebar-min-width: 0;
-        --sidebar-max-width: none;
-        --user-info-padding: 14px 16px 8px;
-        --content-direction: column;
-        --content-width: 100%;
-        --content-scroll: touch;
-        --content-scrollbar-padding: calc(var(--scrollbar-width, 0px) + 8px);
-        --sidebar-display: flex;
-        --sidebar-align-items: stretch;
-        --sidebar-wrap: wrap;
-        --sidebar-align-self: stretch;
-        --sidebar-border: none;
-        --sidebar-gap: 10px;
-        --sidebarmenu-display: flex;
-        --sidebarmenu-direction: row;
-        --sidebarmenu-wrap: wrap;
-        --sidebarmenu-padding: 0 4px 6px;
-        --sidebarmenu-gap: 8px;
-        --sidebarmenu-max-width: 100%;
-        --user-info-border: none;
-        --sidebarmenu-item-padding: 0 14px;
-        --sidebarmenu-icon-margin: 8px;
+        --sidebar-display: none;
         --sticky-top: 10px;
         --floating-button-size: 56px;
     }
@@ -195,6 +243,19 @@ i.centerIcon{
     background: rgba(var(--theme-primary-rgb), 0.4);
 }
 
+[data-theme="dark"] ::-webkit-scrollbar-track {
+    background: rgba(0, 0, 0, 0.18);
+}
+
+[data-theme="dark"] ::-webkit-scrollbar-thumb {
+    background: rgba(var(--theme-primary-rgb), 0.28);
+    border-color: rgba(0, 0, 0, 0.3);
+}
+
+[data-theme="dark"] ::-webkit-scrollbar-thumb:hover {
+    background: rgba(var(--theme-primary-rgb), 0.44);
+}
+
 .stickySearchSection {
     position: sticky;
     top: 0;
@@ -208,6 +269,15 @@ i.centerIcon{
         rgba(255, 255, 255, 0.82);
     box-shadow: 0 14px 26px rgba(44, 57, 54, 0.08);
     backdrop-filter: blur(16px);
+    transition: background 0.25s ease, border-color 0.25s ease, box-shadow 0.25s ease;
+}
+
+[data-theme="dark"] .stickySearchSection {
+    border-color: var(--theme-border);
+    background:
+        linear-gradient(180deg, rgba(30, 40, 37, 0.97), rgba(22, 32, 30, 0.95)),
+        rgba(20, 28, 27, 0.82);
+    box-shadow: 0 14px 26px rgba(0, 0, 0, 0.16);
 }
 
 .stickySearchSection::before {
@@ -217,6 +287,10 @@ i.centerIcon{
     border-radius: inherit;
     border: 1px solid rgba(255, 255, 255, 0.55);
     pointer-events: none;
+}
+
+[data-theme="dark"] .stickySearchSection::before {
+    border-color: rgba(255, 255, 255, 0.04);
 }
 
 .stickySearchSection > * {
@@ -259,6 +333,16 @@ i.centerIcon{
     background: rgba(255, 255, 255, 0.95);
 }
 
+[data-theme="dark"] .el-button:not(.el-button--primary) {
+    background: rgba(30, 40, 37, 0.88);
+    border-color: var(--theme-border);
+}
+
+[data-theme="dark"] .el-button:not(.el-button--primary):hover,
+[data-theme="dark"] .el-button:not(.el-button--primary):focus-visible {
+    background: rgba(42, 56, 52, 0.95);
+}
+
 .el-input__wrapper,
 .el-textarea__inner,
 .el-select .el-input__wrapper {
@@ -266,6 +350,13 @@ i.centerIcon{
     background: rgba(255, 251, 244, 0.92);
     box-shadow: 0 0 0 1px rgba(190, 164, 124, 0.32) inset;
     transition: box-shadow 0.18s ease, transform 0.18s ease;
+}
+
+[data-theme="dark"] .el-input__wrapper,
+[data-theme="dark"] .el-textarea__inner,
+[data-theme="dark"] .el-select .el-input__wrapper {
+    background: rgba(22, 32, 30, 0.92);
+    box-shadow: 0 0 0 1px var(--theme-border) inset;
 }
 
 .el-input__wrapper:hover,
@@ -289,12 +380,24 @@ i.centerIcon{
     color: var(--theme-text);
 }
 
+[data-theme="dark"] .el-input-group__prepend,
+[data-theme="dark"] .el-input-group__append {
+    border-color: var(--theme-border);
+}
+
 .el-card {
     border-radius: 22px;
     border: 1px solid rgba(190, 164, 124, 0.36);
     background:
         linear-gradient(180deg, rgba(255, 253, 248, 0.98), rgba(251, 245, 235, 0.96));
     box-shadow: 0 12px 26px rgba(44, 57, 54, 0.08);
+    transition: background 0.25s ease, border-color 0.25s ease;
+}
+
+[data-theme="dark"] .el-card {
+    border-color: var(--theme-border);
+    background: var(--theme-card);
+    box-shadow: 0 12px 26px rgba(0, 0, 0, 0.16);
 }
 
 .el-card__body {
@@ -329,6 +432,13 @@ i.centerIcon{
     box-shadow: 0 20px 36px rgba(44, 57, 54, 0.16);
 }
 
+[data-theme="dark"] .el-transfer-panel,
+[data-theme="dark"] .el-dialog {
+    border-color: var(--theme-border-strong);
+    background: linear-gradient(180deg, rgba(30, 40, 37, 0.98), rgba(22, 32, 30, 0.96));
+    box-shadow: 0 20px 36px rgba(0, 0, 0, 0.32);
+}
+
 .el-form-item__label {
     color: var(--theme-text);
     font-weight: 600;
@@ -342,6 +452,14 @@ i.centerIcon{
     --el-table-header-bg-color: rgba(243, 231, 211, 0.82);
     --el-table-row-hover-bg-color: rgba(47, 105, 101, 0.06);
     --el-table-tr-bg-color: rgba(255, 253, 248, 0.96);
+}
+
+[data-theme="dark"] .el-table {
+    border-color: var(--theme-border);
+    --el-table-border-color: var(--theme-border);
+    --el-table-header-bg-color: rgba(42, 56, 52, 0.82);
+    --el-table-row-hover-bg-color: rgba(74, 154, 149, 0.08);
+    --el-table-tr-bg-color: rgba(30, 40, 37, 0.96);
 }
 
 .el-table th.el-table__cell {
@@ -458,8 +576,15 @@ input[type=number]::-webkit-outer-spin-button {
 }
 
 .keywordSpan {
-    font-weight: bold;
+    background: linear-gradient(135deg, rgba(183, 140, 79, 0.25), rgba(183, 140, 79, 0.15));
     color: var(--theme-accent);
+    padding: 1px 4px;
+    border-radius: 4px;
+    font-weight: 600;
+}
+
+[data-theme="dark"] .keywordSpan {
+    background: linear-gradient(135deg, rgba(212, 168, 98, 0.22), rgba(212, 168, 98, 0.12));
 }
 
 .pageTitle {
@@ -471,6 +596,10 @@ input[type=number]::-webkit-outer-spin-button {
     font-weight: 700;
     letter-spacing: 0.01em;
     border-bottom: 1px solid rgba(190, 164, 124, 0.35);
+}
+
+[data-theme="dark"] .pageTitle {
+    border-bottom-color: var(--theme-border);
 }
 
 .pageTitle::after {
@@ -497,6 +626,16 @@ input[type=number]::-webkit-outer-spin-button {
     flex-direction: column;
     gap: 16px;
     overflow: visible;
+    transition: background 0.25s ease, border-color 0.25s ease;
+}
+
+[data-theme="dark"] .pageShell {
+    background: linear-gradient(180deg, rgba(30, 40, 37, 0.98), rgba(22, 32, 30, 0.94));
+    border-color: var(--theme-border);
+}
+
+[data-theme="dark"] .ProseMirror {
+    color: var(--theme-text);
 }
 
 .pageShell--compact {
@@ -558,8 +697,7 @@ input[type=number]::-webkit-outer-spin-button {
 }
 
 .textResultItem:not(:last-child) {
-    border-bottom: 1px solid rgba(190, 164, 124, 0.18);
-    padding-bottom: 4px;
+    margin-bottom: 16px;
 }
 
 .searchSummary,
@@ -612,7 +750,7 @@ input[type=number]::-webkit-outer-spin-button {
     color: #888;
 }
 
-@media (max-width: 720px) {
+@media (max-width: 860px) {
     .stickySearchSection {
         top: 0;
         margin: 0;
@@ -620,6 +758,13 @@ input[type=number]::-webkit-outer-spin-button {
         border-radius: 18px;
     }
 
+    .pageTitle {
+        padding-bottom: 14px;
+        font-size: 1.45rem;
+    }
+}
+
+@media (max-width: 680px) {
     .audioDock {
         position: fixed !important;
         left: 8px;
@@ -643,11 +788,14 @@ input[type=number]::-webkit-outer-spin-button {
         z-index: 3;
         box-shadow: 0 12px 18px rgba(var(--theme-primary-rgb), 0.24);
     }
+<<<<<<< Updated upstream
 
     .pageTitle {
         padding-bottom: 14px;
         font-size: 1.45rem;
     }
+=======
+>>>>>>> Stashed changes
 }
 
 .stickySearchSection {
