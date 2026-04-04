@@ -1,5 +1,4 @@
 <script setup>
-import { VideoPlay } from "@element-plus/icons-vue";
 import { ElMessage } from "element-plus";
 import api from "@/api/keywordQuery";
 import * as converter from "@/assets/wem2wav";
@@ -87,8 +86,14 @@ defineExpose({ getAudioUrl, scrollTo });
 
 <template>
     <el-tooltip :content="tooltipText">
-        <span ref="icon" class="voiceButtonWrapper" :class="{ isDisabled: disabled }">
-            <el-icon @click="playVoice"><VideoPlay /></el-icon>
+        <span
+            ref="icon"
+            class="voiceButtonWrapper"
+            :class="{ isDisabled: disabled }"
+            role="button"
+            @click="playVoice"
+        >
+            <i class="fi fi-rr-play"></i>
         </span>
     </el-tooltip>
 </template>
@@ -107,7 +112,32 @@ defineExpose({ getAudioUrl, scrollTo });
     cursor: pointer;
     position: relative;
     overflow: hidden;
-    transition: transform 0.18s ease, background-color 0.18s ease, border-color 0.18s ease, color 0.18s ease, box-shadow 0.18s ease;
+    transition: transform 0.15s ease, background-color 0.15s ease, border-color 0.15s ease, color 0.15s ease, box-shadow 0.15s ease;
+}
+
+.voiceButtonWrapper .fi {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 100%;
+    height: 100%;
+    font-size: 13px;
+    line-height: 1;
+}
+
+.voiceButtonWrapper::after {
+    content: "";
+    position: absolute;
+    inset: 0;
+    border-radius: 50%;
+    background: rgba(255, 255, 255, 0.3);
+    transform: scale(0);
+    transition: transform 0.4s ease;
+}
+
+.voiceButtonWrapper:active::after {
+    transform: scale(2.5);
+    transition-duration: 0s;
 }
 
 .voiceButtonWrapper:not(.isDisabled):hover {
@@ -116,11 +146,6 @@ defineExpose({ getAudioUrl, scrollTo });
     color: #fff;
     box-shadow: 0 4px 14px rgba(47, 105, 101, 0.25);
     transform: translateY(-1px);
-}
-
-.voiceButtonWrapper :deep(.el-icon) {
-    font-size: 15px;
-    cursor: pointer;
 }
 
 .voiceButtonWrapper.isDisabled {

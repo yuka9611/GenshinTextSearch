@@ -12,7 +12,6 @@ const uiText = {
   entityId: 'ID',
   language: '显示语言',
   empty: '未找到条目来源数据（可能需要更新数据库）',
-  viewText: '查看文本',
 }
 
 const route = useRoute()
@@ -40,11 +39,24 @@ const entityId = computed(() => {
 const keyword = computed(() => String(route.query.keyword || ''))
 
 const title = computed(() => entity.value?.title || uiText.pageTitle)
-const metaLabel = computed(() => {
-  const main = entity.value?.sourceTypeLabel || ''
-  const sub = entity.value?.subCategoryLabel || ''
-  return sub ? `${main} · ${sub}` : main
-})
+const entryCount = computed(() => entity.value?.entries?.length || 0)
+const emptyDescription = computed(() => entity.value?.emptyMessage || uiText.empty)
+
+const resolveVersionValue = (versionTag, rawVersion) => {
+  if (versionTag) return String(versionTag).trim()
+  if (rawVersion) return String(rawVersion).trim()
+  return ''
+}
+
+const formatVersionTag = (versionTag, rawVersion) => {
+  return resolveVersionValue(versionTag, rawVersion) || '未知'
+}
+
+const shouldShowUpdatedVersionTag = (createdTag, createdRaw, updatedTag, updatedRaw) => {
+  const updatedValue = resolveVersionValue(updatedTag, updatedRaw)
+  if (!updatedValue) return false
+  return updatedValue !== resolveVersionValue(createdTag, createdRaw)
+}
 
 const resolveDisplayText = (textObj) => {
   if (!textObj || !textObj.translates) return ''
@@ -72,34 +84,6 @@ const loadEntity = async () => {
   }
 }
 
-const gotoText = (entry) => {
-  const detail = entry?.detailQuery
-  if (detail?.kind === 'readable') {
-    router.push({
-      path: '/talk',
-      query: {
-        readableId: detail.readableId ?? entry?.readableId,
-        fileName: detail.fileName ?? entry?.fileName,
-        keyword: keyword.value,
-        searchLang: selectedInputLanguage.value,
-      },
-    })
-    return
-  }
-
-  const textHash = detail?.textHash ?? entry?.textHash
-  if (textHash === undefined || textHash === null) return
-
-  router.push({
-    path: '/talk',
-    query: {
-      textHash,
-      keyword: keyword.value,
-      searchLang: selectedInputLanguage.value,
-    },
-  })
-}
-
 onBeforeMount(async () => {
   await loadLanguages()
   if (route.query.searchLang !== undefined && route.query.searchLang !== null && String(route.query.searchLang).trim() !== '') {
@@ -118,35 +102,51 @@ watch(selectedInputLanguage, async () => {
 </script>
 
 <template>
-  <div class="viewWrapper pageShell">
-    <div class="pageHeader">
+  <div class="viewWrapper pageShell entityView">
+    <div class="pageHeader entityHeader">
       <div class="headerLeft">
+        <div v-if="entity" class="entityMetaTags tagRow">
+          <el-tag v-if="entity.sourceTypeLabel" effect="plain">{{ entity.sourceTypeLabel }}</el-tag>
+          <el-tag v-if="entity.subCategoryLabel" effect="plain" type="info">{{ entity.subCategoryLabel }}</el-tag>
+          <el-tag effect="plain">{{ uiText.entityId }}: {{ entity.entityId }}</el-tag>
+        </div>
         <h1 class="pageTitle">{{ title }}</h1>
-        <div v-if="metaLabel" class="pageMeta">{{ metaLabel }} · {{ uiText.entityId }} {{ entity?.entityId }}</div>
+        <div v-if="entity" class="versionTags tagRow">
+          <span v-if="resolveVersionValue(entity.createdVersion, entity.createdVersionRaw)" class="versionTag created" :title="entity.createdVersionRaw || ''">
+            ✦ 创建: {{ formatVersionTag(entity.createdVersion, entity.createdVersionRaw) }}
+          </span>
+          <span
+            v-if="shouldShowUpdatedVersionTag(entity.createdVersion, entity.createdVersionRaw, entity.updatedVersion, entity.updatedVersionRaw)"
+            class="versionTag updated"
+            :title="entity.updatedVersionRaw || ''"
+          >
+            ↻ 更新: {{ formatVersionTag(entity.updatedVersion, entity.updatedVersionRaw) }}
+          </span>
+        </div>
+        <div v-if="entryCount" class="pageMeta">共 {{ entryCount }} 个字段文本</div>
       </div>
       <div class="headerRight">
         <el-select v-model="selectedInputLanguage" class="langSelect" :placeholder="uiText.language" filterable>
           <el-option v-for="(name, code) in supportedInputLanguage" :key="`lang-${code}`" :label="name" :value="code" />
         </el-select>
-        <el-button size="small" @click="router.back()">{{ uiText.back }}</el-button>
+        <el-button class="controlButton entityBackButton" @click="router.back()">{{ uiText.back }}</el-button>
       </div>
     </div>
 
     <el-skeleton v-if="loading" :rows="6" animated />
-    <el-empty v-else-if="!entity || !entity.entries || entity.entries.length === 0" :description="uiText.empty" />
+    <el-empty v-else-if="!entity || !entity.entries || entity.entries.length === 0" :description="emptyDescription" />
 
     <div v-else class="entityEntries">
       <el-card
         v-for="entry in entity.entries"
         :key="`entity-text-${entry.readableId ?? entry.fileName ?? entry.textHash}-${entry.fieldLabel}`"
-        class="entityCard cardPanel"
+        class="entityCard resultCard cardPanel"
       >
         <div class="entityCardHeader">
           <div class="entityCardTitle">
             <el-tag size="small" effect="plain">{{ entry.fieldLabel }}</el-tag>
             <span class="entityCardSubtitle">{{ entry.subtitle }}</span>
           </div>
-          <el-button size="small" type="primary" @click="gotoText(entry)">{{ uiText.viewText }}</el-button>
         </div>
         <div class="entityCardBody">
           <StylizedText :text="resolveDisplayText(entry.text)" :keyword="keyword" />
@@ -157,22 +157,28 @@ watch(selectedInputLanguage, async () => {
 </template>
 
 <style scoped>
+.entityView {
+  gap: 16px;
+}
+
 .pageHeader {
   display: flex;
   align-items: flex-start;
   justify-content: space-between;
   gap: 12px;
   flex-wrap: wrap;
-  margin-bottom: 18px;
 }
 
 .headerLeft {
   min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
 }
 
 .headerRight {
   display: inline-flex;
-  align-items: center;
+  align-items: stretch;
   gap: 10px;
   flex-wrap: wrap;
 }
@@ -182,19 +188,37 @@ watch(selectedInputLanguage, async () => {
 }
 
 .pageMeta {
-  margin-top: 6px;
   color: var(--theme-text-muted);
   font-size: 13px;
+}
+
+.entityMetaTags {
+  margin-bottom: 2px;
 }
 
 .langSelect {
   min-width: 160px;
 }
 
+.entityBackButton {
+  align-self: stretch;
+  min-height: 34px;
+  padding: 0 14px;
+  font-size: 13px;
+}
+
 .entityEntries {
   display: flex;
   flex-direction: column;
+  gap: 14px;
+}
+
+.entityCard {
   gap: 12px;
+}
+
+.entityCard:hover {
+  transform: none;
 }
 
 .entityCardHeader {
@@ -202,13 +226,15 @@ watch(selectedInputLanguage, async () => {
   align-items: flex-start;
   justify-content: space-between;
   gap: 10px;
-  margin-bottom: 10px;
+  margin-bottom: 0;
+  padding-bottom: 12px;
+  border-bottom: 1px solid rgba(190, 164, 124, 0.18);
 }
 
 .entityCardTitle {
   display: inline-flex;
   align-items: center;
-  gap: 10px;
+  gap: 8px;
   flex-wrap: wrap;
   min-width: 0;
 }
@@ -220,5 +246,16 @@ watch(selectedInputLanguage, async () => {
 
 .entityCardBody :deep(p) {
   margin: 0;
+}
+
+@media (max-width: 680px) {
+  .headerRight {
+    width: 100%;
+  }
+
+  .langSelect {
+    min-width: 0;
+    flex: 1 1 180px;
+  }
 }
 </style>

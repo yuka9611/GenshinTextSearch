@@ -47,15 +47,28 @@ async function pickDirViaBackendDialog() {
   const payload = await resp.json()
   const data = payload?.data || {}
 
+  if (payload.code !== 200) {
+    if (data.dialogUnavailable) {
+      ElMessage({
+        type: 'warning',
+        message: '当前运行环境不支持目录选择弹窗，请前往设置页手动填写资源路径。'
+      })
+      return { status: 'unavailable' }
+    }
+    ElMessage({ type: 'error', message: payload.msg || '选择目录失败' })
+    return { status: 'error' }
+  }
+
   if (data.cancel) {
     ElMessage({ type: 'info', message: '已取消选择目录' })
-    return null
+    return { status: 'cancel' }
   }
 
   global.config.assetDir = data.assetDir || ''
   global.config.assetDirValid = !!data.assetDirValid
 
   return {
+    status: 'picked',
     assetDir: global.config.assetDir,
     assetDirValid: global.config.assetDirValid
   }
@@ -79,7 +92,12 @@ async function ensureAssetDirOnFirstRun() {
 
     // 立即选择目录
     const picked = await pickDirViaBackendDialog()
-    if (!picked) return
+    if (!picked || picked.status !== 'picked') {
+      if (picked?.status === 'unavailable') {
+        await jumpToSettings()
+      }
+      return
+    }
 
     if (picked.assetDirValid) {
       ElMessage({ type: 'success', message: '资源目录已设置 ✅' })

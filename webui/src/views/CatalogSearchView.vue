@@ -4,11 +4,18 @@ import { useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import api from '@/api/keywordQuery'
 import useLanguage from '@/composables/useLanguage'
+import useVersion from '@/composables/useVersion'
+import SearchBar from '@/components/SearchBar.vue'
+import VersionFilter from '@/components/VersionFilter.vue'
+import ActiveFilterTags from '@/components/ActiveFilterTags.vue'
 
 const router = useRouter()
 const { selectedInputLanguage, supportedInputLanguage, loadLanguages } = useLanguage()
+const { versionOptions, loadVersionOptions } = useVersion()
 
 const keyword = ref('')
+const createdVersionFilter = ref('')
+const updatedVersionFilter = ref('')
 const selectedMainCategory = ref('')
 const selectedSubCategory = ref('')
 const results = ref([])
@@ -22,14 +29,37 @@ const mainCategories = ref({})
 const subCategories = ref({})
 
 const totalPages = computed(() => Math.max(1, Math.ceil(totalCount.value / pageSize.value)))
+const suppressAutoSearch = ref(false)
 
-// Build list of sub-categories relevant to the selected main category
-// Since sub_category codes are shared across source_type_codes, show all when filtering
 const subCategoryOptions = computed(() => {
   const entries = Object.entries(subCategories.value)
   if (!entries.length) return []
   return entries.map(([code, label]) => ({ value: code, label }))
 })
+
+const hasSearchCriteria = computed(() => {
+  return Boolean(
+    keyword.value.trim() ||
+    selectedMainCategory.value ||
+    selectedSubCategory.value ||
+    createdVersionFilter.value.trim() ||
+    updatedVersionFilter.value.trim()
+  )
+})
+
+const displayVersion = (item, kind) => {
+  const v = kind === 'created'
+    ? (item.createdVersion || item.createdVersionRaw)
+    : (item.updatedVersion || item.updatedVersionRaw)
+  return v ? String(v).trim() : '未知'
+}
+
+const showUpdatedVersionTag = (item) => {
+  const updated = item.updatedVersion || item.updatedVersionRaw
+  if (!updated) return false
+  const created = item.createdVersion || item.createdVersionRaw
+  return String(updated).trim() !== String(created || '').trim()
+}
 
 const loadMeta = async () => {
   try {
@@ -41,17 +71,32 @@ const loadMeta = async () => {
   }
 }
 
+const clearSearchState = () => {
+  results.value = []
+  totalCount.value = 0
+  currentPage.value = 1
+  searchSummary.value = ''
+}
+
 const doSearch = async (page = 1) => {
   const kw = keyword.value.trim()
-  if (!kw) return
+  const stc = selectedMainCategory.value || null
+  const sub = selectedSubCategory.value || null
+
+  if (!hasSearchCriteria.value) {
+    clearSearchState()
+    return
+  }
+
+  const langCode = parseInt(selectedInputLanguage.value)
+  if (!selectedInputLanguage.value || isNaN(langCode)) {
+    ElMessage.warning('请先选择语言')
+    return
+  }
 
   isLoading.value = true
   try {
-    const langCode = parseInt(selectedInputLanguage.value)
-    const stc = selectedMainCategory.value || null
-    const sub = selectedSubCategory.value || null
-
-    const ans = (await api.catalogSearch(kw, langCode, stc, sub, page, pageSize.value)).json
+    const ans = (await api.catalogSearch(kw, langCode, stc, sub, page, pageSize.value, createdVersionFilter.value, updatedVersionFilter.value)).json
     results.value = ans.contents || []
     totalCount.value = ans.total || 0
     currentPage.value = ans.page || page
@@ -59,7 +104,7 @@ const doSearch = async (page = 1) => {
     searchSummary.value = `共 ${totalCount.value} 条结果，耗时 ${timeMs}ms`
   } catch (_) {
     ElMessage.error('搜索失败')
-    results.value = []
+    clearSearchState()
   } finally {
     isLoading.value = false
   }
@@ -72,6 +117,12 @@ const handleSearch = () => {
 
 const handlePageChange = (page) => {
   doSearch(page)
+}
+
+const onPageSizeChange = (size) => {
+  pageSize.value = size
+  currentPage.value = 1
+  doSearch(1)
 }
 
 const gotoEntity = (item) => {
@@ -89,158 +140,190 @@ const gotoEntity = (item) => {
 onBeforeMount(async () => {
   await loadLanguages()
   await loadMeta()
+  await loadVersionOptions()
 })
 
+const batchFilterUpdate = (callback) => {
+  suppressAutoSearch.value = true
+  try {
+    callback()
+  } finally {
+    suppressAutoSearch.value = false
+  }
+  handleSearch()
+}
+
 watch(selectedMainCategory, () => {
+  if (suppressAutoSearch.value) return
+  suppressAutoSearch.value = true
   selectedSubCategory.value = ''
+  suppressAutoSearch.value = false
+  handleSearch()
 })
+watch(selectedSubCategory, () => {
+  if (suppressAutoSearch.value) return
+  handleSearch()
+})
+watch(selectedInputLanguage, () => {
+  if (suppressAutoSearch.value) return
+  handleSearch()
+})
+
+const activeFilters = computed(() => {
+  const filters = []
+  if (selectedMainCategory.value) {
+    const label = mainCategories.value[selectedMainCategory.value] || selectedMainCategory.value
+    filters.push({ key: 'mainCategory', label: `大分类: ${label}` })
+  }
+  if (selectedSubCategory.value) {
+    const opt = subCategoryOptions.value.find(o => o.value === selectedSubCategory.value)
+    filters.push({ key: 'subCategory', label: `二级分类: ${opt?.label || selectedSubCategory.value}` })
+  }
+  if (createdVersionFilter.value) {
+    filters.push({ key: 'createdVersion', label: `创建版本: ${createdVersionFilter.value}` })
+  }
+  if (updatedVersionFilter.value) {
+    filters.push({ key: 'updatedVersion', label: `更新版本: ${updatedVersionFilter.value}` })
+  }
+  return filters
+})
+
+const clearFilter = (key) => {
+  const map = {
+    mainCategory: () => { selectedMainCategory.value = '' },
+    subCategory: () => { selectedSubCategory.value = '' },
+    createdVersion: () => { createdVersionFilter.value = '' },
+    updatedVersion: () => { updatedVersionFilter.value = '' },
+  }
+  const action = map[key]
+  if (!action) return
+  batchFilterUpdate(action)
+}
+
+const clearAllFilters = () => {
+  batchFilterUpdate(() => {
+    selectedMainCategory.value = ''
+    selectedSubCategory.value = ''
+    createdVersionFilter.value = ''
+    updatedVersionFilter.value = ''
+  })
+}
 </script>
 
 <template>
-  <div class="viewWrapper pageShell">
-    <h2 class="pageTitle">图鉴搜索</h2>
+  <div class="viewWrapper">
+    <div class="stickySearchSection">
+      <h2 class="pageTitle">图鉴搜索</h2>
+      <SearchBar
+        v-model:keyword="keyword"
+        v-model:selectedLanguage="selectedInputLanguage"
+        :supportedLanguages="supportedInputLanguage"
+        inputPlaceholder="输入物品名称"
+        historyKey="catalog"
+        @search="handleSearch"
+      />
 
-    <div class="searchArea">
-      <div class="searchRow">
-        <el-input
-          v-model="keyword"
-          placeholder="输入物品名称"
-          clearable
-          class="searchInput"
-          @keyup.enter="handleSearch"
+      <div class="filterBar">
+        <div class="filterItem">
+          <span class="filterLabel">大分类</span>
+          <el-select v-model="selectedMainCategory" placeholder="全部大分类" clearable>
+            <el-option label="全部大分类" value="" />
+            <el-option v-for="(label, code) in mainCategories" :key="`cat-${code}`" :label="label" :value="code" />
+          </el-select>
+        </div>
+
+        <div class="filterItem">
+          <span class="filterLabel">二级分类</span>
+          <el-select v-model="selectedSubCategory" placeholder="全部二级分类" clearable>
+            <el-option label="全部二级分类" value="" />
+            <el-option v-for="opt in subCategoryOptions" :key="`sub-${opt.value}`" :label="opt.label" :value="opt.value" />
+          </el-select>
+        </div>
+
+        <VersionFilter
+          :versionOptions="versionOptions"
+          v-model:createdVersion="createdVersionFilter"
+          v-model:updatedVersion="updatedVersionFilter"
+          @search="handleSearch"
         />
-        <el-button type="primary" :loading="isLoading" @click="handleSearch">搜索</el-button>
       </div>
 
-      <div class="filterRow">
-        <el-select v-model="selectedInputLanguage" class="filterSelect" placeholder="语言" filterable>
-          <el-option v-for="(name, code) in supportedInputLanguage" :key="`lang-${code}`" :label="name" :value="code" />
-        </el-select>
-
-        <el-select v-model="selectedMainCategory" class="filterSelect" placeholder="全部大分类" clearable>
-          <el-option label="全部大分类" value="" />
-          <el-option v-for="(label, code) in mainCategories" :key="`cat-${code}`" :label="label" :value="code" />
-        </el-select>
-
-        <el-select v-model="selectedSubCategory" class="filterSelect" placeholder="全部二级分类" clearable>
-          <el-option label="全部二级分类" value="" />
-          <el-option v-for="opt in subCategoryOptions" :key="`sub-${opt.value}`" :label="opt.label" :value="opt.value" />
-        </el-select>
-      </div>
+      <ActiveFilterTags
+        :filters="activeFilters"
+        @clear-filter="clearFilter"
+        @clear-all="clearAllFilters"
+      />
     </div>
 
-    <div v-if="searchSummary" class="searchSummary">{{ searchSummary }}</div>
+    <div v-if="totalCount > 0" class="resultSummary">
+      <span class="resultCount">
+        搜索 "<strong>{{ keyword || '全部' }}</strong>" 共 <strong>{{ totalCount }}</strong> 条结果
+      </span>
+    </div>
 
     <div v-if="isLoading" class="loadingArea">
       <el-skeleton :rows="6" animated />
     </div>
 
-    <div v-else-if="results.length > 0" class="resultList">
-      <div
-        v-for="item in results"
-        :key="`${item.sourceTypeCode}-${item.entityId}`"
-        class="resultItem cardPanel"
-        @click="gotoEntity(item)"
-      >
-        <div class="resultTitle">{{ item.title }}</div>
-        <div class="resultMeta">
-          <el-tag size="small" effect="plain">{{ item.sourceTypeLabel }}</el-tag>
-          <el-tag v-if="item.subCategoryLabel" size="small" effect="plain" type="info">{{ item.subCategoryLabel }}</el-tag>
-          <span class="resultId">ID: {{ item.entityId }}</span>
-        </div>
+    <div v-else class="resultSection resultsSection">
+      <el-empty v-if="hasSearchCriteria && results.length === 0" description="暂无结果" />
+      <div v-else class="resultGrid cardGrid">
+        <el-card
+          v-for="item in results"
+          :key="`${item.sourceTypeCode}-${item.entityId}`"
+          class="resultCard cardPanel"
+        >
+          <div class="cardTitle cardTitleText">{{ item.title }}</div>
+          <div class="cardMeta cardMetaText">ID: {{ item.entityId }}</div>
+          <div class="versionTags tagRow">
+            <el-tag v-if="item.sourceTypeLabel" size="small" effect="plain" type="success">{{ item.sourceTypeLabel }}</el-tag>
+            <el-tag v-if="item.subCategoryLabel" size="small" effect="plain" type="info">{{ item.subCategoryLabel }}</el-tag>
+            <span class="versionTag created">✦ 创建: {{ displayVersion(item, 'created') }}</span>
+            <span v-if="showUpdatedVersionTag(item)" class="versionTag updated">↻ 更新: {{ displayVersion(item, 'updated') }}</span>
+          </div>
+          <el-button size="small" type="primary" @click="gotoEntity(item)">查看详情</el-button>
+        </el-card>
       </div>
     </div>
 
-    <div v-if="totalPages > 1" class="paginationArea">
-      <el-pagination
-        :current-page="currentPage"
-        :page-size="pageSize"
-        :total="totalCount"
-        layout="prev, pager, next"
-        @current-change="handlePageChange"
-      />
-    </div>
+    <el-pagination
+      v-if="totalCount > 0"
+      class="resultPagination"
+      v-model:current-page="currentPage"
+      v-model:page-size="pageSize"
+      :page-sizes="[20, 50, 100]"
+      :total="totalCount"
+      layout="prev, pager, next, sizes"
+      @current-change="handlePageChange"
+      @size-change="onPageSizeChange"
+    />
   </div>
 </template>
 
 <style scoped>
-.pageTitle {
-  margin: 0 0 16px 0;
-}
-
-.searchArea {
-  margin-bottom: 16px;
-}
-
-.searchRow {
-  display: flex;
-  gap: 8px;
-  margin-bottom: 10px;
-}
-
-.searchInput {
-  flex: 1;
-  max-width: 400px;
-}
-
-.filterRow {
-  display: flex;
-  gap: 8px;
-  flex-wrap: wrap;
-}
-
-.filterSelect {
-  width: 160px;
-}
-
-.searchSummary {
-  margin-bottom: 12px;
-  color: var(--theme-text-muted);
-  font-size: 13px;
-}
-
 .loadingArea {
   margin-top: 16px;
 }
 
-.resultList {
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
+/* VersionFilter spans 2 grid columns in the 5-col filterBar */
+:deep(.versionFilterGroup) {
+  grid-column: span 2;
 }
 
-.resultItem {
-  padding: 12px 16px;
-  cursor: pointer;
-  border-radius: 8px;
-  transition: background-color 0.15s;
+/* CatalogSearchView: 2 category filters + VersionFilter (span 2) = 4 columns */
+.filterBar {
+  grid-template-columns: repeat(2, minmax(0, 1fr)) repeat(2, minmax(0, 0.85fr));
 }
 
-.resultItem:hover {
-  background-color: var(--el-fill-color-light);
+@media (max-width: 860px) {
+  .filterBar {
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+  }
 }
 
-.resultTitle {
-  font-size: 15px;
-  font-weight: 500;
-  margin-bottom: 6px;
-}
-
-.resultMeta {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  font-size: 12px;
-}
-
-.resultId {
-  color: var(--theme-text-muted);
-  margin-left: 4px;
-}
-
-.paginationArea {
-  margin-top: 16px;
-  display: flex;
-  justify-content: center;
+@media (max-width: 680px) {
+  .filterBar {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
 }
 </style>

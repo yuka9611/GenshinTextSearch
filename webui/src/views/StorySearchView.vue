@@ -6,6 +6,7 @@ import TranslateDisplay from '@/components/ResultEntry.vue'
 import useLanguage from '@/composables/useLanguage'
 import useVersion from '@/composables/useVersion'
 import useSearchCommon from '@/composables/useSearchCommon'
+import ActiveFilterTags from '@/components/ActiveFilterTags.vue'
 import formatText from '@/utils/formatText'
 
 const uiText = {
@@ -104,6 +105,8 @@ const filteredStories = computed(() => {
 })
 
 const highlightKeyword = computed(() => textFilter.value.trim())
+const storyResultContext = computed(() => selectedAvatar.value?.name || uiText.storyResults)
+const storyEmptyDescription = computed(() => storySummary.value || uiText.noStoryResults)
 
 const resetStoryState = () => {
   storySummary.value = ''
@@ -197,10 +200,7 @@ const onSearchClicked = async () => {
       time: ans.time.toFixed(2),
       avatarCount: avatarResults.value.length,
     })
-    storySummary.value = formatText(uiText.storySummary, {
-      time: ans.time.toFixed(2),
-      storyCount: scopedStories.length,
-    })
+    storySummary.value = ''
   } catch (err) {
     searchSummary.value = uiText.storySearchFailed
     resetStoryState()
@@ -222,9 +222,7 @@ const onAvatarClicked = async (avatar) => {
 
   if (useGlobalStoryEntries.value) {
     storyEntries.value = globalStoryEntries.value.filter((entry) => Number(entry.avatarId) === avatarId)
-    storySummary.value = formatText(uiText.filteredByAvatar, {
-      storyCount: storyEntries.value.length,
-    })
+    storySummary.value = ''
     return
   }
 
@@ -235,10 +233,7 @@ const onAvatarClicked = async (avatar) => {
     const ans = (await api.getAvatarStories(avatarId, selectedInputLanguage.value)).json
     const contents = ans.contents || {}
     storyEntries.value = contents.stories || []
-    storySummary.value = formatText(uiText.storySummary, {
-      time: ans.time.toFixed(2),
-      storyCount: storyEntries.value.length,
-    })
+    storySummary.value = ''
   } catch (err) {
     storyEntries.value = []
     storySummary.value = uiText.loadStoryFailed
@@ -249,39 +244,84 @@ const onAvatarClicked = async (avatar) => {
 }
 
 setupVersionWatchers(onSearchClicked)
+
+const activeFilters = computed(() => {
+  const filters = []
+  if (textFilter.value?.trim()) {
+    filters.push({ key: 'text', label: `标题/内容: ${textFilter.value.trim()}` })
+  }
+  if (createdVersionFilter.value) {
+    filters.push({ key: 'createdVersion', label: `创建版本: ${createdVersionFilter.value}` })
+  }
+  if (updatedVersionFilter.value) {
+    filters.push({ key: 'updatedVersion', label: `更新版本: ${updatedVersionFilter.value}` })
+  }
+  return filters
+})
+
+const clearFilter = (key) => {
+  const map = {
+    text: () => { textFilter.value = '' },
+    createdVersion: () => { createdVersionFilter.value = '' },
+    updatedVersion: () => { updatedVersionFilter.value = '' },
+  }
+  map[key]?.()
+  onSearchClicked()
+}
+
+const clearAllFilters = () => {
+  textFilter.value = ''
+  createdVersionFilter.value = ''
+  updatedVersionFilter.value = ''
+  onSearchClicked()
+}
 </script>
 
 <template>
-  <div class="viewWrapper pageShell">
-    <h1 class="pageTitle">{{ uiText.pageTitle }}</h1>
-    <div class="helpText">
-      <p>{{ uiText.helpText }}</p>
-    </div>
-
+  <div class="viewWrapper">
     <div class="stickySearchSection">
+      <h1 class="pageTitle">{{ uiText.pageTitle }}</h1>
+      <p class="helpText">{{ uiText.helpText }}</p>
       <SearchBar
         v-model:keyword="keyword"
         v-model:selectedLanguage="selectedInputLanguage"
         :supportedLanguages="supportedInputLanguage"
-        :summary="searchSummary"
         :inputPlaceholder="uiText.avatarPlaceholder"
         :languagePlaceholder="uiText.searchLanguage"
+        historyKey="story"
         @search="onSearchClicked"
       />
 
       <div class="filterBar topFilterBar">
-        <el-input v-model="textFilter" :placeholder="uiText.storyPlaceholder" class="filterInput" clearable @keyup.enter.native="onSearchClicked" />
-        <el-select v-model="createdVersionFilter" :placeholder="uiText.createdVersion" class="versionInput" clearable filterable>
-          <el-option v-for="version in versionOptions" :key="`created-${version}`" :label="version" :value="version" />
-        </el-select>
-        <el-select v-model="updatedVersionFilter" :placeholder="uiText.updatedVersion" class="versionInput" clearable filterable>
-          <el-option v-for="version in versionOptions" :key="`updated-${version}`" :label="version" :value="version" />
-        </el-select>
+        <div class="filterItem filterItem--wide">
+          <span class="filterLabel">{{ uiText.storyPlaceholder }}</span>
+          <el-input v-model="textFilter" :placeholder="uiText.storyPlaceholder" clearable @keyup.enter.native="onSearchClicked" />
+        </div>
+        <div class="filterItem">
+          <span class="filterLabel">{{ uiText.createdVersion }}</span>
+          <el-select v-model="createdVersionFilter" :placeholder="uiText.createdVersion" clearable filterable>
+            <el-option v-for="version in versionOptions" :key="`created-${version}`" :label="version" :value="version" />
+          </el-select>
+        </div>
+        <div class="filterItem">
+          <span class="filterLabel">{{ uiText.updatedVersion }}</span>
+          <el-select v-model="updatedVersionFilter" :placeholder="uiText.updatedVersion" clearable filterable>
+            <el-option v-for="version in versionOptions" :key="`updated-${version}`" :label="version" :value="version" />
+          </el-select>
+        </div>
       </div>
+
+      <ActiveFilterTags
+        :filters="activeFilters"
+        @clear-filter="clearFilter"
+        @clear-all="clearAllFilters"
+      />
     </div>
 
     <div v-if="keyword.trim() || textFilter.trim() || createdVersionFilter.trim() || updatedVersionFilter.trim()" class="resultSection resultsSection">
-      <h2 class="resultsSectionTitle">{{ uiText.avatarResults }}</h2>
+      <div v-if="avatarResults.length > 0" class="resultSummary">
+        <span class="resultCount">匹配到 <strong>{{ avatarResults.length }}</strong> 个角色</span>
+      </div>
       <el-empty v-if="avatarResults.length === 0" :description="uiText.noAvatarResults" />
       <div v-else class="resultGrid cardGrid">
         <el-card v-for="avatar in avatarResults" :key="avatar.avatarId" class="resultCard cardPanel">
@@ -295,10 +335,14 @@ setupVersionWatchers(onSearchClicked)
     </div>
 
     <div class="resultSection resultsSection">
-      <h2 v-if="selectedAvatar" class="resultsSectionTitle">{{ uiText.storyResults }} - {{ selectedAvatar.name }}</h2>
-      <div v-if="storySummary" class="storySummary">{{ storySummary }}</div>
+      <div v-if="filteredStories.length > 0" class="resultSummary">
+        <span class="resultCount">{{ storyResultContext }}共 <strong>{{ filteredStories.length }}</strong> 条故事</span>
+      </div>
 
-      <el-empty v-if="!loadingStories && filteredStories.length === 0" :description="uiText.noStoryResults" />
+      <el-empty
+        v-if="!loadingStories && filteredStories.length === 0 && (useGlobalStoryEntries || selectedAvatar)"
+        :description="storyEmptyDescription"
+      />
       <div v-else>
         <TranslateDisplay
           v-for="story in filteredStories"
@@ -314,29 +358,8 @@ setupVersionWatchers(onSearchClicked)
 </template>
 
 <style scoped>
-.storySummary {
-  margin: 8px 0 12px;
-}
-
-.filterBar {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 10px;
-  align-items: center;
-  margin-bottom: 0;
-}
-
 .topFilterBar {
-  margin-top: 0;
-}
-
-.filterInput {
-  flex: 1 1 260px;
-  max-width: 320px;
-}
-
-.versionInput {
-  width: 188px;
+  grid-template-columns: minmax(0, 1.35fr) repeat(2, minmax(0, 1fr));
 }
 
 </style>

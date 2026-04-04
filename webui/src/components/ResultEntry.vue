@@ -5,15 +5,14 @@ import StylizedText from "@/components/StylizedText.vue";
 import { computed } from "vue";
 import { useRouter } from "vue-router";
 import { ElMessage } from "element-plus";
-import { CopyDocument } from "@element-plus/icons-vue";
 
 const UI_TEXT = Object.freeze({
     noTextToCopy: "没有可复制的文本",
     copied: "已复制",
     copyFailed: "复制失败",
     unknown: "未知",
-    created: "创建",
-    updated: "更新",
+    created: "✦ 创建",
+    updated: "↻ 更新",
     source: "来源",
     sourceDetail: "来源详情",
     copy: "复制",
@@ -283,6 +282,8 @@ const hasAnyVersionInfo = () => {
     return hasCreatedVersionTag() || !!resolveVersionValue(props.translateObj.updatedVersion, props.translateObj.updatedVersionRaw);
 };
 
+const showColorStrip = computed(() => showSourcePanel.value || hasVoicePaths());
+
 const showUpdatedVersionTag = () => {
     const updated = resolveVersionValue(props.translateObj.updatedVersion, props.translateObj.updatedVersionRaw);
     if (!updated) return false;
@@ -292,7 +293,7 @@ const showUpdatedVersionTag = () => {
 </script>
 
 <template>
-    <div class="entry" :class="{ 'entry-with-voice': hasVoicePaths() }" :data-source-type="primarySource?.sourceType || undefined">
+    <div class="entry" :class="{ 'entry-with-strip': showColorStrip }" :data-source-type="primarySource?.sourceType || undefined">
         <div v-if="showSourcePanel" class="sourcePanel">
             <span class="sourceType">{{ sourceTypeLabel }}</span>
             <div class="sourceText">
@@ -300,59 +301,53 @@ const showUpdatedVersionTag = () => {
                 <StylizedText v-if="sourceSubtitle" :text="sourceSubtitle" :keyword="$props.keyword" class="sourceSubtitle" />
             </div>
             <div class="sourceActions">
-                <el-button v-if="canOpenDetail()" size="small" @click="openSourceDetail">{{ UI_TEXT.sourceDetail }}</el-button>
+                <button v-if="canOpenDetail()" class="source-detail-btn" @click="openSourceDetail">
+                    <span class="sourceDetailArrow" aria-hidden="true">→</span>
+                    {{ UI_TEXT.sourceDetail }}
+                </button>
                 <span v-if="showSourceCount" class="sourceCount">{{ sourceCount }} 个来源</span>
             </div>
         </div>
 
         <div class="translate" v-for="(translate, translateKey) in props.translateObj.translates" :key="translateKey">
-            <p class="info">
+            <div class="info">
                 <span class="language-label">{{ global.languages[translateKey] }}:</span>
-                <span v-if="shouldShowVoiceButton(translateKey)" class="voice-buttons">
-                    <PlayVoiceButton
-                        v-for="voice in props.translateObj.voicePaths"
-                        :key="`${voice}-${translateKey}`"
-                        :voice-path="voice"
-                        :lang-code="translateKey"
-                        :disabled="!isVoiceAvailableForLang(translateKey)"
-                        :disabled-tooltip="UI_TEXT.audioUnavailable"
-                        :unavailable-message="UI_TEXT.audioMissing"
-                        @on-voice-play="onVoicePlay"
-                    />
-                </span>
-                <el-button
-                    class="copyButton"
-                    :icon="CopyDocument"
-                    circle
-                    size="small"
-                    @click="copyToClipboard(translate)"
-                    :title="UI_TEXT.copy"
-                />
-            </p>
+                <div class="translateActions">
+                    <span v-if="shouldShowVoiceButton(translateKey)" class="voice-buttons">
+                        <PlayVoiceButton
+                            v-for="voice in props.translateObj.voicePaths"
+                            :key="`${voice}-${translateKey}`"
+                            :voice-path="voice"
+                            :lang-code="translateKey"
+                            :disabled="!isVoiceAvailableForLang(translateKey)"
+                            :disabled-tooltip="UI_TEXT.audioUnavailable"
+                            :unavailable-message="UI_TEXT.audioMissing"
+                            @on-voice-play="onVoicePlay"
+                        />
+                    </span>
+                    <button type="button" class="copyButton" @click="copyToClipboard(translate)" :title="UI_TEXT.copy">
+                        <i class="fi fi-rr-copy"></i>
+                    </button>
+                </div>
+            </div>
             <StylizedText :text="translate" :keyword="$props.keyword" />
         </div>
 
         <div class="versionTags" v-if="hasAnyVersionInfo()">
-            <el-tag
+            <span
                 v-if="hasCreatedVersionTag()"
-                size="small"
-                effect="plain"
-                class="versionTag"
+                class="versionTag created"
                 :title="props.translateObj.createdVersionRaw || ''"
-                type="info"
             >
-                {{ UI_TEXT.created }}: {{ formatVersion(props.translateObj.createdVersion, props.translateObj.createdVersionRaw) }}
-            </el-tag>
-            <el-tag
+                {{ UI_TEXT.created }} {{ formatVersion(props.translateObj.createdVersion, props.translateObj.createdVersionRaw) }}
+            </span>
+            <span
                 v-if="showUpdatedVersionTag()"
-                size="small"
-                effect="plain"
-                class="versionTag"
+                class="versionTag updated"
                 :title="props.translateObj.updatedVersionRaw || ''"
-                type="warning"
             >
-                {{ UI_TEXT.updated }}: {{ formatVersion(props.translateObj.updatedVersion, props.translateObj.updatedVersionRaw) }}
-            </el-tag>
+                {{ UI_TEXT.updated }} {{ formatVersion(props.translateObj.updatedVersion, props.translateObj.updatedVersionRaw) }}
+            </span>
         </div>
     </div>
 </template>
@@ -366,9 +361,6 @@ const showUpdatedVersionTag = () => {
     border-top: 1px solid rgba(190, 164, 124, 0.18);
 }
 
-:global([data-theme="dark"]) .translate + .translate {
-    border-top-color: var(--theme-border);
-}
 
 .translate:last-child {
     border-bottom: none;
@@ -388,25 +380,16 @@ const showUpdatedVersionTag = () => {
     box-shadow: 0 12px 26px rgba(44, 57, 54, 0.07);
 }
 
-:global([data-theme="dark"]) .entry {
-    background:
-        linear-gradient(180deg, rgba(30, 40, 37, 0.98), rgba(24, 34, 31, 0.94));
-    border-color: var(--theme-border);
-    box-shadow: 0 12px 26px rgba(0, 0, 0, 0.14);
-}
 
 .entry:hover {
-    box-shadow: 0 18px 32px rgba(44, 57, 54, 0.10);
-    transform: translateY(-2px);
+    box-shadow: 0 22px 42px rgba(44, 57, 54, 0.16);
+    transform: translateY(-3px);
+    border-color: rgba(var(--theme-primary-rgb), 0.3);
 }
 
-:global([data-theme="dark"]) .entry:hover {
-    box-shadow: 0 18px 32px rgba(0, 0, 0, 0.20);
-}
 
-/* left color strip */
-.entry-with-voice::before,
-.entry[data-source-type]::before {
+/* left color strip — only shown when entry has source panel or voice */
+.entry-with-strip::before {
     content: "";
     position: absolute;
     left: 0;
@@ -417,21 +400,21 @@ const showUpdatedVersionTag = () => {
     background: linear-gradient(180deg, var(--theme-primary), var(--theme-accent));
 }
 
-.entry[data-source-type="dialogue"]::before,
-.entry[data-source-type="voice"]::before { background: var(--theme-primary); }
-.entry[data-source-type="quest"]::before { background: #4a7ab5; }
-.entry[data-source-type="readable"]::before { background: var(--theme-accent); }
-.entry[data-source-type="subtitle"]::before { background: #5c7f58; }
-.entry[data-source-type="weapon"]::before,
-.entry[data-source-type="reliquary"]::before { background: #7a5cb5; }
-.entry[data-source-type="item"]::before,
-.entry[data-source-type="material"]::before { background: var(--theme-accent); }
+.entry-with-strip[data-source-type="dialogue"]::before,
+.entry-with-strip[data-source-type="voice"]::before { background: var(--theme-primary); }
+.entry-with-strip[data-source-type="quest"]::before { background: #4a7ab5; }
+.entry-with-strip[data-source-type="readable"]::before { background: var(--theme-accent); }
+.entry-with-strip[data-source-type="subtitle"]::before { background: #5c7f58; }
+.entry-with-strip[data-source-type="weapon"]::before,
+.entry-with-strip[data-source-type="reliquary"]::before { background: #7a5cb5; }
+.entry-with-strip[data-source-type="item"]::before,
+.entry-with-strip[data-source-type="material"]::before { background: var(--theme-accent); }
 
 .info {
     font-size: 14px;
     display: flex;
     align-items: center;
-    flex-wrap: wrap;
+    justify-content: space-between;
     gap: 8px;
     margin-bottom: 10px;
 }
@@ -439,17 +422,20 @@ const showUpdatedVersionTag = () => {
 .language-label {
     display: inline-flex;
     align-items: center;
-    padding: 2px 8px;
+    min-height: 28px;
+    padding: 0 11px;
     border-radius: 999px;
     font-weight: 600;
     font-size: 12px;
+    line-height: 1.2;
     color: var(--theme-text-muted);
     background: rgba(183, 140, 79, 0.12);
-    font-family: var(--font-title);
 }
 
-:global([data-theme="dark"]) .language-label {
-    background: rgba(212, 168, 98, 0.12);
+.translateActions {
+    display: flex;
+    align-items: center;
+    gap: 8px;
 }
 
 .voice-buttons {
@@ -458,13 +444,35 @@ const showUpdatedVersionTag = () => {
 }
 
 .copyButton {
-    margin-left: auto;
-    vertical-align: middle;
-    transition: all 0.3s ease;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 32px;
+    height: 32px;
+    padding: 0;
+    border-radius: 50%;
+    border: 1px solid rgba(190, 164, 124, 0.32);
+    background: rgba(255, 253, 248, 0.94);
+    color: var(--theme-text-muted);
+    font-size: 13px;
+    cursor: pointer;
+    transition: all 0.18s ease;
+    line-height: 1;
+}
+
+.copyButton i {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 14px;
+    height: 14px;
+    line-height: 1;
 }
 
 .copyButton:hover {
-    transform: scale(1.1);
+    color: var(--theme-accent);
+    border-color: var(--theme-accent);
+    transform: scale(1.08);
 }
 
 .sourcePanel {
@@ -477,10 +485,6 @@ const showUpdatedVersionTag = () => {
     border-bottom: 1px solid rgba(190, 164, 124, 0.18);
 }
 
-:global([data-theme="dark"]) .sourcePanel {
-    background: rgba(74, 154, 149, 0.07);
-    border-bottom-color: rgba(74, 154, 149, 0.14);
-}
 
 .sourceText {
     flex: 1;
@@ -490,12 +494,15 @@ const showUpdatedVersionTag = () => {
 .sourceType {
     display: inline-flex;
     align-items: center;
-    padding: 3px 10px;
+    justify-content: center;
+    min-height: 28px;
+    padding: 0 11px;
     border-radius: 999px;
     background: rgba(183, 140, 79, 0.12);
     color: var(--theme-accent);
     font-size: 12px;
     font-weight: 600;
+    line-height: 1.2;
     white-space: nowrap;
     flex-shrink: 0;
     align-self: flex-start;
@@ -520,8 +527,9 @@ const showUpdatedVersionTag = () => {
     color: #5c7f58;
 }
 
+
 .sourceTitle {
-    font-size: 14px;
+    font-size: 13px;
     font-weight: 600;
     color: var(--theme-text);
     line-height: 1.4;
@@ -533,7 +541,7 @@ const showUpdatedVersionTag = () => {
 }
 
 .sourceSubtitle {
-    margin-top: 6px;
+    margin-top: 4px;
     color: var(--theme-text-muted);
     font-size: 13px;
 }
@@ -546,16 +554,48 @@ const showUpdatedVersionTag = () => {
     flex-shrink: 0;
 }
 
-.sourceCount {
-    padding: 4px 10px;
+.source-detail-btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 4px;
+    min-height: 28px;
+    padding: 0 12px;
     border-radius: 999px;
-    font-size: 12px;
+    border: 1px solid var(--theme-border);
+    background: transparent;
     color: var(--theme-text-muted);
-    background: rgba(183, 140, 79, 0.10);
+    font-size: 0.75rem;
+    cursor: pointer;
+    transition: all 0.18s ease;
+    white-space: nowrap;
 }
 
-:global([data-theme="dark"]) .sourceCount {
-    background: rgba(212, 168, 98, 0.10);
+.source-detail-btn:hover {
+    border-color: var(--theme-primary);
+    color: var(--theme-primary);
+    background: var(--theme-primary-soft);
+}
+
+.sourceDetailArrow {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 12px;
+    line-height: 1;
+}
+
+.sourceCount {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    min-height: 28px;
+    padding: 0 11px;
+    border-radius: 999px;
+    font-size: 12px;
+    line-height: 1.2;
+    color: var(--theme-text-muted);
+    background: rgba(47, 105, 101, 0.06);
 }
 
 .versionTags {
@@ -565,28 +605,31 @@ const showUpdatedVersionTag = () => {
     margin: 14px 0 4px 8px;
 }
 
-.versionTags :deep(.el-tag--info.is-plain) {
-    --el-tag-text-color: #5c7f58;
-    --el-tag-border-color: rgba(92, 127, 88, 0.35);
-    --el-tag-bg-color: transparent;
+.versionTag {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    min-height: 28px;
+    padding: 0 11px;
     border-radius: 999px;
+    font-size: 12px;
+    font-weight: 500;
+    line-height: 1.2;
+    border: 1px solid var(--theme-border);
+    color: var(--theme-text-muted);
+    background: transparent;
 }
 
-.versionTags :deep(.el-tag--warning.is-plain) {
-    --el-tag-text-color: #4a7ab5;
-    --el-tag-border-color: rgba(74, 122, 181, 0.35);
-    --el-tag-bg-color: transparent;
-    border-radius: 999px;
+.versionTag.created {
+    border-color: rgba(92, 127, 88, 0.35);
+    color: #5c7f58;
 }
 
-:global([data-theme="dark"]) .versionTags :deep(.el-tag--info.is-plain) {
-    --el-tag-text-color: var(--theme-success);
+.versionTag.updated {
+    border-color: rgba(74, 122, 181, 0.35);
+    color: #4a7ab5;
 }
 
-:global([data-theme="dark"]) .versionTags :deep(.el-tag--warning.is-plain) {
-    --el-tag-text-color: #6aa0d8;
-    --el-tag-border-color: rgba(74, 122, 181, 0.35);
-}
 
 .translate :deep(p) {
     margin: 0;
@@ -608,12 +651,61 @@ const showUpdatedVersionTag = () => {
         gap: 6px;
     }
 
-    .copyButton {
-        margin-left: 0;
-    }
-
     .versionTags {
         margin: 10px 0 2px 8px;
     }
+}
+</style>
+
+<style>
+/* Dark-mode overrides — unscoped to avoid Vue scoped CSS :global() compilation bug */
+[data-theme="dark"] .translate + .translate {
+    border-top-color: var(--theme-border);
+}
+[data-theme="dark"] .entry {
+    background: linear-gradient(180deg, rgba(30, 40, 37, 0.98), rgba(24, 34, 31, 0.94));
+    border-color: var(--theme-border);
+    box-shadow: 0 12px 26px rgba(0, 0, 0, 0.14);
+}
+[data-theme="dark"] .entry:hover {
+    box-shadow: 0 22px 42px rgba(0, 0, 0, 0.3);
+    background: rgba(42, 56, 52, 0.96);
+}
+[data-theme="dark"] .language-label {
+    background: rgba(212, 168, 98, 0.12);
+}
+[data-theme="dark"] .sourcePanel {
+    background: rgba(74, 154, 149, 0.07);
+    border-bottom-color: rgba(74, 154, 149, 0.14);
+}
+[data-theme="dark"] .sourceCount {
+    background: rgba(74, 154, 149, 0.08);
+}
+[data-theme="dark"] .sourceType {
+    background: rgba(183, 140, 79, 0.18);
+}
+[data-theme="dark"] .entry[data-source-type="dialogue"] .sourceType,
+[data-theme="dark"] .entry[data-source-type="voice"] .sourceType {
+    background: rgba(74, 154, 149, 0.18);
+}
+[data-theme="dark"] .entry[data-source-type="quest"] .sourceType {
+    background: rgba(74, 122, 181, 0.18);
+    color: #6a9fd4;
+}
+[data-theme="dark"] .entry[data-source-type="weapon"] .sourceType,
+[data-theme="dark"] .entry[data-source-type="reliquary"] .sourceType {
+    background: rgba(122, 92, 181, 0.18);
+    color: #9a7ed4;
+}
+[data-theme="dark"] .entry[data-source-type="subtitle"] .sourceType {
+    background: rgba(92, 127, 88, 0.18);
+    color: #7aa075;
+}
+[data-theme="dark"] .versionTag.created {
+    color: var(--theme-success);
+}
+[data-theme="dark"] .versionTag.updated {
+    color: #6aa0d8;
+    border-color: rgba(74, 122, 181, 0.35);
 }
 </style>

@@ -74,7 +74,7 @@ watch(() => props.updatedVersion, (newValue) => {
   display: flex;
   flex-direction: row;
   align-items: end;
-  gap: 10px;
+  gap: 12px;
   margin: 0;
   width: 100%;
 }
@@ -89,7 +89,7 @@ watch(() => props.updatedVersion, (newValue) => {
 
 .versionFilterLabel {
   font-size: 0.75rem;
-  color: var(--theme-text-muted);
+  color: var(--search-section-label-color, var(--theme-text-soft));
   text-transform: uppercase;
   letter-spacing: 0.05em;
   font-weight: 600;

@@ -3,9 +3,9 @@ import { computed, onBeforeMount, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import api from '@/api/keywordQuery'
 import SearchBar from '@/components/SearchBar.vue'
+import ActiveFilterTags from '@/components/ActiveFilterTags.vue'
 import useLanguage from '@/composables/useLanguage'
 import useVersion from '@/composables/useVersion'
-import formatText from '@/utils/formatText'
 
 const router = useRouter()
 
@@ -86,6 +86,7 @@ const getNpcCardKey = (entry) => {
 const totalDialoguePages = computed(() => {
   return Math.max(1, Math.ceil(dialogueTotalGroups.value / dialoguePageSize.value))
 })
+const dialogueEmptyDescription = computed(() => dialogueSummary.value || uiText.noDialogueResults)
 
 const clearDialogueState = () => {
   selectedNpc.value = null
@@ -135,10 +136,7 @@ const onNpcSearchClicked = async () => {
     )).json
     const contents = ans.contents || {}
     npcResults.value = contents.npcs || []
-    npcSummary.value = formatText(uiText.npcSummary, {
-      time: ans.time.toFixed(2),
-      count: npcResults.value.length,
-    })
+    npcSummary.value = ''
   } catch (error) {
     console.error('npc dialogue search failed:', error)
     npcResults.value = []
@@ -165,10 +163,7 @@ const loadDialogueGroups = async (page = 1) => {
     dialogueTotalGroups.value = Number(contents.totalGroups || 0)
     dialoguePage.value = Number(contents.page || page || 1)
     dialogueLoaded.value = true
-    dialogueSummary.value = formatText(uiText.dialogueSummary, {
-      time: ans.time.toFixed(2),
-      count: dialogueTotalGroups.value,
-    })
+    dialogueSummary.value = ''
   } catch (error) {
     console.error('load npc dialogues failed:', error)
     dialogueGroups.value = []
@@ -192,6 +187,11 @@ const goToDialoguePage = (page) => {
   loadDialogueGroups(nextPage)
 }
 
+const onDialoguePageSizeChange = () => {
+  dialoguePage.value = 1
+  loadDialogueGroups(1)
+}
+
 const gotoDialogueDetail = (group) => {
   const query = {
     talkId: group.talkId,
@@ -209,39 +209,100 @@ const gotoDialogueDetail = (group) => {
     query,
   })
 }
+
+const npcActiveFilters = computed(() => {
+  const filters = []
+  if (npcCreatedVersionFilter.value) {
+    filters.push({ key: 'npcCreatedVersion', label: `NPC创建版本: ${npcCreatedVersionFilter.value}` })
+  }
+  if (npcUpdatedVersionFilter.value) {
+    filters.push({ key: 'npcUpdatedVersion', label: `NPC更新版本: ${npcUpdatedVersionFilter.value}` })
+  }
+  return filters
+})
+
+const clearNpcFilter = (key) => {
+  const map = {
+    npcCreatedVersion: () => { npcCreatedVersionFilter.value = '' },
+    npcUpdatedVersion: () => { npcUpdatedVersionFilter.value = '' },
+  }
+  map[key]?.()
+}
+
+const clearAllNpcFilters = () => {
+  npcCreatedVersionFilter.value = ''
+  npcUpdatedVersionFilter.value = ''
+}
+
+const dialogueActiveFilters = computed(() => {
+  const filters = []
+  if (dialogueCreatedVersionFilter.value) {
+    filters.push({ key: 'dialogueCreatedVersion', label: `对话创建版本: ${dialogueCreatedVersionFilter.value}` })
+  }
+  if (dialogueUpdatedVersionFilter.value) {
+    filters.push({ key: 'dialogueUpdatedVersion', label: `对话更新版本: ${dialogueUpdatedVersionFilter.value}` })
+  }
+  return filters
+})
+
+const clearDialogueFilter = (key) => {
+  const map = {
+    dialogueCreatedVersion: () => { dialogueCreatedVersionFilter.value = '' },
+    dialogueUpdatedVersion: () => { dialogueUpdatedVersionFilter.value = '' },
+  }
+  map[key]?.()
+}
+
+const clearAllDialogueFilters = () => {
+  dialogueCreatedVersionFilter.value = ''
+  dialogueUpdatedVersionFilter.value = ''
+}
 </script>
 
 <template>
-  <div class="viewWrapper pageShell">
-    <h1 class="pageTitle">{{ uiText.pageTitle }}</h1>
-    <div class="helpText">
-      <p>{{ uiText.helpLine1 }}</p>
-      <p>{{ uiText.helpLine2 }}</p>
-    </div>
-
+  <div class="viewWrapper">
     <div class="stickySearchSection">
+      <h1 class="pageTitle">{{ uiText.pageTitle }}</h1>
+      <div class="helpText">
+        <p>{{ uiText.helpLine1 }}</p>
+        <p>{{ uiText.helpLine2 }}</p>
+      </div>
       <SearchBar
         v-model:keyword="npcKeyword"
         v-model:selectedLanguage="selectedInputLanguage"
         :supportedLanguages="supportedInputLanguage"
-        :summary="npcSummary"
         :inputPlaceholder="uiText.npcPlaceholder"
         :languagePlaceholder="uiText.searchLanguage"
+        historyKey="npc"
         @search="onNpcSearchClicked"
       />
 
       <div class="filterBar">
-        <el-select v-model="npcCreatedVersionFilter" :placeholder="uiText.npcCreatedVersion" class="versionInput" clearable filterable>
-          <el-option v-for="version in versionOptions" :key="`npc-created-${version}`" :label="version" :value="version" />
-        </el-select>
-        <el-select v-model="npcUpdatedVersionFilter" :placeholder="uiText.npcUpdatedVersion" class="versionInput" clearable filterable>
-          <el-option v-for="version in versionOptions" :key="`npc-updated-${version}`" :label="version" :value="version" />
-        </el-select>
+        <div class="filterItem">
+          <span class="filterLabel">{{ uiText.npcCreatedVersion }}</span>
+          <el-select v-model="npcCreatedVersionFilter" :placeholder="uiText.npcCreatedVersion" clearable filterable>
+            <el-option v-for="version in versionOptions" :key="`npc-created-${version}`" :label="version" :value="version" />
+          </el-select>
+        </div>
+        <div class="filterItem">
+          <span class="filterLabel">{{ uiText.npcUpdatedVersion }}</span>
+          <el-select v-model="npcUpdatedVersionFilter" :placeholder="uiText.npcUpdatedVersion" clearable filterable>
+            <el-option v-for="version in versionOptions" :key="`npc-updated-${version}`" :label="version" :value="version" />
+          </el-select>
+        </div>
       </div>
+
+      <ActiveFilterTags
+        :filters="npcActiveFilters"
+        @clear-filter="clearNpcFilter"
+        @clear-all="clearAllNpcFilters"
+      />
     </div>
 
     <div class="resultSection resultsSection">
-      <h2 class="resultsSectionTitle">{{ uiText.npcResults }}</h2>
+      <div v-if="npcResults.length > 0" class="resultSummary">
+        <span class="resultCount">匹配到 <strong>{{ npcResults.length }}</strong> 个 NPC</span>
+      </div>
       <el-empty v-if="npcSearched && !loadingNpcs && npcResults.length === 0" :description="uiText.noNpcResults" />
       <div v-else class="resultGrid cardGrid cardGrid--wide">
         <el-card
@@ -252,8 +313,8 @@ const gotoDialogueDetail = (group) => {
         >
           <div class="cardTitle cardTitleText">{{ npc.name }}</div>
           <div class="versionTags tagRow">
-            <el-tag size="small" effect="plain">{{ uiText.created }}: {{ resolveVersionValue(npc, 'created') }}</el-tag>
-            <el-tag v-if="showUpdatedVersionTag(npc)" size="small" effect="plain">{{ uiText.updated }}: {{ resolveVersionValue(npc, 'updated') }}</el-tag>
+            <span class="versionTag created">✦ {{ uiText.created }}: {{ resolveVersionValue(npc, 'created') }}</span>
+            <span v-if="showUpdatedVersionTag(npc)" class="versionTag updated">↻ {{ uiText.updated }}: {{ resolveVersionValue(npc, 'updated') }}</span>
           </div>
           <el-button size="small" type="primary" @click="onNpcClicked(npc)">{{ uiText.viewDialogues }}</el-button>
         </el-card>
@@ -261,28 +322,31 @@ const gotoDialogueDetail = (group) => {
     </div>
 
     <div v-if="selectedNpc" class="resultSection resultsSection">
-      <h2 class="resultsSectionTitle">{{ uiText.dialogueResults }} - {{ selectedNpc.name }}</h2>
-      <div class="selectedMeta">{{ uiText.selectedNpc }}: {{ selectedNpc.name }}</div>
-      <div class="filterBar">
-        <el-select v-model="dialogueCreatedVersionFilter" :placeholder="uiText.dialogueCreatedVersion" class="versionInput" clearable filterable>
-          <el-option v-for="version in versionOptions" :key="`dialogue-created-${version}`" :label="version" :value="version" />
-        </el-select>
-        <el-select v-model="dialogueUpdatedVersionFilter" :placeholder="uiText.dialogueUpdatedVersion" class="versionInput" clearable filterable>
-          <el-option v-for="version in versionOptions" :key="`dialogue-updated-${version}`" :label="version" :value="version" />
-        </el-select>
+      <div v-if="dialogueTotalGroups > 0" class="resultSummary">
+        <span class="resultCount">{{ selectedNpc.name }}共 <strong>{{ dialogueTotalGroups }}</strong> 张对话卡片</span>
+      </div>
+      <div class="filterBar dialogueFilterBar">
+        <div class="filterItem">
+          <span class="filterLabel">{{ uiText.dialogueCreatedVersion }}</span>
+          <el-select v-model="dialogueCreatedVersionFilter" :placeholder="uiText.dialogueCreatedVersion" clearable filterable>
+            <el-option v-for="version in versionOptions" :key="`dialogue-created-${version}`" :label="version" :value="version" />
+          </el-select>
+        </div>
+        <div class="filterItem">
+          <span class="filterLabel">{{ uiText.dialogueUpdatedVersion }}</span>
+          <el-select v-model="dialogueUpdatedVersionFilter" :placeholder="uiText.dialogueUpdatedVersion" clearable filterable>
+            <el-option v-for="version in versionOptions" :key="`dialogue-updated-${version}`" :label="version" :value="version" />
+          </el-select>
+        </div>
       </div>
 
-      <div v-if="dialogueSummary" class="searchSummary dialogueSummary">{{ dialogueSummary }}</div>
+      <ActiveFilterTags
+        :filters="dialogueActiveFilters"
+        @clear-filter="clearDialogueFilter"
+        @clear-all="clearAllDialogueFilters"
+      />
 
-      <div v-if="dialogueTotalGroups > 0" class="resultControls">
-        <span>{{ formatText(uiText.totalGroups, { count: dialogueTotalGroups, page: dialoguePage, totalPages: totalDialoguePages }) }}</span>
-        <el-button size="small" :disabled="dialoguePage <= 1" @click="goToDialoguePage(1)">首页</el-button>
-        <el-button size="small" :disabled="dialoguePage <= 1" @click="goToDialoguePage(dialoguePage - 1)">上一页</el-button>
-        <el-button size="small" :disabled="dialoguePage >= totalDialoguePages" @click="goToDialoguePage(dialoguePage + 1)">下一页</el-button>
-        <el-button size="small" :disabled="dialoguePage >= totalDialoguePages" @click="goToDialoguePage(totalDialoguePages)">末页</el-button>
-      </div>
-
-      <el-empty v-if="dialogueLoaded && !loadingDialogues && dialogueGroups.length === 0" :description="uiText.noDialogueResults" />
+      <el-empty v-if="dialogueLoaded && !loadingDialogues && dialogueGroups.length === 0" :description="dialogueEmptyDescription" />
       <div v-else class="resultGrid cardGrid cardGrid--wide">
         <el-card v-for="group in dialogueGroups" :key="group.groupKey" class="resultCard cardPanel dialogueCard">
           <div class="cardTitle cardTitleText">{{ uiText.talkId }}: {{ group.talkId }}</div>
@@ -296,31 +360,35 @@ const gotoDialogueDetail = (group) => {
             </div>
           </div>
           <div class="versionTags tagRow">
-            <el-tag size="small" effect="plain">{{ uiText.created }}: {{ resolveVersionValue(group, 'created') }}</el-tag>
-            <el-tag v-if="showUpdatedVersionTag(group)" size="small" effect="plain">{{ uiText.updated }}: {{ resolveVersionValue(group, 'updated') }}</el-tag>
+            <span class="versionTag created">✦ {{ uiText.created }}: {{ resolveVersionValue(group, 'created') }}</span>
+            <span v-if="showUpdatedVersionTag(group)" class="versionTag updated">↻ {{ uiText.updated }}: {{ resolveVersionValue(group, 'updated') }}</span>
           </div>
           <el-button size="small" type="primary" @click="gotoDialogueDetail(group)">{{ uiText.viewDetails }}</el-button>
         </el-card>
       </div>
+
+      <el-pagination
+        v-if="dialogueTotalGroups > 0"
+        class="resultPagination"
+        v-model:current-page="dialoguePage"
+        v-model:page-size="dialoguePageSize"
+        :page-sizes="[10, 20, 50]"
+        :total="dialogueTotalGroups"
+        layout="prev, pager, next, sizes"
+        @current-change="goToDialoguePage"
+        @size-change="onDialoguePageSizeChange"
+      />
     </div>
   </div>
 </template>
 
 <style scoped>
-.dialogueSummary {
-  display: block;
-  margin: 0 0 12px;
-}
-
 .filterBar {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 10px;
-  margin: 0;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
 }
 
-.versionInput {
-  width: 188px;
+.dialogueFilterBar {
+  margin-bottom: 12px;
 }
 
 .selectedCard {
@@ -329,11 +397,6 @@ const gotoDialogueDetail = (group) => {
 
 .dialogueCard {
   min-height: 220px;
-}
-
-.selectedMeta {
-  margin-bottom: 8px;
-  color: var(--theme-text-muted);
 }
 
 .previewBlock {
@@ -349,22 +412,14 @@ const gotoDialogueDetail = (group) => {
   line-height: 1.6;
 }
 
-.resultControls {
-  display: flex;
-  align-items: center;
-  flex-wrap: wrap;
-  gap: 8px;
-  margin-bottom: 12px;
-  padding: 12px 14px;
-  border-radius: 18px;
-  border: 1px solid rgba(190, 164, 124, 0.28);
-  background: rgba(255, 255, 255, 0.46);
-  color: var(--theme-text-muted);
+.dialogueResultCount {
+  font-weight: 600;
+  color: var(--theme-text);
 }
 
 @media (max-width: 680px) {
-  .versionInput {
-    width: 100%;
+  .filterBar {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 }
 </style>

@@ -19,7 +19,6 @@ const UI_TEXT = Object.freeze({
     pageTitleReadable: "阅读物内容",
     pageTitleDialogue: "对话内容",
     source: "来源",
-    queryTime: "查询耗时",
     copy: "复制",
     showTextVersion: "显示文本版本",
     total: "共",
@@ -49,7 +48,6 @@ const route = useRoute()
 const keyword = ref("")
 const questName = ref(UI_TEXT.taskText)
 const textHash = ref(0)
-const queryTime = ref("0")
 const dialogues = ref([])
 const isReadable = ref(false)
 const readableTitle = ref("")
@@ -60,6 +58,10 @@ const readableCreatedVersion = ref("")
 const readableUpdatedVersion = ref("")
 const readableCreatedVersionRaw = ref("")
 const readableUpdatedVersionRaw = ref("")
+const questCreatedVersion = ref("")
+const questUpdatedVersion = ref("")
+const questCreatedVersionRaw = ref("")
+const questUpdatedVersionRaw = ref("")
 const subtitleCreatedVersion = ref("")
 const subtitleUpdatedVersion = ref("")
 const subtitleCreatedVersionRaw = ref("")
@@ -115,7 +117,6 @@ const reloadPage = () => {
     keyword.value = route.query.keyword
     playVoiceButtonDict = {}
     playableDialogueIdList = []
-    queryTime.value = "0"
     questName.value = UI_TEXT.taskText
     dialogues.value = []
     readableTitle.value = ""
@@ -128,6 +129,18 @@ const reloadPage = () => {
     currentTalkId.value = null
     currentQuestId.value = null
     currentDialogueId.value = null
+    readableCreatedVersion.value = ""
+    readableUpdatedVersion.value = ""
+    readableCreatedVersionRaw.value = ""
+    readableUpdatedVersionRaw.value = ""
+    questCreatedVersion.value = ""
+    questUpdatedVersion.value = ""
+    questCreatedVersionRaw.value = ""
+    questUpdatedVersionRaw.value = ""
+    subtitleCreatedVersion.value = ""
+    subtitleUpdatedVersion.value = ""
+    subtitleCreatedVersionRaw.value = ""
+    subtitleUpdatedVersionRaw.value = ""
     voiceListLoadingInfo.showLoadingDialogue = false
     voiceListLoadingInfo.total = 1
     voiceListLoadingInfo.current = 0
@@ -209,7 +222,6 @@ const reloadDialogueGroup = () => {
         pageSize.value,
     ).then(res => {
         let resJson = res.json
-        queryTime.value = resJson.time.toFixed(2)
         let talkContents = resJson.contents
         questName.value = talkContents.talkQuestName
         dialogues.value = talkContents.dialogues
@@ -229,7 +241,6 @@ const reloadTalk = (useCurrentPage = true) => {
     if (route.query.isSubtitle) {
         api.getSubtitleContext(route.query.fileName, route.query.subtitleId, route.query.searchLang).then(res => {
             let resJson = res.json
-            queryTime.value = resJson.time.toFixed(2)
             let talkContents = resJson.contents
             questName.value = talkContents.talkQuestName
             dialogues.value = talkContents.dialogues
@@ -260,7 +271,6 @@ const reloadTalk = (useCurrentPage = true) => {
         pageSize.value,
     ).then(res => {
         let resJson = res.json
-        queryTime.value = resJson.time.toFixed(2)
         let talkContents = resJson.contents
         questName.value = talkContents.talkQuestName
         dialogues.value = talkContents.dialogues
@@ -279,7 +289,6 @@ const reloadTalk = (useCurrentPage = true) => {
 const reloadReadable = () => {
     api.getReadableContent(route.query.readableId, route.query.fileName, route.query.searchLang).then(res => {
         let resJson = res.json
-        queryTime.value = resJson.time.toFixed(2)
         let readableContents = resJson.contents
         questDescription.value = ""
         readableTitle.value = readableContents.readableTitle || UI_TEXT.readableFallback
@@ -302,7 +311,6 @@ const reloadQuest = () => {
         pageSize.value
     ).then(res => {
         let resJson = res.json
-        queryTime.value = resJson.time.toFixed(2)
         let talkContents = resJson.contents
         questName.value = talkContents.talkQuestName
         questDescription.value = talkContents.questDescription || ""
@@ -310,6 +318,10 @@ const reloadQuest = () => {
         currentTalkId.value = talkContents.talkId ?? null
         currentQuestId.value = talkContents.questId ?? route.query.questId ?? null
         currentDialogueId.value = null
+        questCreatedVersion.value = talkContents.createdVersion || ""
+        questUpdatedVersion.value = talkContents.updatedVersion || ""
+        questCreatedVersionRaw.value = talkContents.createdVersionRaw || ""
+        questUpdatedVersionRaw.value = talkContents.updatedVersionRaw || ""
         totalCount.value = resJson.total || 0
         currentPage.value = resJson.page || currentPage.value
     }).catch(err => {
@@ -335,6 +347,11 @@ const goToPage = (page) => {
     if (route.query.textHash && !route.query.isSubtitle) {
         reloadTalk(true)
     }
+}
+
+const onPageSizeChange = () => {
+    currentPage.value = 1
+    goToPage(1)
 }
 
 const normalizeCopyText = (text) => {
@@ -415,6 +432,10 @@ const resolveVersionValue = (versionTag, rawVersion) => {
 
 const formatVersionTag = (versionTag, rawVersion) => {
     return resolveVersionValue(versionTag, rawVersion) || UI_TEXT.unknown
+}
+
+const hasVersionTag = (versionTag, rawVersion) => {
+    return !!resolveVersionValue(versionTag, rawVersion)
 }
 
 const shouldShowUpdatedVersionTag = (createdTag, createdRaw, updatedTag, updatedRaw) => {
@@ -652,49 +673,69 @@ onDeactivated(() => {
 </script>
 
 <template>
-    <div class="viewWrapper pageShell" :class="{dialogueView: !isReadable}">
-        <h1 class="pageTitle">{{ isReadable ? UI_TEXT.pageTitleReadable : UI_TEXT.pageTitleDialogue }}</h1>
-        <div class="helpText">
-            <p v-if="!isReadable">{{ UI_TEXT.source }}: {{ questName }}</p>
-            <p v-else>{{ UI_TEXT.source }}: {{ readableTitle }}<span v-if="readableFileName"> ({{ readableFileName }})</span></p>
-            <p>{{ UI_TEXT.queryTime }}: {{queryTime}} ms</p>
-            <div v-if="!isReadable && displayMetaIds.length" class="metaIdTags">
-                <el-tag
-                    v-for="item in displayMetaIds"
-                    :key="item.label"
-                    size="small"
-                    effect="plain"
+    <div class="viewWrapper detailShell" :class="{ pageShell: isReadable, dialogueView: !isReadable }">
+        <div class="detailHero">
+            <div class="detailHeroMain">
+                <h1 class="pageTitle">{{ isReadable ? UI_TEXT.pageTitleReadable : UI_TEXT.pageTitleDialogue }}</h1>
+                <p v-if="!isReadable" class="detailSourceLine">{{ UI_TEXT.source }}: {{ questName }}</p>
+                <p v-else class="detailSourceLine">
+                    {{ UI_TEXT.source }}: {{ readableTitle }}
+                    <span v-if="readableFileName" class="detailSourceFile">({{ readableFileName }})</span>
+                </p>
+                <div
+                    v-if="(!isReadable && displayMetaIds.length) || isReadable || route.query.questId || route.query.isSubtitle"
+                    class="detailMetaRow"
                 >
-                    {{ item.label }}: {{ item.value }}
-                </el-tag>
+                    <div v-if="!isReadable && displayMetaIds.length" class="metaIdTags tagRow">
+                        <el-tag
+                            v-for="item in displayMetaIds"
+                            :key="item.label"
+                            size="small"
+                            effect="plain"
+                        >
+                            {{ item.label }}: {{ item.value }}
+                        </el-tag>
+                    </div>
+                    <div v-if="isReadable" class="versionTags tagRow">
+                        <el-tag size="small" effect="plain" :title="readableCreatedVersionRaw">{{ UI_TEXT.created }}: {{ formatVersionTag(readableCreatedVersion, readableCreatedVersionRaw) }}</el-tag>
+                        <el-tag
+                            v-if="hasVersionTag(readableUpdatedVersion, readableUpdatedVersionRaw)"
+                            size="small"
+                            effect="plain"
+                            :title="readableUpdatedVersionRaw"
+                        >
+                            {{ UI_TEXT.updated }}: {{ formatVersionTag(readableUpdatedVersion, readableUpdatedVersionRaw) }}
+                        </el-tag>
+                    </div>
+                    <div v-else-if="route.query.questId" class="versionTags tagRow">
+                        <el-tag size="small" effect="plain" :title="questCreatedVersionRaw">{{ UI_TEXT.created }}: {{ formatVersionTag(questCreatedVersion, questCreatedVersionRaw) }}</el-tag>
+                        <el-tag
+                            v-if="hasVersionTag(questUpdatedVersion, questUpdatedVersionRaw)"
+                            size="small"
+                            effect="plain"
+                            :title="questUpdatedVersionRaw"
+                        >
+                            {{ UI_TEXT.updated }}: {{ formatVersionTag(questUpdatedVersion, questUpdatedVersionRaw) }}
+                        </el-tag>
+                    </div>
+                    <div v-else-if="route.query.isSubtitle" class="versionTags tagRow">
+                        <el-tag size="small" effect="plain" :title="subtitleCreatedVersionRaw">{{ UI_TEXT.created }}: {{ formatVersionTag(subtitleCreatedVersion, subtitleCreatedVersionRaw) }}</el-tag>
+                        <el-tag
+                            v-if="hasVersionTag(subtitleUpdatedVersion, subtitleUpdatedVersionRaw)"
+                            size="small"
+                            effect="plain"
+                            :title="subtitleUpdatedVersionRaw"
+                        >
+                            {{ UI_TEXT.updated }}: {{ formatVersionTag(subtitleUpdatedVersion, subtitleUpdatedVersionRaw) }}
+                        </el-tag>
+                    </div>
+                </div>
             </div>
-            <div v-if="!isReadable && questDescription" class="questDescriptionBlock">
-                <div class="questDescriptionLabel">任务描述</div>
-                <StylizedText :text="questDescription" :keyword="keyword" />
-            </div>
+        </div>
 
-            <div v-if="isReadable" class="versionTags tagRow">
-                <el-tag size="small" effect="plain" :title="readableCreatedVersionRaw">{{ UI_TEXT.created }}: {{ formatVersionTag(readableCreatedVersion, readableCreatedVersionRaw) }}</el-tag>
-                <el-tag
-                    v-if="shouldShowUpdatedVersionTag(readableCreatedVersion, readableCreatedVersionRaw, readableUpdatedVersion, readableUpdatedVersionRaw)"
-                    size="small"
-                    effect="plain"
-                    :title="readableUpdatedVersionRaw"
-                >
-                    {{ UI_TEXT.updated }}: {{ formatVersionTag(readableUpdatedVersion, readableUpdatedVersionRaw) }}
-                </el-tag>
-            </div>
-            <div v-else-if="route.query.isSubtitle" class="versionTags tagRow">
-                <el-tag size="small" effect="plain" :title="subtitleCreatedVersionRaw">{{ UI_TEXT.created }}: {{ formatVersionTag(subtitleCreatedVersion, subtitleCreatedVersionRaw) }}</el-tag>
-                <el-tag
-                    v-if="shouldShowUpdatedVersionTag(subtitleCreatedVersion, subtitleCreatedVersionRaw, subtitleUpdatedVersion, subtitleUpdatedVersionRaw)"
-                    size="small"
-                    effect="plain"
-                    :title="subtitleUpdatedVersionRaw"
-                >
-                    {{ UI_TEXT.updated }}: {{ formatVersionTag(subtitleUpdatedVersion, subtitleUpdatedVersionRaw) }}
-                </el-tag>
-            </div>
+        <div v-if="!isReadable && questDescription" class="questDescriptionBlock">
+            <div class="questDescriptionLabel">任务描述</div>
+            <StylizedText :text="questDescription" :keyword="keyword" />
         </div>
 
         <div v-if="isReadable" class="readableContent">
@@ -715,19 +756,21 @@ onDeactivated(() => {
         </div>
 
         <div v-else class="dialogueScroll">
-            <div class="dialogueTopControls">
-                <el-form :inline="true">
+            <div class="dialogueToolbar">
+                <el-form :inline="true" class="dialogueControlForm">
                     <el-form-item :label="UI_TEXT.showTextVersion">
                         <el-switch v-model="showDialogueVersions" />
                     </el-form-item>
+                    <el-form-item :label="UI_TEXT.autoLoop">
+                        <el-switch v-model="autoLoop" />
+                    </el-form-item>
+                    <el-form-item :label="UI_TEXT.autoScroll">
+                        <el-switch v-model="autoScroll" />
+                    </el-form-item>
                 </el-form>
             </div>
-            <div class="resultControls" v-if="totalCount > 0">
-                <span class="resultCount">{{ UI_TEXT.total }} {{ totalCount }} {{ UI_TEXT.currentPage }} {{ currentPage }} / {{ totalPages }} {{ UI_TEXT.page }}</span>
-                <el-button size="small" :disabled="currentPage <= 1" @click="goToPage(1)">{{ UI_TEXT.first }}</el-button>
-                <el-button size="small" :disabled="currentPage <= 1" @click="goToPage(currentPage - 1)">{{ UI_TEXT.prev }}</el-button>
-                <el-button size="small" :disabled="currentPage >= totalPages" @click="goToPage(currentPage + 1)">{{ UI_TEXT.next }}</el-button>
-                <el-button size="small" :disabled="currentPage >= totalPages" @click="goToPage(totalPages)">{{ UI_TEXT.last }}</el-button>
+            <div v-if="totalCount > 0" class="resultSummary">
+                <span class="resultCount">共 <strong>{{ totalCount }}</strong> 条对话，当前 <strong>{{ currentPage }}</strong> / {{ totalPages }} 页</span>
             </div>
             <div class="dialogueGroups">
                 <div v-for="group in dialogueGroups" :key="group.talkId || 'single'" class="dialogueGroup">
@@ -798,23 +841,18 @@ onDeactivated(() => {
                     </el-table>
                 </div>
             </div>
-            <div class="resultControls" v-if="totalCount > 0">
-                <span class="resultCount">{{ UI_TEXT.total }} {{ totalCount }} {{ UI_TEXT.currentPage }} {{ currentPage }} / {{ totalPages }} {{ UI_TEXT.page }}</span>
-                <el-button size="small" :disabled="currentPage <= 1" @click="goToPage(1)">{{ UI_TEXT.first }}</el-button>
-                <el-button size="small" :disabled="currentPage <= 1" @click="goToPage(currentPage - 1)">{{ UI_TEXT.prev }}</el-button>
-                <el-button size="small" :disabled="currentPage >= totalPages" @click="goToPage(currentPage + 1)">{{ UI_TEXT.next }}</el-button>
-                <el-button size="small" :disabled="currentPage >= totalPages" @click="goToPage(totalPages)">{{ UI_TEXT.last }}</el-button>
-            </div>
+            <el-pagination
+                v-if="totalCount > 0"
+                class="resultPagination"
+                v-model:current-page="currentPage"
+                v-model:page-size="pageSize"
+                :page-sizes="[20, 50, 100]"
+                :total="totalCount"
+                layout="prev, pager, next, sizes"
+                @current-change="goToPage"
+                @size-change="onPageSizeChange"
+            />
         </div>
-
-        <el-form v-if="!isReadable" style="margin-top: 10px;" :inline="true">
-            <el-form-item :label="UI_TEXT.autoLoop">
-                <el-switch v-model="autoLoop" />
-            </el-form-item>
-            <el-form-item :label="UI_TEXT.autoScroll">
-                <el-switch v-model="autoScroll" />
-            </el-form-item>
-        </el-form>
     </div>
 
     <div class="viewWrapper pageShell voicePlayerContainer audioDock" v-show="showPlayer" v-if="!isReadable">
@@ -848,23 +886,58 @@ onDeactivated(() => {
     </el-dialog>
 </template>
 <style scoped>
-.helpText {
-    line-height: 1.8;
+.detailShell {
+    display: flex;
+    flex-direction: column;
+    width: var(--page-width);
+    margin: 0 auto;
+    gap: 14px;
+}
+
+.detailHero {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 16px;
+    flex-wrap: wrap;
+}
+
+.detailHeroMain {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    min-width: 0;
+}
+
+.detailSourceLine {
+    margin: 0;
+    color: var(--theme-text-muted);
+    line-height: 1.7;
+}
+
+.detailSourceFile {
+    color: var(--theme-text-soft);
+}
+
+.detailMetaRow {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 8px 12px;
 }
 
 .metaIdTags {
     display: flex;
     flex-wrap: wrap;
     gap: 8px;
-    margin-top: 8px;
+    margin-top: 0;
 }
 
 .questDescriptionBlock {
-    margin-top: 10px;
-    padding: 14px 16px;
-    border-radius: 16px;
-    border-left: 3px solid rgba(var(--theme-primary-rgb), 0.45);
-    background: rgba(47, 105, 101, 0.07);
+    padding: 16px 18px;
+    border-radius: 20px;
+    border: 1px solid rgba(190, 164, 124, 0.24);
+    background: rgba(47, 105, 101, 0.06);
     color: var(--theme-text);
 }
 
@@ -877,14 +950,14 @@ onDeactivated(() => {
 .readableContent {
     display: flex;
     flex-direction: column;
-    gap: 16px;
+    gap: 14px;
 }
 
 .readableBlock {
-    padding: 18px;
-    border-radius: 20px;
+    padding: 16px 18px;
+    border-radius: 22px;
     border: 1px solid rgba(190, 164, 124, 0.24);
-    background: rgba(255, 255, 255, 0.38);
+    background: linear-gradient(180deg, rgba(255, 253, 248, 0.94), rgba(248, 241, 229, 0.88));
 }
 
 .readableHeader {
@@ -892,6 +965,13 @@ onDeactivated(() => {
     align-items: center;
     justify-content: space-between;
     gap: 12px;
+    margin-bottom: 12px;
+}
+
+.readableHeader h3 {
+    margin: 0;
+    color: var(--theme-ink);
+    font-size: 1rem;
 }
 
 .copyReadableButton {
@@ -905,66 +985,61 @@ onDeactivated(() => {
 .dialogueGroups {
     display: flex;
     flex-direction: column;
-    gap: 16px;
+    gap: 14px;
 }
 
 .dialogueGroup {
-    padding: 16px;
-    border-radius: 22px;
-    border: 1px solid rgba(190, 164, 124, 0.24);
-    background: rgba(255, 255, 255, 0.34);
+    padding: 0;
 }
 
 .dialogueScroll {
-    overflow-x: visible;
+    overflow-x: auto;
     width: 100%;
 }
 
-.dialogueTopControls {
-    margin-bottom: 8px;
-    padding: 12px 14px;
+.dialogueToolbar {
+    margin-bottom: 10px;
+    padding: 14px 16px;
     border-radius: 18px;
-    border: 1px solid rgba(190, 164, 124, 0.28);
-    background: rgba(255, 255, 255, 0.46);
+    border: 1px solid rgba(190, 164, 124, 0.24);
+    background: rgba(47, 105, 101, 0.05);
 }
 
-.resultControls {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    flex-wrap: wrap;
-    margin: 6px 0 12px;
-    padding: 12px 14px;
-    border-radius: 18px;
-    border: 1px solid rgba(190, 164, 124, 0.28);
-    background: rgba(255, 255, 255, 0.46);
-    color: var(--theme-text-muted);
-    font-size: 13px;
+.dialogueControlForm :deep(.el-form-item) {
+    margin-bottom: 0;
+    margin-right: 20px;
 }
 
-.resultCount {
-    margin-right: 4px;
-    font-weight: 600;
-    color: var(--theme-text);
+.resultSummary {
+    margin: 0 0 12px;
+    padding: 0;
+}
+
+.resultPagination {
+    justify-content: center;
+    margin-top: 24px;
+    padding: 16px 0;
 }
 
 .dialogueView {
-    min-width: 1000px;
+    width: 100%;
+    max-width: none;
+    min-width: 0;
 }
 
 .dialogueCell {
     display: flex;
     align-items: flex-start;
-    gap: 8px;
+    gap: 10px;
 }
 
 .copyDialogueButton {
-    margin-top: 2px;
     flex-shrink: 0;
 }
 
 .dialogueGroupTitle {
-    margin: 8px 0;
+    margin: 0 0 10px;
+    padding: 0 4px;
     font-weight: 600;
     color: var(--theme-ink);
     font-family: var(--font-title);
@@ -991,8 +1066,9 @@ onDeactivated(() => {
 }
 
 .versionTags {
-    margin-top: 6px;
+    margin-top: 0;
 }
+
 .rowVersionTags {
     display: flex;
     gap: 6px;
@@ -1001,6 +1077,22 @@ onDeactivated(() => {
 
 :deep(.el-table .cell) {
     color: var(--theme-text);
+}
+
+@media (max-width: 860px) {
+    .dialogueToolbar {
+        padding: 12px 14px;
+    }
+
+    .dialogueControlForm {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 10px 14px;
+    }
+
+    .dialogueControlForm :deep(.el-form-item) {
+        margin-right: 0;
+    }
 }
 
 </style>

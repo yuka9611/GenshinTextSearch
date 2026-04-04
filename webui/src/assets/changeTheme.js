@@ -34,6 +34,7 @@ export function getTheme() {
 
 export function setTheme(theme) {
     html.setAttribute('data-theme', theme)
+    html.classList.toggle('dark', theme === 'dark')
     try {
         localStorage.setItem(THEME_STORAGE_KEY, theme)
     } catch (_) { /* ignore */ }
@@ -53,6 +54,8 @@ export function initTheme() {
     } catch (_) { /* ignore */ }
     if (saved === 'dark' || saved === 'light') {
         setTheme(saved)
+    } else if (window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches) {
+        setTheme('dark')
     } else {
         setTheme('light')
     }

@@ -49,8 +49,13 @@ const createElementByMyElement = (myDomElement) => {
     if (myDomElement.tagName === ''){
 
     } else if(myDomElement.tagName === 'color'){
-        // 避免白色看不见
-        if(!myDomElement.tagValue.toLowerCase().startsWith('#ffffff'))
+        // 避免与背景色相近的颜色看不见
+        const hex = myDomElement.tagValue.toLowerCase()
+        const isDark = document.documentElement.getAttribute('data-theme') === 'dark'
+        const skip = isDark
+            ? hex.startsWith('#000000') || hex.startsWith('#0a') || hex.startsWith('#0b') || hex.startsWith('#0c')
+            : hex.startsWith('#ffffff') || hex.startsWith('#fefefe') || hex.startsWith('#fdfdfd')
+        if (!skip)
             container.style.color = myDomElement.tagValue
     }else if(myDomElement.tagName === 'i'){
         container.style.fontStyle = 'italic'
