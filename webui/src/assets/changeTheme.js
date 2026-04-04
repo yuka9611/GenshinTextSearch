@@ -16,16 +16,44 @@ const mix = (color1, color2, weight) => {
 }
 
 const html = document.documentElement
+const THEME_STORAGE_KEY = 'genshin-text-search-theme'
 
 export function changeTheme(color) {
     if (!color) return
-    // 设置主要颜色
     html.style.setProperty("--el-color-primary", color)
-    // 循环设置次级颜色
     for (let i = 1; i < 10; i += 1) {
         html.style.setProperty(`--el-color-primary-light-${i}`, mix(color, "#ffffff", i * 0.1))
     }
-    // 设置主要暗色
     const dark = mix(color, "#000000", 0.2)
     html.style.setProperty(`--el-color-primary-dark-2`, dark)
+}
+
+export function getTheme() {
+    return html.getAttribute('data-theme') || 'light'
+}
+
+export function setTheme(theme) {
+    html.setAttribute('data-theme', theme)
+    try {
+        localStorage.setItem(THEME_STORAGE_KEY, theme)
+    } catch (_) { /* ignore */ }
+}
+
+export function toggleTheme() {
+    const current = getTheme()
+    const next = current === 'light' ? 'dark' : 'light'
+    setTheme(next)
+    return next
+}
+
+export function initTheme() {
+    let saved = null
+    try {
+        saved = localStorage.getItem(THEME_STORAGE_KEY)
+    } catch (_) { /* ignore */ }
+    if (saved === 'dark' || saved === 'light') {
+        setTheme(saved)
+    } else {
+        setTheme('light')
+    }
 }

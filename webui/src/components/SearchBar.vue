@@ -116,7 +116,7 @@ const onSearch = () => {
   border: 1px solid rgba(47, 105, 101, 0.12);
 }
 
-@media (max-width: 720px) {
+@media (max-width: 680px) {
   .searchBar :deep(.input-with-select) {
     flex-basis: 100%;
   }

@@ -11,10 +11,12 @@ function startLoading(){
     //返回loadingCount
     loadingCount++;
     // _showLoading_DO_NOT_USE.value = true;
-    loadingService.value = ElLoading.service({
-        lock: true,
-        text: '加载中……',
-    })
+    if (!loadingService.value) {
+        loadingService.value = ElLoading.service({
+            lock: true,
+            text: '加载中……',
+        })
+    }
 
     return loadingCount;
 
@@ -30,10 +32,9 @@ function endLoading(){
     }
     if(loadingCount<=0){
         loadingCount = 0;
-        loadingService.value.close && loadingService.value.close()
+        loadingService.value && loadingService.value.close && loadingService.value.close()
+        loadingService.value = null
         // _showLoading_DO_NOT_USE.value = false
-    }else{
-        loadingCount--;
     }
     return loadingCount;
 }
