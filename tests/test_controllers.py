@@ -26,6 +26,8 @@ class TestSourceTypeFilter:
             ("", None),
             ("all", None),
             ("  all  ", None),
+            ("角色语音", "voice"),
+            ("角色故事", "story"),
             ("武器", "weapon"),
             ("装扮", "dressing"),
             ("outfit", "dressing"),
@@ -44,6 +46,11 @@ class TestSourceTypeFilter:
         assert controllers._matches_source_type_filter(entry, "weapon") is True
         assert controllers._matches_source_type_filter(entry, "food") is False
 
+    def test_matches_source_type_filter_story(self):
+        entry = {"primarySource": {"sourceType": "story"}}
+        assert controllers._matches_source_type_filter(entry, "story") is True
+        assert controllers._matches_source_type_filter(entry, "voice") is False
+
     def test_matches_source_type_filter_costume_supports_suit(self):
         entry1 = {"primarySource": {"sourceType": "costume"}}
         entry2 = {"primarySource": {"sourceType": "suit"}}
@@ -58,6 +65,128 @@ class TestSourceTypeFilter:
         ]
         filtered = controllers._filter_entries_by_source_type(entries, "weapon")
         assert [x["id"] for x in filtered] == [1, 3]
+
+
+class TestAvatarStorySources:
+    def test_select_story_source_from_text_hash_builds_story_primary_source(self, monkeypatch):
+        monkeypatch.setattr(
+            controllers.databaseHelper,
+            "selectStorySourcesByTextHash",
+            lambda text_hash: [
+                (10000003, 4201, 111, 222),
+                (10000003, 4202, 333, 222),
+            ],
+        )
+        monkeypatch.setattr(controllers.databaseHelper, "getCharterName", lambda avatar_id, lang_code: "琴")
+        monkeypatch.setattr(controllers.config, "getSourceLanguage", lambda: 1)
+        monkeypatch.setattr(
+            controllers,
+            "_get_text_map_content_with_fallback",
+            lambda text_hash, lang_code, langs: {111: "故事一", 222: "未解锁故事"}.get(text_hash),
+        )
+
+        primary, origin, is_talk, source_count = controllers._select_story_source_from_text_hash(999, 1)
+
+        assert primary["sourceType"] == "story"
+        assert primary["title"] == "琴 · 故事一"
+        assert primary["subtitle"] == "角色故事"
+        assert origin == "琴 · 故事一"
+        assert is_talk is False
+        assert source_count == 2
+
+    def test_enrich_primary_sources_prefers_story_override(self, monkeypatch):
+        monkeypatch.setattr(
+            controllers.databaseHelper,
+            "selectStorySourcesByTextHash",
+            lambda text_hash: [(10000003, 4201, 111, 222)],
+        )
+        monkeypatch.setattr(controllers.databaseHelper, "getCharterName", lambda avatar_id, lang_code: "琴")
+        monkeypatch.setattr(controllers.config, "getSourceLanguage", lambda: 1)
+        monkeypatch.setattr(
+            controllers,
+            "_get_text_map_content_with_fallback",
+            lambda text_hash, lang_code, langs: {111: "故事一", 222: "未解锁故事"}.get(text_hash),
+        )
+
+        entry = {
+            "hash": 999,
+            "primarySource": {"sourceType": "dialogue", "title": "旧来源"},
+            "_preferredSourceType": "story",
+        }
+
+        controllers._enrich_primary_sources([entry], 1)
+
+        assert entry["primarySource"]["sourceType"] == "story"
+        assert entry["origin"] == "琴 · 故事一"
+        assert "_preferredSourceType" not in entry
+
+
+class TestSpeakerSourceQueries:
+    def test_handle_speaker_only_query_voice_without_filter_returns_empty(self):
+        result, total = controllers._handle_speaker_only_query("琴", 1, 1, 20, "without", None, None, "voice")
+
+        assert result == []
+        assert total == 0
+
+    def test_handle_speaker_only_query_story_with_filter_returns_empty(self):
+        result, total = controllers._handle_speaker_only_query("琴", 1, 1, 20, "with", None, None, "story")
+
+        assert result == []
+        assert total == 0
+
+    def test_handle_speaker_and_keyword_query_voice_uses_avatar_voice_branch(self, monkeypatch):
+        monkeypatch.setattr(controllers.config, "getResultLanguages", lambda: [1])
+        monkeypatch.setattr(controllers.config, "getSourceLanguage", lambda: 1)
+        monkeypatch.setattr(
+            controllers.databaseHelper,
+            "selectFetterBySpeakerAndKeyword",
+            lambda *args, **kwargs: [(101, 10000003)],
+        )
+        monkeypatch.setattr(
+            controllers.databaseHelper,
+            "countFetterBySpeakerAndKeyword",
+            lambda *args, **kwargs: 1,
+        )
+        monkeypatch.setattr(controllers.databaseHelper, "getCharterName", lambda avatar_id, lang_code: "琴")
+        monkeypatch.setattr(
+            controllers,
+            "queryTextHashInfo",
+            lambda *args, **kwargs: {"hash": 101, "translates": {"1": "早上好"}, "voicePaths": ["vo_101.wem"]},
+        )
+
+        result, total = controllers._handle_speaker_and_keyword_query("琴", "早上", 1, 1, 20, "all", None, None, "voice")
+
+        assert total == 1
+        assert len(result) == 1
+        assert result[0]["talker"] == "琴"
+        assert result[0]["_preferredSourceType"] == "voice"
+
+    def test_handle_speaker_and_keyword_query_story_uses_avatar_story_branch(self, monkeypatch):
+        monkeypatch.setattr(controllers.config, "getResultLanguages", lambda: [1])
+        monkeypatch.setattr(controllers.config, "getSourceLanguage", lambda: 1)
+        monkeypatch.setattr(
+            controllers.databaseHelper,
+            "selectAvatarStoryBySpeakerAndKeyword",
+            lambda *args, **kwargs: [(202, 10000003)],
+        )
+        monkeypatch.setattr(
+            controllers.databaseHelper,
+            "countAvatarStoryBySpeakerAndKeyword",
+            lambda *args, **kwargs: 1,
+        )
+        monkeypatch.setattr(controllers.databaseHelper, "getCharterName", lambda avatar_id, lang_code: "琴")
+        monkeypatch.setattr(
+            controllers,
+            "queryTextHashInfo",
+            lambda *args, **kwargs: {"hash": 202, "translates": {"1": "故事内容"}, "voicePaths": []},
+        )
+
+        result, total = controllers._handle_speaker_and_keyword_query("琴", "故事", 1, 1, 20, "all", None, None, "story")
+
+        assert total == 1
+        assert len(result) == 1
+        assert result[0]["talker"] == "琴"
+        assert result[0]["_preferredSourceType"] == "story"
 
 
 # ---------------------------------------------------------------------------
