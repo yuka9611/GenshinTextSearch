@@ -451,13 +451,14 @@ const showUpdatedVersionTag = () => {
     height: 32px;
     padding: 0;
     border-radius: 50%;
-    border: 1px solid rgba(190, 164, 124, 0.32);
-    background: rgba(255, 253, 248, 0.94);
+    border: 1px solid var(--theme-border);
+    background: var(--theme-input);
     color: var(--theme-text-muted);
     font-size: 13px;
     cursor: pointer;
     transition: all 0.18s ease;
     line-height: 1;
+    box-shadow: 0 4px 12px rgba(44, 57, 54, 0.06);
 }
 
 .copyButton i {
@@ -472,7 +473,16 @@ const showUpdatedVersionTag = () => {
 .copyButton:hover {
     color: var(--theme-accent);
     border-color: var(--theme-accent);
+    background: var(--theme-accent-soft);
     transform: scale(1.08);
+}
+
+.copyButton:focus-visible {
+    outline: none;
+    color: var(--theme-accent);
+    border-color: var(--theme-accent);
+    background: var(--theme-accent-soft);
+    box-shadow: 0 0 0 3px rgba(var(--theme-primary-rgb), 0.18);
 }
 
 .sourcePanel {
@@ -673,6 +683,13 @@ const showUpdatedVersionTag = () => {
 }
 [data-theme="dark"] .language-label {
     background: rgba(212, 168, 98, 0.12);
+}
+[data-theme="dark"] .copyButton {
+    box-shadow: 0 8px 18px rgba(0, 0, 0, 0.18);
+}
+[data-theme="dark"] .copyButton:hover,
+[data-theme="dark"] .copyButton:focus-visible {
+    background: rgba(212, 168, 98, 0.14);
 }
 [data-theme="dark"] .sourcePanel {
     background: rgba(74, 154, 149, 0.07);
