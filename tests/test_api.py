@@ -190,6 +190,37 @@ class TestKeywordQueryEndpoint:
         assert data["code"] == 200
         assert data["data"]["total"] == 1
 
+    def test_keyword_query_passes_story_source_type(self, monkeypatch):
+        calls = {}
+
+        def fake_get_translate_obj(keyword, lang_code, speaker, page, page_size, voice_filter, created_version, updated_version, source_type):
+            calls["args"] = {
+                "keyword": keyword,
+                "lang_code": lang_code,
+                "speaker": speaker,
+                "page": page,
+                "page_size": page_size,
+                "voice_filter": voice_filter,
+                "created_version": created_version,
+                "updated_version": updated_version,
+                "source_type": source_type,
+            }
+            return ([], 0)
+
+        monkeypatch.setattr(api.controllers_module, "getTranslateObj", fake_get_translate_obj)
+
+        app = _app()
+        payload = {"langCode": 1, "keyword": "故事", "sourceType": "story", "page": 2, "pageSize": 10}
+        with _request_context(app, "/api/keywordQuery", method="POST", json_body=payload):
+            resp = api.keywordQuery()
+
+        data = resp.get_json()
+        assert resp.status_code == 200
+        assert data["code"] == 200
+        assert calls["args"]["source_type"] == "story"
+        assert calls["args"]["page"] == 2
+        assert calls["args"]["page_size"] == 10
+
 
 class TestCatalogSearchEndpoint:
     def test_catalog_search_rejects_empty_payload(self):

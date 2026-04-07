@@ -139,6 +139,7 @@ const sourceTypeLabel = computed(() => {
     const map = {
         dialogue: "对话",
         voice: "角色语音",
+        story: "角色故事",
         quest: "任务",
         readable: "阅读物",
         subtitle: "字幕",
@@ -402,6 +403,7 @@ const showUpdatedVersionTag = () => {
 
 .entry-with-strip[data-source-type="dialogue"]::before,
 .entry-with-strip[data-source-type="voice"]::before { background: var(--theme-primary); }
+.entry-with-strip[data-source-type="story"]::before { background: #8a6a3f; }
 .entry-with-strip[data-source-type="quest"]::before { background: #4a7ab5; }
 .entry-with-strip[data-source-type="readable"]::before { background: var(--theme-accent); }
 .entry-with-strip[data-source-type="subtitle"]::before { background: #5c7f58; }
@@ -522,6 +524,10 @@ const showUpdatedVersionTag = () => {
 .entry[data-source-type="voice"] .sourceType {
     background: rgba(47, 105, 101, 0.12);
     color: var(--theme-primary);
+}
+.entry[data-source-type="story"] .sourceType {
+    background: rgba(138, 106, 63, 0.12);
+    color: #8a6a3f;
 }
 .entry[data-source-type="quest"] .sourceType {
     background: rgba(74, 122, 181, 0.12);
@@ -704,6 +710,10 @@ const showUpdatedVersionTag = () => {
 [data-theme="dark"] .entry[data-source-type="dialogue"] .sourceType,
 [data-theme="dark"] .entry[data-source-type="voice"] .sourceType {
     background: rgba(74, 154, 149, 0.18);
+}
+[data-theme="dark"] .entry[data-source-type="story"] .sourceType {
+    background: rgba(138, 106, 63, 0.18);
+    color: #d2b07d;
 }
 [data-theme="dark"] .entry[data-source-type="quest"] .sourceType {
     background: rgba(74, 122, 181, 0.18);

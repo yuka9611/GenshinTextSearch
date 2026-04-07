@@ -2097,6 +2097,15 @@ def _build_source_type_join(source_type: str) -> tuple[str, list]:
         )
     elif source_type == "voice":
         return "JOIN fetters _sj ON _sj.voiceFileTextTextMapHash = tm.hash ", []
+    elif source_type == "story":
+        return (
+            "JOIN ("
+            "SELECT storyContextTextMapHash AS text_hash FROM fetterStory WHERE storyContextTextMapHash IS NOT NULL "
+            "UNION "
+            "SELECT storyContext2TextMapHash AS text_hash FROM fetterStory WHERE storyContext2TextMapHash IS NOT NULL"
+            ") _sj ON _sj.text_hash = tm.hash ",
+            [],
+        )
     elif source_type == "quest":
         return "JOIN quest_hash_map _sj ON _sj.hash = tm.hash ", []
     elif source_type in _SOURCE_TYPE_TO_ENTITY_CODE:
@@ -4484,6 +4493,34 @@ def selectAvatarStories(avatarId: int, limit: int = 800):
             return []
 
 
+def _avatar_story_entries_subquery() -> str:
+    return (
+        "select avatarId, fetterId, "
+        "storyTitleTextMapHash as titleHash, "
+        "storyTitleLockedTextMapHash as lockedTitleHash, "
+        "storyContextTextMapHash as contextHash "
+        "from fetterStory where storyContextTextMapHash is not null "
+        "union all "
+        "select avatarId, fetterId, "
+        "storyTitle2TextMapHash as titleHash, "
+        "storyTitleLockedTextMapHash as lockedTitleHash, "
+        "storyContext2TextMapHash as contextHash "
+        "from fetterStory where storyContext2TextMapHash is not null"
+    )
+
+
+def selectStorySourcesByTextHash(textHash: int):
+    with closing(conn.cursor()) as cursor:
+        sql = (
+            "select entries.avatarId, entries.fetterId, entries.titleHash, entries.lockedTitleHash "
+            f"from ({_avatar_story_entries_subquery()}) as entries "
+            "where entries.contextHash = ? "
+            "order by entries.fetterId"
+        )
+        cursor.execute(sql, (textHash,))
+        return cursor.fetchall()
+
+
 def _legacy_selectAvatarVoiceItemsByFilters(
     keyword: str | None,
     langCode: int,
@@ -4583,19 +4620,7 @@ def selectAvatarStoryItemsByFilters(
         sql = (
             "select entries.avatarId, entries.fetterId, entries.titleHash, "
             "entries.lockedTitleHash, entries.contextHash "
-            "from ("
-            "select avatarId, fetterId, "
-            "storyTitleTextMapHash as titleHash, "
-            "storyTitleLockedTextMapHash as lockedTitleHash, "
-            "storyContextTextMapHash as contextHash "
-            "from fetterStory where storyContextTextMapHash is not null "
-            "union all "
-            "select avatarId, fetterId, "
-            "storyTitle2TextMapHash as titleHash, "
-            "storyTitleLockedTextMapHash as lockedTitleHash, "
-            "storyContext2TextMapHash as contextHash "
-            "from fetterStory where storyContext2TextMapHash is not null"
-            ") as entries "
+            f"from ({_avatar_story_entries_subquery()}) as entries "
             "left join textMap as titleText on titleText.hash = entries.titleHash and titleText.lang = ? "
             "left join textMap as lockedText on lockedText.hash = entries.lockedTitleHash and lockedText.lang = ? "
             "left join textMap as contextText on contextText.hash = entries.contextHash and contextText.lang = ? "
@@ -5233,6 +5258,45 @@ def selectDialogueByTalkerTypeAndKeyword(
         return cursor.fetchall()
 
 
+def selectFetterBySpeakerKeyword(
+    keyword: str,
+    langCode: int,
+    limit: int | None = None,
+    created_version: str | None = None,
+    updated_version: str | None = None,
+):
+    with closing(conn.cursor()) as cursor:
+        exact, fuzzy = _build_like_patterns(keyword, langCode)
+        speaker_sort_sql, speaker_sort_params = _build_match_sort_case("avatarName.content", keyword, langCode)
+        speaker_length_sql = f"length({_build_normalized_match_expr('avatarName.content', langCode)})"
+        sql = (
+            "select fetters.voiceFileTextTextMapHash, fetters.avatarId "
+            "from fetters "
+            "join textMap as voiceText on fetters.voiceFileTextTextMapHash = voiceText.hash "
+            "and voiceText.lang = ? "
+            "join avatar on fetters.avatarId = avatar.avatarId "
+            "join textMap as avatarName on avatar.nameTextMapHash = avatarName.hash "
+            "and avatarName.lang = ? "
+            "where (avatarName.content like ? escape '\\' or avatarName.content like ? escape '\\') "
+        )
+        params = [langCode, langCode, exact, fuzzy]
+        sql = _append_version_filter_clause(
+            sql + " ",
+            params,
+            "voiceText",
+            created_version,
+            updated_version,
+            "textMap",
+        )
+        sql += f"order by {speaker_sort_sql}, {speaker_length_sql}, fetters.fetterId "
+        params.extend(speaker_sort_params)
+        if limit is not None:
+            sql += " limit ?"
+            params.append(limit)
+        cursor.execute(sql, params)
+        return cursor.fetchall()
+
+
 def selectFetterBySpeakerAndKeyword(
     speaker_keyword: str,
     keyword: str,
@@ -5279,6 +5343,99 @@ def selectFetterBySpeakerAndKeyword(
             f"{voice_length_sql}, fetters.fetterId "
         )
         params.extend(voice_sort_params)
+        params.extend(speaker_sort_params)
+        if limit is not None:
+            sql += " limit ?"
+            params.append(limit)
+        cursor.execute(sql, params)
+        return cursor.fetchall()
+
+
+def selectAvatarStoryBySpeakerKeyword(
+    keyword: str,
+    langCode: int,
+    limit: int | None = None,
+    created_version: str | None = None,
+    updated_version: str | None = None,
+):
+    with closing(conn.cursor()) as cursor:
+        exact, fuzzy = _build_like_patterns(keyword, langCode)
+        speaker_sort_sql, speaker_sort_params = _build_match_sort_case("avatarName.content", keyword, langCode)
+        speaker_length_sql = f"length({_build_normalized_match_expr('avatarName.content', langCode)})"
+        sql = (
+            "select entries.contextHash, entries.avatarId "
+            f"from ({_avatar_story_entries_subquery()}) as entries "
+            "join textMap as storyText on entries.contextHash = storyText.hash "
+            "and storyText.lang = ? "
+            "join avatar on entries.avatarId = avatar.avatarId "
+            "join textMap as avatarName on avatar.nameTextMapHash = avatarName.hash "
+            "and avatarName.lang = ? "
+            "where (avatarName.content like ? escape '\\' or avatarName.content like ? escape '\\') "
+        )
+        params = [langCode, langCode, exact, fuzzy]
+        sql = _append_version_filter_clause(
+            sql + " ",
+            params,
+            "storyText",
+            created_version,
+            updated_version,
+            "textMap",
+        )
+        sql += f"order by {speaker_sort_sql}, {speaker_length_sql}, entries.fetterId "
+        params.extend(speaker_sort_params)
+        if limit is not None:
+            sql += " limit ?"
+            params.append(limit)
+        cursor.execute(sql, params)
+        return cursor.fetchall()
+
+
+def selectAvatarStoryBySpeakerAndKeyword(
+    speaker_keyword: str,
+    keyword: str,
+    langCode: int,
+    limit: int | None = None,
+    created_version: str | None = None,
+    updated_version: str | None = None,
+):
+    with closing(conn.cursor()) as cursor:
+        speaker_exact, speaker_fuzzy = _build_like_patterns(speaker_keyword, langCode)
+        keyword_exact, keyword_fuzzy = _build_like_patterns(keyword, langCode)
+        story_sort_sql, story_sort_params = _build_match_sort_case("storyText.content", keyword, langCode)
+        speaker_sort_sql, speaker_sort_params = _build_match_sort_case("avatarName.content", speaker_keyword, langCode)
+        story_length_sql = f"length({_build_normalized_match_expr('storyText.content', langCode)})"
+        sql = (
+            "select entries.contextHash, entries.avatarId "
+            f"from ({_avatar_story_entries_subquery()}) as entries "
+            "join textMap as storyText on entries.contextHash = storyText.hash "
+            "and storyText.lang = ? "
+            "join avatar on entries.avatarId = avatar.avatarId "
+            "join textMap as avatarName on avatar.nameTextMapHash = avatarName.hash "
+            "and avatarName.lang = ? "
+            "where (storyText.content like ? escape '\\' or storyText.content like ? escape '\\') "
+            "and (avatarName.content like ? escape '\\' or avatarName.content like ? escape '\\') "
+        )
+        params = [
+            langCode,
+            langCode,
+            keyword_exact,
+            keyword_fuzzy,
+            speaker_exact,
+            speaker_fuzzy,
+        ]
+        sql = _append_version_filter_clause(
+            sql + " ",
+            params,
+            "storyText",
+            created_version,
+            updated_version,
+            "textMap",
+        )
+        sql += (
+            f"order by {story_sort_sql}, {speaker_sort_sql}, "
+            f"{story_length_sql}, entries.fetterId "
+        )
+        params.extend(story_sort_params)
         params.extend(speaker_sort_params)
         if limit is not None:
             sql += " limit ?"
@@ -5388,6 +5545,38 @@ def countDialogueByTalkerTypeAndKeyword(
         return int(row[0]) if row else 0
 
 
+def countFetterBySpeakerKeyword(
+    keyword: str,
+    langCode: int,
+    created_version: str | None = None,
+    updated_version: str | None = None,
+) -> int:
+    with closing(conn.cursor()) as cursor:
+        exact, fuzzy = _build_like_patterns(keyword, langCode)
+        sql = (
+            "select count(*) "
+            "from fetters "
+            "join textMap as voiceText on fetters.voiceFileTextTextMapHash = voiceText.hash "
+            "and voiceText.lang = ? "
+            "join avatar on fetters.avatarId = avatar.avatarId "
+            "join textMap as avatarName on avatar.nameTextMapHash = avatarName.hash "
+            "and avatarName.lang = ? "
+            "where (avatarName.content like ? escape '\\' or avatarName.content like ? escape '\\')"
+        )
+        params = [langCode, langCode, exact, fuzzy]
+        sql = _append_version_filter_clause(
+            sql + " ",
+            params,
+            "voiceText",
+            created_version,
+            updated_version,
+            "textMap",
+        )
+        cursor.execute(sql, params)
+        row = cursor.fetchone()
+        return int(row[0]) if row else 0
+
+
 def countFetterBySpeakerAndKeyword(
     speaker_keyword: str,
     keyword: str,
@@ -5421,6 +5610,80 @@ def countFetterBySpeakerAndKeyword(
             sql + " ",
             params,
             "voiceText",
+            created_version,
+            updated_version,
+            "textMap",
+        )
+        cursor.execute(sql, params)
+        row = cursor.fetchone()
+        return int(row[0]) if row else 0
+
+
+def countAvatarStoryBySpeakerKeyword(
+    keyword: str,
+    langCode: int,
+    created_version: str | None = None,
+    updated_version: str | None = None,
+) -> int:
+    with closing(conn.cursor()) as cursor:
+        exact, fuzzy = _build_like_patterns(keyword, langCode)
+        sql = (
+            "select count(*) "
+            f"from ({_avatar_story_entries_subquery()}) as entries "
+            "join textMap as storyText on entries.contextHash = storyText.hash "
+            "and storyText.lang = ? "
+            "join avatar on entries.avatarId = avatar.avatarId "
+            "join textMap as avatarName on avatar.nameTextMapHash = avatarName.hash "
+            "and avatarName.lang = ? "
+            "where (avatarName.content like ? escape '\\' or avatarName.content like ? escape '\\')"
+        )
+        params = [langCode, langCode, exact, fuzzy]
+        sql = _append_version_filter_clause(
+            sql + " ",
+            params,
+            "storyText",
+            created_version,
+            updated_version,
+            "textMap",
+        )
+        cursor.execute(sql, params)
+        row = cursor.fetchone()
+        return int(row[0]) if row else 0
+
+
+def countAvatarStoryBySpeakerAndKeyword(
+    speaker_keyword: str,
+    keyword: str,
+    langCode: int,
+    created_version: str | None = None,
+    updated_version: str | None = None,
+) -> int:
+    with closing(conn.cursor()) as cursor:
+        speaker_exact, speaker_fuzzy = _build_like_patterns(speaker_keyword, langCode)
+        keyword_exact, keyword_fuzzy = _build_like_patterns(keyword, langCode)
+        sql = (
+            "select count(*) "
+            f"from ({_avatar_story_entries_subquery()}) as entries "
+            "join textMap as storyText on entries.contextHash = storyText.hash "
+            "and storyText.lang = ? "
+            "join avatar on entries.avatarId = avatar.avatarId "
+            "join textMap as avatarName on avatar.nameTextMapHash = avatarName.hash "
+            "and avatarName.lang = ? "
+            "where (storyText.content like ? escape '\\' or storyText.content like ? escape '\\') "
+            "and (avatarName.content like ? escape '\\' or avatarName.content like ? escape '\\')"
+        )
+        params = [
+            langCode,
+            langCode,
+            keyword_exact,
+            keyword_fuzzy,
+            speaker_exact,
+            speaker_fuzzy,
+        ]
+        sql = _append_version_filter_clause(
+            sql + " ",
+            params,
+            "storyText",
             created_version,
             updated_version,
             "textMap",

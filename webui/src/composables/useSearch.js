@@ -15,6 +15,7 @@ const useSearch = () => {
     { value: '', label: '全部来源' },
     { value: 'dialogue', label: '对话' },
     { value: 'voice', label: '角色语音' },
+    { value: 'story', label: '角色故事' },
     { value: 'quest', label: '任务' },
     { value: 'readable', label: '阅读物' },
     { value: 'subtitle', label: '字幕' },

@@ -104,6 +104,53 @@ def _count_fetter_by_speaker_and_keyword_cached(
     )
 
 
+@lru_cache(maxsize=1024)
+def _count_fetter_by_speaker_keyword_cached(
+    speaker_keyword: str,
+    lang_code: int,
+    created_version: str | None,
+    updated_version: str | None,
+) -> int:
+    return databaseHelper.countFetterBySpeakerKeyword(
+        speaker_keyword,
+        lang_code,
+        created_version,
+        updated_version,
+    )
+
+
+@lru_cache(maxsize=1024)
+def _count_story_by_speaker_keyword_cached(
+    speaker_keyword: str,
+    lang_code: int,
+    created_version: str | None,
+    updated_version: str | None,
+) -> int:
+    return databaseHelper.countAvatarStoryBySpeakerKeyword(
+        speaker_keyword,
+        lang_code,
+        created_version,
+        updated_version,
+    )
+
+
+@lru_cache(maxsize=1024)
+def _count_story_by_speaker_and_keyword_cached(
+    speaker_keyword: str,
+    keyword: str,
+    lang_code: int,
+    created_version: str | None,
+    updated_version: str | None,
+) -> int:
+    return databaseHelper.countAvatarStoryBySpeakerAndKeyword(
+        speaker_keyword,
+        keyword,
+        lang_code,
+        created_version,
+        updated_version,
+    )
+
+
 @lru_cache(maxsize=2048)
 def _count_textmap_from_keyword_cached(
     keyword: str,
@@ -260,6 +307,37 @@ def selectVoiceOriginFromTextHash(textHash: int, langCode: int) -> tuple[str, bo
     return "其他文本", False
 
 
+def _select_story_source_from_text_hash(text_hash: int, lang_code: int) -> tuple[dict, str, bool, int] | None:
+    story_sources = databaseHelper.selectStorySourcesByTextHash(text_hash)
+    if not story_sources:
+        return None
+
+    avatar_id, _fetter_id, title_hash, locked_title_hash = story_sources[0]
+    avatar_name = databaseHelper.getCharterName(avatar_id, lang_code)
+    title = None
+    if title_hash:
+        title = _get_text_map_content_with_fallback(title_hash, lang_code, [config.getSourceLanguage()])
+    if not title and locked_title_hash:
+        title = _get_text_map_content_with_fallback(locked_title_hash, lang_code, [config.getSourceLanguage()])
+
+    if avatar_name and title:
+        origin = f"{avatar_name} · {title}"
+    elif avatar_name:
+        origin = avatar_name
+    elif title:
+        origin = title
+    else:
+        origin = "角色故事"
+
+    primary = _build_primary_source(
+        "story",
+        origin,
+        "角色故事",
+        {"kind": "text", "textHash": text_hash},
+    )
+    return primary, origin, False, len(story_sources)
+
+
 def _build_primary_source(
     source_type: str,
     title: str,
@@ -282,6 +360,8 @@ def _normalize_source_type_filter(source_type: str | None) -> str | None:
     if not normalized or normalized == "all":
         return None
     alias_map = {
+        "角色语音": "voice",
+        "角色故事": "story",
         "奇偶装扮": "costume",
         "装扮套装": "costume",
         "千星奇域": "costume",
@@ -331,9 +411,27 @@ def _filter_entries_by_source_type(entries: list[dict], source_type_filter: str 
     return [entry for entry in entries if _matches_source_type_filter(entry, normalized_filter)]
 
 
+def _text_hash_matches_source_type(
+    text_hash: int | None,
+    source_type_filter: str | None,
+    lang_code: int,
+    entry: dict | None = None,
+) -> bool:
+    normalized_filter = _normalize_source_type_filter(source_type_filter)
+    if normalized_filter is None:
+        return True
+    if text_hash is None:
+        return False
+    if normalized_filter == "voice":
+        return databaseHelper.getSourceFromFetter(text_hash, lang_code) is not None
+    if normalized_filter == "story":
+        return bool(databaseHelper.selectStorySourcesByTextHash(text_hash))
+    return _matches_source_type_filter(entry or {}, normalized_filter)
+
+
 # 可以在数据库层直接 JOIN 过滤的来源类型
 _DB_FILTERABLE_SOURCE_TYPES_BUILTIN: frozenset[str] = frozenset({
-    "dialogue", "voice", "quest",
+    "dialogue", "voice", "story", "quest",
     "item", "food", "furnishing", "gadget", "material",
     "costume", "suit",
     "weapon", "reliquary", "monster", "creature",
@@ -795,6 +893,10 @@ def _select_primary_source_from_text_hash(text_hash: int, lang_code: int) -> tup
         )
         return primary, fetter_origin, False, 1
 
+    story_source = _select_story_source_from_text_hash(text_hash, lang_code)
+    if story_source is not None:
+        return story_source
+
     quest_sources = databaseHelper.selectQuestHashSources(text_hash, source_type="title")
     if quest_sources:
         quest_ids = sorted({quest_id for quest_id, _ in quest_sources})
@@ -1255,6 +1357,28 @@ def _paginate(entries: list[dict], page: int, page_size: int, total: int | None 
     return entries[start:end], total_count
 
 
+def _select_preferred_primary_source_from_text_hash(
+    text_hash: int,
+    source_lang_code: int,
+    preferred_source_type: str | None,
+) -> tuple[dict, str, bool, int] | None:
+    normalized = _normalize_source_type_filter(preferred_source_type)
+    if normalized == "voice":
+        fetter_origin = databaseHelper.getSourceFromFetter(text_hash, source_lang_code)
+        if fetter_origin is None:
+            return None
+        primary = _build_primary_source(
+            "voice",
+            fetter_origin,
+            "角色语音",
+            {"kind": "text", "textHash": text_hash},
+        )
+        return primary, fetter_origin, False, 1
+    if normalized == "story":
+        return _select_story_source_from_text_hash(text_hash, source_lang_code)
+    return None
+
+
 def _enrich_primary_sources(results: list[dict], source_lang_code: int):
     """
     为搜索结果中缺少 primarySource 的条目补充来源信息。
@@ -1262,10 +1386,25 @@ def _enrich_primary_sources(results: list[dict], source_lang_code: int):
     已有 primarySource 的条目（readable/subtitle）会被跳过。
     """
     for entry in results:
-        if entry.get('primarySource'):
-            continue
         text_hash = entry.get('hash')
         if text_hash is None:
+            continue
+        preferred_source_type = entry.pop('_preferredSourceType', None)
+        preferred_source = _select_preferred_primary_source_from_text_hash(
+            text_hash,
+            source_lang_code,
+            preferred_source_type,
+        )
+        if preferred_source is not None:
+            primary_source, origin, is_talk, source_count = preferred_source
+            entry['primarySource'] = primary_source
+            entry['origin'] = origin
+            entry['isTalk'] = is_talk
+            entry['sourceCount'] = source_count
+            if not is_talk and not entry.get('isReadable') and not entry.get('isSubtitle'):
+                entry['viewAsTextHash'] = True
+            continue
+        if entry.get('primarySource'):
             continue
         primary_source, origin, is_talk, source_count = _select_primary_source_from_text_hash(text_hash, source_lang_code)
         entry['primarySource'] = primary_source
@@ -1281,7 +1420,7 @@ def _handle_speaker_only_query(speaker_keyword: str, langCode: int, page: int, p
     处理仅说话者查询
     """
     normalized_source_type = _normalize_source_type_filter(source_type_filter)
-    if normalized_source_type and normalized_source_type != "dialogue":
+    if normalized_source_type and normalized_source_type not in ("dialogue", "voice", "story"):
         return [], 0
 
     ans = []
@@ -1291,6 +1430,70 @@ def _handle_speaker_only_query(speaker_keyword: str, langCode: int, page: int, p
     sourceLangCode = config.getSourceLanguage()
 
     seen_hashes = set()
+    if normalized_source_type == "voice":
+        if voice_filter == "without":
+            return [], 0
+        voice_rows = databaseHelper.selectFetterBySpeakerKeyword(
+            speaker_keyword,
+            langCode,
+            page * page_size * 3,
+            created_version_filter,
+            updated_version_filter,
+        )
+        for textHash, avatarId in voice_rows:
+            if textHash in seen_hashes:
+                continue
+            seen_hashes.add(textHash)
+            obj = queryTextHashInfo(textHash, langs, sourceLangCode)
+            obj['_preferredSourceType'] = "voice"
+            obj['talker'] = databaseHelper.getCharterName(avatarId, langCode)
+            ans.append(obj)
+        total = _count_fetter_by_speaker_keyword_cached(
+            speaker_keyword,
+            langCode,
+            created_version_filter,
+            updated_version_filter,
+        )
+        _sort_entries_by_match(
+            ans,
+            speaker_keyword,
+            langCode,
+            lambda entry: [entry.get('talker')],
+        )
+        return _paginate(ans, page, page_size, total)
+
+    if normalized_source_type == "story":
+        if voice_filter == "with":
+            return [], 0
+        story_rows = databaseHelper.selectAvatarStoryBySpeakerKeyword(
+            speaker_keyword,
+            langCode,
+            page * page_size * 3,
+            created_version_filter,
+            updated_version_filter,
+        )
+        for textHash, avatarId in story_rows:
+            if textHash in seen_hashes:
+                continue
+            seen_hashes.add(textHash)
+            obj = queryTextHashInfo(textHash, langs, sourceLangCode)
+            obj['_preferredSourceType'] = "story"
+            obj['talker'] = databaseHelper.getCharterName(avatarId, langCode)
+            ans.append(obj)
+        total = _count_story_by_speaker_keyword_cached(
+            speaker_keyword,
+            langCode,
+            created_version_filter,
+            updated_version_filter,
+        )
+        _sort_entries_by_match(
+            ans,
+            speaker_keyword,
+            langCode,
+            lambda entry: [entry.get('talker')],
+        )
+        return _paginate(ans, page, page_size, total)
+
     speaker_norm = _normalize_speaker(speaker_keyword, langCode)
 
     # 查询对话
@@ -1358,7 +1561,7 @@ def _handle_speaker_and_keyword_query(speaker_keyword: str, keyword_trim: str, l
     处理说话者和关键词查询
     """
     normalized_source_type = _normalize_source_type_filter(source_type_filter)
-    if normalized_source_type and normalized_source_type not in ("dialogue", "voice"):
+    if normalized_source_type and normalized_source_type not in ("dialogue", "voice", "story"):
         return [], 0
 
     ans = []
@@ -1368,6 +1571,84 @@ def _handle_speaker_and_keyword_query(speaker_keyword: str, keyword_trim: str, l
     sourceLangCode = config.getSourceLanguage()
 
     seen_hashes = set()
+
+    if normalized_source_type == "voice":
+        if voice_filter == "without":
+            return [], 0
+        fetter_rows = databaseHelper.selectFetterBySpeakerAndKeyword(
+            speaker_keyword,
+            keyword_trim,
+            langCode,
+            page * page_size * 3,
+            created_version_filter,
+            updated_version_filter,
+        )
+        for textHash, avatarId in fetter_rows:
+            if textHash in seen_hashes:
+                continue
+            seen_hashes.add(textHash)
+            obj = queryTextHashInfo(textHash, langs, sourceLangCode)
+            obj['_preferredSourceType'] = "voice"
+            obj['talker'] = databaseHelper.getCharterName(avatarId, langCode)
+            ans.append(obj)
+        total = _count_fetter_by_speaker_and_keyword_cached(
+            speaker_keyword,
+            keyword_trim,
+            langCode,
+            created_version_filter,
+            updated_version_filter,
+        )
+        ans.sort(
+            key=lambda entry: (
+                _best_field_match(
+                    [entry.get('translates', {}).get(str(langCode))],
+                    keyword_trim,
+                    langCode,
+                ),
+                _best_field_match([entry.get('talker')], speaker_keyword, langCode),
+                0 if entry.get('voicePaths') else 1,
+            )
+        )
+        return _paginate(ans, page, page_size, total)
+
+    if normalized_source_type == "story":
+        if voice_filter == "with":
+            return [], 0
+        story_rows = databaseHelper.selectAvatarStoryBySpeakerAndKeyword(
+            speaker_keyword,
+            keyword_trim,
+            langCode,
+            page * page_size * 3,
+            created_version_filter,
+            updated_version_filter,
+        )
+        for textHash, avatarId in story_rows:
+            if textHash in seen_hashes:
+                continue
+            seen_hashes.add(textHash)
+            obj = queryTextHashInfo(textHash, langs, sourceLangCode)
+            obj['_preferredSourceType'] = "story"
+            obj['talker'] = databaseHelper.getCharterName(avatarId, langCode)
+            ans.append(obj)
+        total = _count_story_by_speaker_and_keyword_cached(
+            speaker_keyword,
+            keyword_trim,
+            langCode,
+            created_version_filter,
+            updated_version_filter,
+        )
+        ans.sort(
+            key=lambda entry: (
+                _best_field_match(
+                    [entry.get('translates', {}).get(str(langCode))],
+                    keyword_trim,
+                    langCode,
+                ),
+                _best_field_match([entry.get('talker')], speaker_keyword, langCode),
+                0 if entry.get('voicePaths') else 1,
+            )
+        )
+        return _paginate(ans, page, page_size, total)
 
     # 查询对话
     dialogue_rows = databaseHelper.selectDialogueByTalkerAndKeyword(
@@ -1738,8 +2019,18 @@ def _handle_all_voice_filter_ranked(keyword, keyword_trim, langCode, safe_page, 
     normalized_source_type = _normalize_source_type_filter(source_type_filter)
     candidate_limit = max(safe_size, safe_page * safe_size)
     candidates = []
+    hash_matches_source_type = bool(
+        hash_obj is not None and _text_hash_matches_source_type(
+            hash_value,
+            normalized_source_type,
+            sourceLangCode,
+            hash_obj,
+        )
+    )
 
-    if hash_extra and hash_obj is not None:
+    if hash_extra and hash_obj is not None and hash_matches_source_type:
+        if normalized_source_type in {"voice", "story"}:
+            hash_obj['_preferredSourceType'] = normalized_source_type
         candidates.append(hash_obj)
         if hash_value is not None:
             text_hashes_seen.add(hash_value)
@@ -1748,7 +2039,7 @@ def _handle_all_voice_filter_ranked(keyword, keyword_trim, langCode, safe_page, 
         # textmap 专用路径
         total = _count_textmap_from_keyword_cached(
             keyword, langCode, created_version_filter, updated_version_filter,
-        ) + (1 if hash_extra else 0)
+        ) + (1 if hash_extra and hash_matches_source_type else 0)
 
         rows = databaseHelper.selectTextMapFromKeywordPaged(
             keyword, langCode, candidate_limit, 0,
@@ -1769,7 +2060,7 @@ def _handle_all_voice_filter_ranked(keyword, keyword_trim, langCode, safe_page, 
         total = databaseHelper.countTextMapFromKeywordBySourceType(
             keyword, langCode, db_source_type,
             created_version_filter, updated_version_filter,
-        ) + (1 if hash_extra else 0)
+        ) + (1 if hash_extra and hash_matches_source_type else 0)
 
         rows = databaseHelper.selectTextMapFromKeywordBySourceType(
             keyword, langCode, db_source_type, candidate_limit, 0,
@@ -1779,7 +2070,10 @@ def _handle_all_voice_filter_ranked(keyword, keyword_trim, langCode, safe_page, 
             if text_hash in text_hashes_seen:
                 continue
             text_hashes_seen.add(text_hash)
-            candidates.append(queryTextHashInfo(text_hash, langs, sourceLangCode, queryOrigin=False))
+            obj = queryTextHashInfo(text_hash, langs, sourceLangCode, queryOrigin=False)
+            if db_source_type in {"voice", "story"}:
+                obj['_preferredSourceType'] = db_source_type
+            candidates.append(obj)
 
     elif normalized_source_type == "readable":
         # 仅加载 readable
@@ -1821,7 +2115,7 @@ def _handle_all_voice_filter_ranked(keyword, keyword_trim, langCode, safe_page, 
         total_subtitle = _count_subtitle_from_keyword_cached(
             keyword, langCode, created_version_filter, updated_version_filter,
         )
-        total = total_textmap + total_readable + total_subtitle + (1 if hash_extra else 0)
+        total = total_textmap + total_readable + total_subtitle + (1 if hash_extra and hash_matches_source_type else 0)
 
         rows = databaseHelper.selectTextMapFromKeywordPaged(
             keyword, langCode, candidate_limit, 0,
@@ -1861,18 +2155,28 @@ def _handle_all_voice_filter_ranked(keyword, keyword_trim, langCode, safe_page, 
 
 def _handle_specific_voice_filter_ranked(keyword, keyword_trim, langCode, safe_page, safe_size, voice_filter, hash_value, is_hash_query, hash_obj, hash_extra, text_hashes_seen, langs, sourceLangCode, langStr, targetLangStrs, strToLangId, prefix_labels, created_version_filter, updated_version_filter, source_type_filter=None):
     normalized_source_type = _normalize_source_type_filter(source_type_filter)
+    hash_matches_source_type = bool(
+        hash_obj is not None and _text_hash_matches_source_type(
+            hash_value,
+            normalized_source_type,
+            sourceLangCode,
+            hash_obj,
+        )
+    )
     hash_extra_filtered = False
     if hash_extra and hash_obj is not None:
         hash_has_voice = databaseHelper.hasVoiceForTextHashDb(hash_value)
         if (voice_filter == "with" and hash_has_voice) or (
             voice_filter == "without" and not hash_has_voice
         ):
-            hash_extra_filtered = True
+            hash_extra_filtered = hash_matches_source_type
 
     candidate_limit = max(safe_size, safe_page * safe_size)
     candidates = []
 
     if hash_extra_filtered and hash_obj is not None:
+        if normalized_source_type in {"voice", "story"}:
+            hash_obj['_preferredSourceType'] = normalized_source_type
         candidates.append(hash_obj)
         if hash_value is not None:
             text_hashes_seen.add(hash_value)
@@ -1909,6 +2213,8 @@ def _handle_specific_voice_filter_ranked(keyword, keyword_trim, langCode, safe_p
                 continue
             text_hashes_seen.add(text_hash)
             obj = queryTextHashInfo(text_hash, langs, sourceLangCode, queryOrigin=False)
+            if db_source_type in {"voice", "story"}:
+                obj['_preferredSourceType'] = db_source_type
             candidates.append(obj)
         candidates = _apply_voice_filter(candidates, voice_filter)
         total = len(candidates) + (1 if hash_extra_filtered else 0)
@@ -3759,7 +4065,7 @@ def searchAvatarVoicesByFilters(
                 obj['origin'] = title
                 obj['voiceTitle'] = title
             else:
-                obj['origin'] = "隗定牡隸ｭ髻ｳ"
+                obj['origin'] = "角色语音"
                 obj['voiceTitle'] = ""
             created_raw, updated_raw = databaseHelper.getTextMapVersionInfo(textHash, sourceLangCode)
             obj.update(_build_version_fields(created_raw, updated_raw))
