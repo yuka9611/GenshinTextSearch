@@ -936,15 +936,15 @@ onDeactivated(() => {
 .questDescriptionBlock {
     padding: 16px 18px;
     border-radius: 20px;
-    border: 1px solid rgba(190, 164, 124, 0.24);
-    background: rgba(47, 105, 101, 0.06);
+    border: 1px solid var(--theme-border);
+    background: var(--search-section-muted-bg);
     color: var(--theme-text);
 }
 
 .questDescriptionLabel {
     margin-bottom: 6px;
     font-weight: 600;
-    color: var(--el-text-color-primary);
+    color: var(--theme-ink);
 }
 
 .readableContent {
@@ -956,8 +956,9 @@ onDeactivated(() => {
 .readableBlock {
     padding: 16px 18px;
     border-radius: 22px;
-    border: 1px solid rgba(190, 164, 124, 0.24);
-    background: linear-gradient(180deg, rgba(255, 253, 248, 0.94), rgba(248, 241, 229, 0.88));
+    border: 1px solid var(--theme-border);
+    background: linear-gradient(180deg, var(--theme-card-strong), var(--theme-surface));
+    box-shadow: 0 10px 24px rgba(44, 57, 54, 0.06);
 }
 
 .readableHeader {
@@ -1095,4 +1096,10 @@ onDeactivated(() => {
     }
 }
 
+</style>
+
+<style>
+[data-theme="dark"] .readableBlock {
+    box-shadow: 0 16px 30px rgba(0, 0, 0, 0.18);
+}
 </style>
