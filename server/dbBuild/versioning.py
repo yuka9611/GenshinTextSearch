@@ -5,6 +5,12 @@ import sys
 from pathlib import Path
 
 from DBConfig import conn, DATA_PATH
+from textmap_fts_sql import (
+    build_textmap_fts_ad_trigger_sql,
+    build_textmap_fts_ai_trigger_sql,
+    build_textmap_fts_au_trigger_sql,
+    build_textmap_fts_table_sql,
+)
 
 SPECIAL_VERSION_LABEL_MAP = {
     "BinOutput": "1.5",
@@ -335,6 +341,10 @@ def _fts_table_has_required_columns(cursor) -> bool:
     return {"content", "lang", "hash"}.issubset(cols)
 
 
+def _normalize_sql_text(sql: str | None) -> str:
+    return " ".join(str(sql or "").split()).lower()
+
+
 def _reset_textmap_fts(cursor):
     cursor.execute("DROP TRIGGER IF EXISTS textMap_fts_ai")
     cursor.execute("DROP TRIGGER IF EXISTS textMap_fts_ad")
@@ -353,36 +363,10 @@ def _create_textmap_fts_objects(
     detail_mode: str,
     columnsize: int,
 ):
-    detail_escaped = str(detail_mode).replace("'", "''")
-    columnsize_value = 0 if int(columnsize) == 0 else 1
-    cursor.execute(
-        "CREATE VIRTUAL TABLE IF NOT EXISTS textMap_fts "
-        f"USING fts5(content, lang UNINDEXED, hash UNINDEXED, "
-        f"content='textMap', content_rowid='id', tokenize='{token_escaped}', "
-        f"detail='{detail_escaped}', columnsize={columnsize_value})"
-    )
-
-    cursor.execute(
-        "CREATE TRIGGER IF NOT EXISTS textMap_fts_ai AFTER INSERT ON textMap "
-        f"WHEN new.lang IN ({langs_sql}) BEGIN "
-        "INSERT INTO textMap_fts(rowid, content, lang, hash) "
-        "VALUES (new.id, gts_fts_content(new.lang, new.content), new.lang, new.hash); "
-        "END"
-    )
-    cursor.execute(
-        "CREATE TRIGGER IF NOT EXISTS textMap_fts_ad AFTER DELETE ON textMap BEGIN "
-        "INSERT INTO textMap_fts(textMap_fts, rowid, content, lang, hash) "
-        "VALUES('delete', old.id, gts_fts_content(old.lang, old.content), old.lang, old.hash); "
-        "END"
-    )
-    cursor.execute(
-        "CREATE TRIGGER IF NOT EXISTS textMap_fts_au AFTER UPDATE OF content, lang, hash ON textMap BEGIN "
-        "INSERT INTO textMap_fts(textMap_fts, rowid, content, lang, hash) "
-        "VALUES('delete', old.id, gts_fts_content(old.lang, old.content), old.lang, old.hash); "
-        "INSERT INTO textMap_fts(rowid, content, lang, hash) "
-        f"SELECT new.id, gts_fts_content(new.lang, new.content), new.lang, new.hash WHERE new.lang IN ({langs_sql}); "
-        "END"
-    )
+    cursor.execute(build_textmap_fts_table_sql(token_escaped, detail_mode, columnsize))
+    cursor.execute(build_textmap_fts_ai_trigger_sql(langs_sql))
+    cursor.execute(build_textmap_fts_ad_trigger_sql(langs_sql))
+    cursor.execute(build_textmap_fts_au_trigger_sql(langs_sql))
 
 
 def _ensure_textmap_fts():
@@ -447,6 +431,8 @@ def _ensure_textmap_fts():
             pass
 
         langs_signature = _fts_langs_signature(allow_langs)
+        langs_sql = ",".join(str(v) for v in sorted(set(allow_langs)))
+        old_lang_guard = _normalize_sql_text(f"WHERE old.lang IN ({langs_sql})")
         runtime_signature = _fts_runtime_signature(
             token_spec,
             allow_langs,
@@ -467,16 +453,27 @@ def _ensure_textmap_fts():
             "SELECT v FROM app_meta WHERE k='textmap_fts_signature' LIMIT 1"
         ).fetchone()
         existing_signature = str(existing_signature_row[0]).strip() if existing_signature_row and existing_signature_row[0] else ""
+        delete_trigger_row = cur.execute(
+            "SELECT sql FROM sqlite_master WHERE type='trigger' AND name='textMap_fts_ad' LIMIT 1"
+        ).fetchone()
+        update_trigger_row = cur.execute(
+            "SELECT sql FROM sqlite_master WHERE type='trigger' AND name='textMap_fts_au' LIMIT 1"
+        ).fetchone()
+        delete_trigger_sql = _normalize_sql_text(delete_trigger_row[0] if delete_trigger_row else None)
+        update_trigger_sql = _normalize_sql_text(update_trigger_row[0] if update_trigger_row else None)
 
         structure_changed = existing_row is not None and not _fts_table_has_required_columns(cur)
         tokenizer_changed = existing_row is not None and existing_tokenizer != token_spec
         langs_changed = existing_row is not None and existing_langs_signature != langs_signature
+        trigger_changed = existing_row is not None and (
+            old_lang_guard not in delete_trigger_sql
+            or old_lang_guard not in update_trigger_sql
+        )
         signature_changed = existing_signature != runtime_signature
-        if tokenizer_changed or structure_changed or langs_changed:
+        if tokenizer_changed or structure_changed or langs_changed or trigger_changed:
             _reset_textmap_fts(cur)
 
         token_escaped = token_spec.replace("'", "''")
-        langs_sql = ",".join(str(v) for v in sorted(set(allow_langs)))
         try:
             _create_textmap_fts_objects(
                 cur,
@@ -495,6 +492,7 @@ def _ensure_textmap_fts():
             tokenizer_changed
             or structure_changed
             or langs_changed
+            or trigger_changed
             or signature_changed
             or marker is None
             or marker[0] != "1"
