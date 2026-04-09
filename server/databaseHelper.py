@@ -3163,11 +3163,13 @@ try:
     import importlib.util
 
     # 使用 importlib 加载模块
-    versioning_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'dbBuild', 'versioning.py')
-    spec = importlib.util.spec_from_file_location("versioning", versioning_path)
+    dbbuild_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'dbBuild')
+    if dbbuild_dir not in sys.path:
+        sys.path.insert(0, dbbuild_dir)
+    versioning_path = os.path.join(dbbuild_dir, 'versioning.py')
+    spec = importlib.util.spec_from_file_location("database_helper_versioning", versioning_path)
     if spec and spec.loader:
         versioning = importlib.util.module_from_spec(spec)
-        sys.modules["versioning"] = versioning
         spec.loader.exec_module(versioning)
         get_current_version = versioning.get_current_version
     else:
