@@ -1090,6 +1090,8 @@ def catalogMeta():
         "data": {
             "mainCategories": controllers_module.getCatalogMainCategories(),  # type: ignore
             "subCategories": controllers_module.getCatalogSubCategories(),  # type: ignore
+            "subCategoryGroups": controllers_module.getCatalogSubCategoryGroups(),  # type: ignore
+            "uncategorizedSubCategory": controllers_module.getCatalogUncategorizedSubCategory(),  # type: ignore
         },
         "code": 200,
         "msg": "ok"

@@ -58,7 +58,7 @@ SUB_CARD_BACK = 13          # 牌背
 SUB_EVENT_FOOD = 14         # 活动食物
 SUB_WOOD = 15               # 木材
 SUB_EXP_MATERIAL = 16       # 经验素材
-SUB_COSTUME_DRESS = 17      # 衣装
+SUB_COSTUME_DRESS = 17      # 角色装扮
 SUB_TRACE = 18              # 游迹
 SUB_FLYCLOAK_SUB = 19       # 风之翼
 SUB_FIREWORKS = 20          # 烟花
@@ -102,6 +102,7 @@ MATERIAL_TYPE_TO_CATEGORY: dict[str, tuple[int, int]] = {
     "MATERIAL_ADSORBATE":                   (SOURCE_TYPE_MATERIAL, SUB_NONE),
     "MATERIAL_CONSUME_BATCH_USE":           (SOURCE_TYPE_MATERIAL, SUB_CONSUMABLE),
     "MATERIAL_COSTUME":                     (SOURCE_TYPE_DRESSING, SUB_COSTUME_DRESS),
+    "MATERIAL_NATURALIST_CODEX":           (SOURCE_TYPE_DRESSING, SUB_COSTUME_DRESS),
     "MATERIAL_MUSIC_GAME_BOOK_THEME":       (SOURCE_TYPE_MUSIC_THEME, SUB_NONE),
     "MATERIAL_ACTIVITY_ROBOT":              (SOURCE_TYPE_ITEM, SUB_EVENT_ITEM),
     "MATERIAL_AVATAR_TRACE":                (SOURCE_TYPE_DRESSING, SUB_TRACE),
@@ -175,7 +176,7 @@ SUB_CATEGORY_LABELS: dict[int, str] = {
     SUB_EVENT_FOOD: "活动食物",
     SUB_WOOD: "木材",
     SUB_EXP_MATERIAL: "经验素材",
-    SUB_COSTUME_DRESS: "衣装",
+    SUB_COSTUME_DRESS: "角色装扮",
     SUB_TRACE: "游迹",
     SUB_FLYCLOAK_SUB: "风之翼",
     SUB_FIREWORKS: "烟花",

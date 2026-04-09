@@ -54,6 +54,7 @@ const readableTitle = ref("")
 const readableFileName = ref("")
 const readableTranslates = ref({})
 const questDescription = ref("")
+const questLongDescription = ref("")
 const readableCreatedVersion = ref("")
 const readableUpdatedVersion = ref("")
 const readableCreatedVersionRaw = ref("")
@@ -126,6 +127,7 @@ const reloadPage = () => {
     currentPlayingIndex.value = -1
     totalCount.value = 0
     questDescription.value = ""
+    questLongDescription.value = ""
     currentTalkId.value = null
     currentQuestId.value = null
     currentDialogueId.value = null
@@ -226,6 +228,7 @@ const reloadDialogueGroup = () => {
         questName.value = talkContents.talkQuestName
         dialogues.value = talkContents.dialogues
         questDescription.value = ""
+        questLongDescription.value = ""
         currentTalkId.value = talkContents.talkId ?? route.query.talkId ?? null
         currentQuestId.value = null
         currentDialogueId.value = talkContents.dialogueIdFallback ?? route.query.dialogueIdFallback ?? null
@@ -245,6 +248,7 @@ const reloadTalk = (useCurrentPage = true) => {
             questName.value = talkContents.talkQuestName
             dialogues.value = talkContents.dialogues
             questDescription.value = ""
+            questLongDescription.value = ""
             currentTalkId.value = null
             currentQuestId.value = null
             totalCount.value = talkContents.dialogues?.length || 0
@@ -275,6 +279,7 @@ const reloadTalk = (useCurrentPage = true) => {
         questName.value = talkContents.talkQuestName
         dialogues.value = talkContents.dialogues
         questDescription.value = ""
+        questLongDescription.value = ""
         currentTalkId.value = talkContents.talkId ?? null
         currentQuestId.value = talkContents.questId ?? null
         currentDialogueId.value = null
@@ -291,6 +296,7 @@ const reloadReadable = () => {
         let resJson = res.json
         let readableContents = resJson.contents
         questDescription.value = ""
+        questLongDescription.value = ""
         readableTitle.value = readableContents.readableTitle || UI_TEXT.readableFallback
         readableFileName.value = readableContents.fileName || ""
         readableTranslates.value = readableContents.translates || {}
@@ -314,6 +320,7 @@ const reloadQuest = () => {
         let talkContents = resJson.contents
         questName.value = talkContents.talkQuestName
         questDescription.value = talkContents.questDescription || ""
+        questLongDescription.value = talkContents.questLongDescription || ""
         dialogues.value = talkContents.dialogues
         currentTalkId.value = talkContents.talkId ?? null
         currentQuestId.value = talkContents.questId ?? route.query.questId ?? null
@@ -738,6 +745,11 @@ onDeactivated(() => {
             <StylizedText :text="questDescription" :keyword="keyword" />
         </div>
 
+        <div v-if="!isReadable && questLongDescription" class="questDescriptionBlock">
+            <div class="questDescriptionLabel">长简介</div>
+            <StylizedText :text="questLongDescription" :keyword="keyword" />
+        </div>
+
         <div v-if="isReadable" class="readableContent">
             <div v-for="langCode in displayLanguages" :key="langCode" class="readableBlock">
                 <div class="readableHeader">
@@ -939,6 +951,10 @@ onDeactivated(() => {
     border: 1px solid var(--theme-border);
     background: var(--search-section-muted-bg);
     color: var(--theme-text);
+}
+
+.questDescriptionBlock + .questDescriptionBlock {
+    margin-top: 12px;
 }
 
 .questDescriptionLabel {

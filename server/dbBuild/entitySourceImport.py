@@ -394,7 +394,7 @@ def _print_entity_source_summary(data: dict[str, Any]):
     """Print a summary table of entity source record counts."""
     names = [
         ("materials", "材料"), ("furnitures", "家具"), ("costumes", "装扮"),
-        ("suits", "套装"), ("avatar_costumes", "角色衣装"),
+        ("suits", "套装"), ("avatar_costumes", "角色装扮"),
         ("weapons", "武器"), ("reliquaries", "圣遗物"), ("codex", "图鉴"),
         ("achievements", "成就"), ("viewpoints", "观景点"), ("dungeons", "秘境"),
         ("loading_tips", "过场提示"),

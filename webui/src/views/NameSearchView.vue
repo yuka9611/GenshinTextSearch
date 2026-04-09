@@ -61,7 +61,7 @@ const questSourceTypeOptions = [
 const readableCategoryOptions = [
   { value: '', label: '全部' },
   { value: 'BOOK', label: '书籍' },
-  { value: 'COSTUME', label: '衣装' },
+  { value: 'COSTUME', label: '角色装扮' },
   { value: 'RELIC', label: '圣遗物' },
   { value: 'WEAPON', label: '武器' },
   { value: 'WINGS', label: '风之翼' },
