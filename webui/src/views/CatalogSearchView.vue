@@ -27,6 +27,8 @@ const searchSummary = ref('')
 
 const mainCategories = ref({})
 const subCategories = ref({})
+const subCategoryGroups = ref({})
+const uncategorizedSubCategory = ref({ value: '0', label: '其他' })
 
 const totalPages = computed(() => Math.max(1, Math.ceil(totalCount.value / pageSize.value)))
 const suppressAutoSearch = ref(false)
@@ -34,7 +36,27 @@ const suppressAutoSearch = ref(false)
 const subCategoryOptions = computed(() => {
   const entries = Object.entries(subCategories.value)
   if (!entries.length) return []
-  return entries.map(([code, label]) => ({ value: code, label }))
+
+  const selectedMain = String(selectedMainCategory.value || '').trim()
+  if (!selectedMain) {
+    return entries.map(([code, label]) => ({ value: code, label }))
+  }
+
+  const allowedCodes = Array.isArray(subCategoryGroups.value[selectedMain])
+    ? subCategoryGroups.value[selectedMain].map(code => String(code))
+    : []
+  const allowedSet = new Set(allowedCodes)
+  const options = entries
+    .filter(([code]) => allowedSet.has(String(code)))
+    .map(([code, label]) => ({ value: code, label }))
+
+  const uncategorizedValue = String(uncategorizedSubCategory.value?.value || '0')
+  const uncategorizedLabel = uncategorizedSubCategory.value?.label || '其他'
+  if (allowedSet.has(uncategorizedValue)) {
+    options.push({ value: uncategorizedValue, label: uncategorizedLabel })
+  }
+
+  return options
 })
 
 const hasSearchCriteria = computed(() => {
@@ -66,6 +88,8 @@ const loadMeta = async () => {
     const ans = (await api.getCatalogMeta()).json
     mainCategories.value = ans.mainCategories || {}
     subCategories.value = ans.subCategories || {}
+    subCategoryGroups.value = ans.subCategoryGroups || {}
+    uncategorizedSubCategory.value = ans.uncategorizedSubCategory || { value: '0', label: '其他' }
   } catch (_) {
     // ignore
   }

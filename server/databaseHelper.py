@@ -1188,6 +1188,20 @@ def getQuestDescription(questId: int, langCode: int = 1) -> str:
     return getTextMapContent(desc_hash, langCode) or ""
 
 
+def getQuestLongDescription(questId: int, langCode: int = 1) -> str:
+    if not _table_has_column("quest", "longDescTextMapHash"):
+        return ""
+    with closing(conn.cursor()) as cursor:
+        row = cursor.execute(
+            "select content from quest join textMap on quest.longDescTextMapHash=textMap.hash "
+            "where quest.questId=? and textMap.lang=?",
+            (questId, langCode),
+        ).fetchone()
+    if row and row[0]:
+        return _normalize_output_text(row[0], langCode) or ""
+    return ""
+
+
 def getQuestStepTitleMap(questId: int, langCode: int = 1) -> dict[int, str]:
     cache_key = (int(questId), int(langCode))
     if cache_key in _QUEST_STEP_TALK_MAP_CACHE:
@@ -1753,7 +1767,7 @@ _QUEST_SOURCE_TYPE_FILTERS = {
 
 READABLE_CATEGORY_LABELS = {
     "BOOK": "书籍",
-    "COSTUME": "衣装",
+    "COSTUME": "角色装扮",
     "RELIC": "圣遗物",
     "WEAPON": "武器",
     "WINGS": "风之翼",
@@ -2780,6 +2794,27 @@ def countCatalogEntities(
             return int(row[0]) if row else 0
         except Exception:
             return 0
+
+
+def selectCatalogCategoryPairs() -> list[tuple[int, int]]:
+    """Return distinct (source_type_code, sub_category) pairs present in catalog data."""
+    with closing(conn.cursor()) as cursor:
+        try:
+            rows = cursor.execute(
+                """
+                SELECT DISTINCT source_type_code, sub_category
+                FROM text_source_entity
+                ORDER BY source_type_code, sub_category
+                """
+            ).fetchall()
+        except Exception:
+            return []
+    result: list[tuple[int, int]] = []
+    for row in rows:
+        if not row or row[0] is None:
+            continue
+        result.append((int(row[0]), int(row[1] or 0)))
+    return result
 
 
 def getCatalogEntityVersionInfo(source_type_code: int, entity_id: int, version_lang_code: int | None = None):

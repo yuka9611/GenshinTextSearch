@@ -298,6 +298,32 @@ class TestCatalogSearchEndpoint:
         assert calls["kwargs"] == {"createdVersion": None, "updatedVersion": None}
 
 
+class TestCatalogMetaEndpoint:
+    def test_catalog_meta_returns_subcategory_groups_and_other_option(self, monkeypatch):
+        monkeypatch.setattr(api.controllers_module, "getCatalogMainCategories", lambda: {"1": "道具"})
+        monkeypatch.setattr(api.controllers_module, "getCatalogSubCategories", lambda: {"1": "任务道具"})
+        monkeypatch.setattr(api.controllers_module, "getCatalogSubCategoryGroups", lambda: {"1": ["0", "1"]})
+        monkeypatch.setattr(
+            api.controllers_module,
+            "getCatalogUncategorizedSubCategory",
+            lambda: {"value": "0", "label": "其他"},
+        )
+
+        app = _app()
+        with _request_context(app, "/api/catalogMeta", method="GET"):
+            resp = api.catalogMeta()
+
+        data = resp.get_json()
+        assert resp.status_code == 200
+        assert data["code"] == 200
+        assert data["data"] == {
+            "mainCategories": {"1": "道具"},
+            "subCategories": {"1": "任务道具"},
+            "subCategoryGroups": {"1": ["0", "1"]},
+            "uncategorizedSubCategory": {"value": "0", "label": "其他"},
+        }
+
+
 class TestAssetDirEndpoints:
     def test_set_asset_dir_rejects_invalid_directory(self, monkeypatch):
         monkeypatch.setattr(api.os.path, "isdir", lambda path: False)

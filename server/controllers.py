@@ -366,6 +366,7 @@ def _normalize_source_type_filter(source_type: str | None) -> str | None:
         "装扮套装": "costume",
         "千星奇域": "costume",
         "衣装": "dressing",
+        "角色装扮": "dressing",
         "outfit": "dressing",
         "武器": "weapon",
         "圣遗物": "reliquary",
@@ -548,7 +549,7 @@ _SUB_CATEGORY_LABELS: dict[int, str] = {
     14: "活动食物",
     15: "木材",
     16: "经验素材",
-    17: "衣装",
+    17: "角色装扮",
     18: "游迹",
     19: "风之翼",
     20: "烟花",
@@ -563,6 +564,9 @@ _SUB_CATEGORY_LABELS: dict[int, str] = {
     29: "奇偶装扮",
     30: "装扮套装",
 }
+
+_CATALOG_OTHER_SUB_CATEGORY_CODE = "0"
+_CATALOG_OTHER_SUB_CATEGORY_LABEL = "其他"
 
 
 def _get_sub_category_label(sub_category_code: int) -> str:
@@ -810,7 +814,7 @@ def _collect_entity_readable_entries(
         # 风之翼 (SUB_FLYCLOAK_SUB) → Wings readable
         prefix_map[source_type] = [f"Wings{entity_id}"]
     elif source_type == "dressing" and sub_category == 17:
-        # 衣装 (SUB_COSTUME_DRESS) → Costume readable via reverse lookup
+        # 角色装扮 (SUB_COSTUME_DRESS) → Costume readable via reverse lookup
         for raw_item_id, skin_id in _load_entity_readable_lookup()["outfit_item_to_skin"].items():
             if skin_id == entity_id:
                 prefix_map[source_type] = [f"Costume{raw_item_id}"]
@@ -897,16 +901,26 @@ def _select_primary_source_from_text_hash(text_hash: int, lang_code: int) -> tup
     if story_source is not None:
         return story_source
 
-    quest_sources = databaseHelper.selectQuestHashSources(text_hash, source_type="title")
+    quest_sources = databaseHelper.selectQuestHashSources(text_hash)
     if quest_sources:
+        source_priority = {"title": 0, "desc": 1, "long_desc": 2}
+        quest_id, matched_source_type = min(
+            quest_sources,
+            key=lambda item: (source_priority.get(item[1], 99), item[0]),
+        )
         quest_ids = sorted({quest_id for quest_id, _ in quest_sources})
-        quest_id = quest_ids[0]
         quest_title = databaseHelper.getQuestName(quest_id, lang_code)
+        if matched_source_type == "desc":
+            quest_subtitle = f"Quest {quest_id} · 任务简介"
+        elif matched_source_type == "long_desc":
+            quest_subtitle = f"Quest {quest_id} · 任务长简介"
+        else:
+            quest_subtitle = f"Quest {quest_id}"
         origin = f"任务: {quest_title}"
         primary = _build_primary_source(
             "quest",
             quest_title,
-            f"Quest {quest_id}",
+            quest_subtitle,
             {"kind": "quest", "questId": quest_id},
         )
         return primary, origin, False, len(quest_ids)
@@ -3477,6 +3491,7 @@ def getQuestDialogues(
 
     questCompleteName = databaseHelper.getQuestName(questId, sourceLangCode)
     questDescription = databaseHelper.getQuestDescription(questId, sourceLangCode)
+    questLongDescription = databaseHelper.getQuestLongDescription(questId, sourceLangCode)
     stepTitleMap = databaseHelper.getQuestStepTitleMap(questId, sourceLangCode)
     created_raw, updated_raw = databaseHelper.getQuestVersionInfo(questId, sourceLangCode)
 
@@ -3502,6 +3517,7 @@ def getQuestDialogues(
         "talkQuestName": questCompleteName,
         "questId": questId,
         "questDescription": questDescription,
+        "questLongDescription": questLongDescription,
         "talkId": 0,
         "dialogues": dialogues,
         **_build_version_fields(created_raw, updated_raw),
@@ -3776,6 +3792,28 @@ def getCatalogSubCategories():
     for code, label in custom.get("sub_categories", {}).items():
         result.setdefault(str(code), label)
     return result
+
+
+def getCatalogSubCategoryGroups():
+    """Return available sub-categories for each main category based on catalog data."""
+    known_sub_categories = getCatalogSubCategories()
+    groups: dict[str, list[str]] = {}
+    for source_type_code, sub_category in databaseHelper.selectCatalogCategoryPairs():
+        source_key = str(source_type_code)
+        sub_key = str(sub_category)
+        if sub_key != _CATALOG_OTHER_SUB_CATEGORY_CODE and sub_key not in known_sub_categories:
+            continue
+        bucket = groups.setdefault(source_key, [])
+        if sub_key not in bucket:
+            bucket.append(sub_key)
+    return groups
+
+
+def getCatalogUncategorizedSubCategory():
+    return {
+        "value": _CATALOG_OTHER_SUB_CATEGORY_CODE,
+        "label": _CATALOG_OTHER_SUB_CATEGORY_LABEL,
+    }
 
 
 def getCatalogMainCategories():

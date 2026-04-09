@@ -484,6 +484,33 @@ class TestCatalogEntityVersionInfo:
             conn.close()
 
 
+class TestCatalogMeta:
+    def test_get_catalog_sub_category_groups_keeps_known_subcategories_and_other(self, monkeypatch):
+        monkeypatch.setattr(
+            controllers.databaseHelper,
+            "selectCatalogCategoryPairs",
+            lambda: [(1, 0), (1, 1), (1, 1), (2, 999), (3, 0)],
+        )
+        monkeypatch.setattr(
+            controllers,
+            "getCatalogSubCategories",
+            lambda: {"1": "任务道具", "2": "摆设图纸"},
+        )
+
+        result = controllers.getCatalogSubCategoryGroups()
+
+        assert result == {
+            "1": ["0", "1"],
+            "3": ["0"],
+        }
+
+    def test_get_catalog_uncategorized_sub_category(self):
+        assert controllers.getCatalogUncategorizedSubCategory() == {
+            "value": "0",
+            "label": "其他",
+        }
+
+
 class TestEntityTexts:
     def test_get_entity_texts_returns_missing_body_with_top_level_versions(self, monkeypatch):
         monkeypatch.setattr(controllers.config, "getResultLanguages", lambda: [1, 4])
