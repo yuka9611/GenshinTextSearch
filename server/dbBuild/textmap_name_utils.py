@@ -2,7 +2,10 @@ import re
 import os
 
 
-_TEXTMAP_BASE_STEM_RE = re.compile(r"^(?:TextMap|Text|textmap|text)([A-Za-z0-9_]+)$", re.IGNORECASE)
+_TEXTMAP_BASE_STEM_RE = re.compile(
+    r"^(?:TextMap|Text|textmap|text)(?P<variant>_Medium)?(?P<lang>[A-Za-z0-9_]+)$",
+    re.IGNORECASE,
+)
 _TEXTMAP_SPLIT_SUFFIX_RE = re.compile(r"^(?P<stem>.+?)_(?P<part>\d+)$")
 _LANG_ALIASES = {
     # Historical naming in some commits.
@@ -11,18 +14,12 @@ _LANG_ALIASES = {
 }
 
 
-def parse_textmap_file_name(file_name: str) -> tuple[str, int | None] | None:
+def _parse_textmap_file_details(file_name: str) -> tuple[str, int | None, int] | None:
     """
-    Parse TextMap/Text json file names and normalize to canonical base map name.
-
-    Supported patterns:
-    - TextMap<lang>.json
-    - TextMap<lang>_<number>.json
-    - Text<lang>.json
-    - Text<lang>_<number>.json
+    Parse TextMap file names and normalize them into one canonical language bucket.
 
     Returns:
-    - (canonical_base_name, split_part_index_or_none) on success
+    - (canonical_base_name, split_part_index_or_none, variant_rank)
     - None when file name is unsupported
     """
     if not isinstance(file_name, str):
@@ -43,25 +40,49 @@ def parse_textmap_file_name(file_name: str) -> tuple[str, int | None] | None:
     if not base_match:
         return None
 
-    lang = base_match.group(1).upper()
+    lang = base_match.group("lang").upper()
     lang = _LANG_ALIASES.get(lang, lang)
+    variant_rank = 1 if base_match.group("variant") else 0
     canonical_base = f"TextMap{lang}.json"
+    return canonical_base, split_part, variant_rank
+
+
+def parse_textmap_file_name(file_name: str) -> tuple[str, int | None] | None:
+    """
+    Parse TextMap/Text json file names and normalize to canonical base map name.
+
+    Supported patterns:
+    - TextMap<lang>.json
+    - TextMap<lang>_<number>.json
+    - TextMap_Medium<lang>.json
+    - TextMap_Medium<lang>_<number>.json
+    - Text<lang>.json
+    - Text<lang>_<number>.json
+
+    Returns:
+    - (canonical_base_name, split_part_index_or_none) on success
+    - None when file name is unsupported
+    """
+    parsed = _parse_textmap_file_details(file_name)
+    if parsed is None:
+        return None
+    canonical_base, split_part, _variant_rank = parsed
     return canonical_base, split_part
 
 
 def textmap_file_sort_key(file_name: str) -> tuple[int, int, str]:
     """
-    Sort unsuffixed base file first, then split parts by numeric order.
+    Sort base files before split parts, and keep Medium variants after normal files
+    inside the same canonical language bucket.
     Unknown names are sorted to the end.
     """
-    parsed = parse_textmap_file_name(file_name)
+    parsed = _parse_textmap_file_details(file_name)
     if parsed is None:
-        return (2, 0, file_name.lower())
+        return (99, 0, file_name.lower())
 
-    _, split_part = parsed
-    if split_part is None:
-        return (0, 0, file_name.lower())
-    return (1, split_part, file_name.lower())
+    _, split_part, variant_rank = parsed
+    phase = variant_rank * 2 + (1 if split_part is not None else 0)
+    return (phase, split_part or 0, file_name.lower())
 
 
 def check_readable_content(content: str, min_length: int = 3) -> bool:

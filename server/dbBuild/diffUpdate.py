@@ -15,6 +15,10 @@ import entitySourceImport
 import textMapImport
 from git_utils import resolve_commit as _resolve_commit, run_git as _run_git
 from import_utils import print_skip_summary as _print_skip_summary
+from text_source_path_utils import (
+    build_readable_rel_path_from_record as _build_readable_record_rel_path,
+    build_subtitle_rel_path_from_record as _build_subtitle_record_rel_path,
+)
 from textmap_name_utils import parse_textmap_file_name, textmap_file_sort_key, analyze_textmap_version_exceptions, analyze_readable_version_exceptions, analyze_subtitle_version_exceptions, report_version_exceptions
 from version_control import (
     ensure_version_schema,
@@ -965,6 +969,7 @@ def _process_version_catalog_stage(plan, target_commit, base_commit):
             target_commit=target_commit,
             from_commit=base_commit,
             force=False,
+            refresh_version_catalog=False,
         )
     unresolved_count = int(_meta_get("quest_version_unresolved_last_count", "0") or 0)
     unresolved_created_raw = _meta_get("quest_version_unresolved_created_last_count", "")
@@ -994,6 +999,7 @@ def _process_version_catalog_stage(plan, target_commit, base_commit):
             from_commit=base_commit,
             force=False,
             unresolved_ratio_threshold=0.05,
+            refresh_version_catalog=False,
         )
         replay_mode = str(quest_replay_stats.get("replay_mode", "unknown"))
         _meta_set_many({"quest_version_last_replay_mode": replay_mode})
@@ -1014,6 +1020,7 @@ def _process_version_catalog_stage(plan, target_commit, base_commit):
             target_commit=target_commit,
             from_commit=base_commit,
             force=False,
+            refresh_version_catalog=False,
         )
     if plan["subtitle_changed"] or plan["subtitle_deleted"]:
         if history_backfill is None:
@@ -1025,6 +1032,7 @@ def _process_version_catalog_stage(plan, target_commit, base_commit):
             target_commit=target_commit,
             from_commit=base_commit,
             force=False,
+            refresh_version_catalog=False,
         )
     if plan["npc"]:
         if history_backfill is None:
@@ -1036,6 +1044,7 @@ def _process_version_catalog_stage(plan, target_commit, base_commit):
             target_commit=target_commit,
             from_commit=base_commit,
             force=False,
+            refresh_version_catalog=False,
         )
 
     # 添加版本异常验证和修复
@@ -1143,44 +1152,20 @@ def _process_version_catalog_stage(plan, target_commit, base_commit):
 
     # 修复Readable空版本条目
     print("\n修复Readable空版本条目...")
-    # 定义构建文件路径的函数
-    def build_readable_file_path(record):
-        file_name, lang = record
-        return f"Readable/{lang}/{file_name}"
     fix_null_version_entries(
         "Readable",
         "SELECT fileName, lang FROM readable WHERE created_version_id IS NULL OR updated_version_id IS NULL",
-        build_readable_file_path,
+        _build_readable_record_rel_path,
         "UPDATE readable SET created_version_id = ?, updated_version_id = ? WHERE fileName = ? AND lang = ?",
         "Readable null version fix"
     )
 
     # 修复Subtitle空版本条目
     print("\n修复Subtitle空版本条目...")
-    # 定义构建文件路径的函数
-    def build_subtitle_file_path(record):
-        subtitle_key, = record
-        # 解析subtitleKey获取文件路径信息
-        parts = subtitle_key.split('_')
-        if len(parts) < 4:
-            return None
-        # 重建文件路径
-        file_name = '_'.join(parts[:-3])
-        lang_part = parts[-3]
-        # 查找对应的语言目录
-        lang_dir = None
-        from lang_constants import LANG_CODE_MAP
-        for lang_name, lang_id in LANG_CODE_MAP.items():
-            if str(lang_id) == lang_part:
-                lang_dir = lang_name
-                break
-        if not lang_dir:
-            return None
-        return f"Subtitle/{lang_dir}/{file_name}.srt"
     fix_null_version_entries(
         "Subtitle",
         "SELECT subtitleKey FROM subtitle WHERE created_version_id IS NULL OR updated_version_id IS NULL",
-        build_subtitle_file_path,
+        _build_subtitle_record_rel_path,
         "UPDATE subtitle SET created_version_id = ?, updated_version_id = ? WHERE subtitleKey = ?",
         "Subtitle null version fix"
     )
