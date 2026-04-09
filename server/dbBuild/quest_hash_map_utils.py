@@ -2,6 +2,15 @@ from __future__ import annotations
 
 from import_utils import DEFAULT_BATCH_SIZE, executemany_batched, normalize_unique_ints
 
+QUEST_HASH_SOURCE_TYPE_TITLE = "title"
+QUEST_HASH_SOURCE_TYPE_DESC = "desc"
+QUEST_HASH_SOURCE_TYPE_LONG_DESC = "long_desc"
+QUEST_HASH_SOURCE_TYPE_DIALOGUE = "dialogue"
+QUEST_VERSION_TRACKED_HASH_SOURCE_TYPES = (
+    QUEST_HASH_SOURCE_TYPE_TITLE,
+    QUEST_HASH_SOURCE_TYPE_DIALOGUE,
+)
+
 
 def _quest_talk_dialogue_join_condition(qt_alias: str = "qt", d_alias: str = "d") -> str:
     return (
@@ -108,19 +117,42 @@ def _refresh_quest_hash_map_by_target_table(cursor):
     cursor.execute(
         """
         INSERT OR IGNORE INTO quest_hash_map(questId, hash, source_type)
-        SELECT q.questId, q.titleTextMapHash, 'title'
+        SELECT q.questId, q.titleTextMapHash, ?
         FROM quest q
         JOIN _qhm_target_quest_id t ON t.questId = q.questId
         WHERE q.titleTextMapHash IS NOT NULL
           AND q.titleTextMapHash <> 0
+        """,
+        (QUEST_HASH_SOURCE_TYPE_TITLE,),
+    )
+    cursor.execute(
         """
+        INSERT OR IGNORE INTO quest_hash_map(questId, hash, source_type)
+        SELECT q.questId, q.descTextMapHash, ?
+        FROM quest q
+        JOIN _qhm_target_quest_id t ON t.questId = q.questId
+        WHERE q.descTextMapHash IS NOT NULL
+          AND q.descTextMapHash <> 0
+        """,
+        (QUEST_HASH_SOURCE_TYPE_DESC,),
+    )
+    cursor.execute(
+        """
+        INSERT OR IGNORE INTO quest_hash_map(questId, hash, source_type)
+        SELECT q.questId, q.longDescTextMapHash, ?
+        FROM quest q
+        JOIN _qhm_target_quest_id t ON t.questId = q.questId
+        WHERE q.longDescTextMapHash IS NOT NULL
+          AND q.longDescTextMapHash <> 0
+        """,
+        (QUEST_HASH_SOURCE_TYPE_LONG_DESC,),
     )
     # Keep quest updated-version tracking scoped to title/dialogue text only.
     # Quest description and step-title metadata are UI-only and must not affect quest_version.
     cursor.execute(
         """
         INSERT OR IGNORE INTO quest_hash_map(questId, hash, source_type)
-        SELECT DISTINCT qt.questId, d.textHash, 'dialogue'
+        SELECT DISTINCT qt.questId, d.textHash, ?
         FROM questTalk qt
         JOIN _qhm_target_quest_id t ON t.questId = qt.questId
         JOIN dialogue d ON d.talkId = qt.talkId
@@ -131,7 +163,8 @@ def _refresh_quest_hash_map_by_target_table(cursor):
            )
         WHERE d.textHash IS NOT NULL
           AND d.textHash <> 0
-        """
+        """,
+        (QUEST_HASH_SOURCE_TYPE_DIALOGUE,),
     )
 
 

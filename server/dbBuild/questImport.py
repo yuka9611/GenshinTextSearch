@@ -44,6 +44,10 @@ QUEST_TALK_NORMAL_COOP_ID = 0
 QUEST_TALK_SCOPE_ALL = "all"
 QUEST_TALK_SCOPE_NORMAL = "normal"
 QUEST_TALK_SCOPE_COOP = "coop"
+_QUEST_META_SELECT_SQL = (
+    "SELECT titleTextMapHash, descTextMapHash, longDescTextMapHash, chapterId, source_type, source_code_raw "
+    "FROM quest WHERE questId=?"
+)
 
 
 def _load_json_dict(path: str) -> dict | None:
@@ -56,11 +60,12 @@ def _load_json_dict(path: str) -> dict | None:
 def _build_quest_upsert_sql(*, with_created_version: bool = False) -> str:
     if with_created_version:
         return (
-            "INSERT INTO quest(questId, titleTextMapHash, descTextMapHash, chapterId, source_type, source_code_raw, created_version_id) "
-            "VALUES (?,?,?,?,?,?,?) "
+            "INSERT INTO quest(questId, titleTextMapHash, descTextMapHash, longDescTextMapHash, chapterId, source_type, source_code_raw, created_version_id) "
+            "VALUES (?,?,?,?,?,?,?,?) "
             "ON CONFLICT(questId) DO UPDATE SET "
             "titleTextMapHash=excluded.titleTextMapHash, "
             "descTextMapHash=excluded.descTextMapHash, "
+            "longDescTextMapHash=excluded.longDescTextMapHash, "
             "chapterId=excluded.chapterId, "
             "source_type=excluded.source_type, "
             "source_code_raw=excluded.source_code_raw, "
@@ -74,23 +79,26 @@ def _build_quest_upsert_sql(*, with_created_version: bool = False) -> str:
             "WHERE "
             "NOT (quest.titleTextMapHash IS excluded.titleTextMapHash) "
             "OR NOT (quest.descTextMapHash IS excluded.descTextMapHash) "
+            "OR NOT (quest.longDescTextMapHash IS excluded.longDescTextMapHash) "
             "OR NOT (quest.chapterId IS excluded.chapterId) "
             "OR NOT (quest.source_type IS excluded.source_type) "
             "OR NOT (quest.source_code_raw IS excluded.source_code_raw) "
             "OR quest.created_version_id IS NULL"
         )
     return (
-        "INSERT INTO quest(questId, titleTextMapHash, descTextMapHash, chapterId, source_type, source_code_raw) "
-        "VALUES (?,?,?,?,?,?) "
+        "INSERT INTO quest(questId, titleTextMapHash, descTextMapHash, longDescTextMapHash, chapterId, source_type, source_code_raw) "
+        "VALUES (?,?,?,?,?,?,?) "
         "ON CONFLICT(questId) DO UPDATE SET "
         "titleTextMapHash=excluded.titleTextMapHash, "
         "descTextMapHash=excluded.descTextMapHash, "
+        "longDescTextMapHash=excluded.longDescTextMapHash, "
         "chapterId=excluded.chapterId, "
         "source_type=excluded.source_type, "
         "source_code_raw=excluded.source_code_raw "
         "WHERE "
         "NOT (quest.titleTextMapHash IS excluded.titleTextMapHash) "
         "OR NOT (quest.descTextMapHash IS excluded.descTextMapHash) "
+        "OR NOT (quest.longDescTextMapHash IS excluded.longDescTextMapHash) "
         "OR NOT (quest.chapterId IS excluded.chapterId) "
         "OR NOT (quest.source_type IS excluded.source_type) "
         "OR NOT (quest.source_code_raw IS excluded.source_code_raw)"
@@ -104,6 +112,8 @@ def _is_hidden_quest_obj(obj: object) -> bool:
             quest_type = obj.get("questType")
         elif "NCDLPENPKKC" in obj:
             quest_type = obj.get("NCDLPENPKKC")
+        elif "OIJGOOIJBCH" in obj:
+            quest_type = obj.get("OIJGOOIJBCH")
     return quest_type == "QUEST_HIDDEN"
 
 
@@ -120,6 +130,8 @@ def _ensure_quest_version_tables(cursor):
     quest_columns = {row[1] for row in cursor.execute("PRAGMA table_info(quest)").fetchall()}
     if "descTextMapHash" not in quest_columns:
         cursor.execute("ALTER TABLE quest ADD COLUMN descTextMapHash INTEGER")
+    if "longDescTextMapHash" not in quest_columns:
+        cursor.execute("ALTER TABLE quest ADD COLUMN longDescTextMapHash INTEGER")
     if "git_created_version_id" not in quest_columns:
         cursor.execute("ALTER TABLE quest ADD COLUMN git_created_version_id INTEGER")
     if "source_type" not in quest_columns:
@@ -142,6 +154,31 @@ def _ensure_quest_version_tables(cursor):
     )
     cursor.execute("CREATE INDEX IF NOT EXISTS quest_source_type_index ON quest(source_type)")
     _ensure_quest_hash_map_schema(cursor)
+
+
+def _get_existing_quest_meta_row(cursor, quest_id: int):
+    return cursor.execute(_QUEST_META_SELECT_SQL, (quest_id,)).fetchone()
+
+
+def _quest_row_changed(
+    existing_row,
+    *,
+    title_text_map_hash,
+    desc_text_map_hash,
+    long_desc_text_map_hash,
+    chapter_id,
+    source_type,
+    source_code_raw,
+) -> bool:
+    return (
+        existing_row is None
+        or existing_row[0] != title_text_map_hash
+        or existing_row[1] != desc_text_map_hash
+        or existing_row[2] != long_desc_text_map_hash
+        or existing_row[3] != chapter_id
+        or existing_row[4] != source_type
+        or existing_row[5] != source_code_raw
+    )
 
 
 def _normalize_coop_quest_id(value) -> int:
@@ -361,6 +398,7 @@ def importQuest(
 
     questId, titleTextMapHash, chapterId = quest_row
     descTextMapHash = _get_quest_desc_text_map_hash(questId)
+    longDescTextMapHash = None
     source_type, source_code_raw = resolve_quest_source_fields(questId)
     if titleTextMapHash in (None, 0):
         titleTextMapHash = None
@@ -381,25 +419,34 @@ def importQuest(
     new_talk_rows = _build_quest_talk_rows(obj, talk_ids)
 
     new_signature = _build_quest_dialogue_signature(cursor, new_talk_rows)
-    existing_quest_row = cursor.execute(
-        "SELECT titleTextMapHash, descTextMapHash, chapterId, source_type, source_code_raw FROM quest WHERE questId=?",
-        (questId,),
-    ).fetchone()
+    existing_quest_row = _get_existing_quest_meta_row(cursor, questId)
     is_new_quest = existing_quest_row is None
-    quest_changed = (
-        is_new_quest
-        or existing_quest_row[0] != titleTextMapHash
-        or existing_quest_row[1] != descTextMapHash
-        or existing_quest_row[2] != chapterId
-        or existing_quest_row[3] != source_type
-        or existing_quest_row[4] != source_code_raw
+    quest_changed = _quest_row_changed(
+        existing_quest_row,
+        title_text_map_hash=titleTextMapHash,
+        desc_text_map_hash=descTextMapHash,
+        long_desc_text_map_hash=longDescTextMapHash,
+        chapter_id=chapterId,
+        source_type=source_type,
+        source_code_raw=source_code_raw,
     )
 
     old_talk_rows = _fetch_existing_quest_talk_rows(cursor, questId, scope=QUEST_TALK_SCOPE_NORMAL)
     talk_links_changed = old_talk_rows != new_talk_rows
 
     if quest_changed:
-        cursor.execute(sql1, (questId, titleTextMapHash, descTextMapHash, chapterId, source_type, source_code_raw))
+        cursor.execute(
+            sql1,
+            (
+                questId,
+                titleTextMapHash,
+                descTextMapHash,
+                longDescTextMapHash,
+                chapterId,
+                source_type,
+                source_code_raw,
+            ),
+        )
     if talk_links_changed:
         _delete_quest_talk_rows(cursor, questId, scope=QUEST_TALK_SCOPE_NORMAL)
         cursor.executemany(sql2, ((questId, talkId, step_hash, coop_quest_id) for talkId, step_hash, coop_quest_id in new_talk_rows))
@@ -452,6 +499,7 @@ def importQuestForDiff(
 
     questId, titleTextMapHash, chapterId = quest_row
     descTextMapHash = _get_quest_desc_text_map_hash(questId)
+    longDescTextMapHash = None
     source_type, source_code_raw = resolve_quest_source_fields(questId)
     if titleTextMapHash in (None, 0):
         titleTextMapHash = None
@@ -502,17 +550,15 @@ def importQuestForDiff(
 
     text_changed = dialogue_changed or title_changed
 
-    old_quest_meta_row = cursor.execute(
-        "SELECT titleTextMapHash, descTextMapHash, chapterId, source_type, source_code_raw FROM quest WHERE questId=?",
-        (questId,),
-    ).fetchone()
-    quest_row_changed = (
-        old_quest_meta_row is None
-        or old_quest_meta_row[0] != titleTextMapHash
-        or old_quest_meta_row[1] != descTextMapHash
-        or old_quest_meta_row[2] != chapterId
-        or old_quest_meta_row[3] != source_type
-        or old_quest_meta_row[4] != source_code_raw
+    old_quest_meta_row = _get_existing_quest_meta_row(cursor, questId)
+    quest_row_changed = _quest_row_changed(
+        old_quest_meta_row,
+        title_text_map_hash=titleTextMapHash,
+        desc_text_map_hash=descTextMapHash,
+        long_desc_text_map_hash=longDescTextMapHash,
+        chapter_id=chapterId,
+        source_type=source_type,
+        source_code_raw=source_code_raw,
     )
 
     old_talk_rows = _fetch_existing_quest_talk_rows(cursor, questId, scope=QUEST_TALK_SCOPE_NORMAL)
@@ -531,7 +577,16 @@ def importQuestForDiff(
     if is_new_quest or quest_row_changed or text_changed or talk_links_changed or created_version_changed:
         cursor.execute(
             sql1,
-            (questId, titleTextMapHash, descTextMapHash, chapterId, source_type, source_code_raw, created_version),
+            (
+                questId,
+                titleTextMapHash,
+                descTextMapHash,
+                longDescTextMapHash,
+                chapterId,
+                source_type,
+                source_code_raw,
+                created_version,
+            ),
         )
     if talk_links_changed:
         _delete_quest_talk_rows(cursor, questId, scope=QUEST_TALK_SCOPE_NORMAL)
@@ -738,6 +793,12 @@ def backfillQuestMetadata(*, commit: bool = True, batch_size: int = DEFAULT_BATC
 
     try:
         cursor.execute("UPDATE quest SET descTextMapHash = NULL WHERE descTextMapHash IS NOT NULL")
+        if "longDescTextMapHash" in {row[1] for row in cursor.execute("PRAGMA table_info(quest)").fetchall()}:
+            cursor.execute(
+                "UPDATE quest SET longDescTextMapHash = NULL "
+                "WHERE coalesce(source_type, '') <> ? AND longDescTextMapHash IS NOT NULL",
+                (SOURCE_TYPE_ANECDOTE,),
+            )
         cursor.execute("UPDATE questTalk SET stepTitleTextMapHash = NULL WHERE stepTitleTextMapHash IS NOT NULL")
 
         with LightweightProgress(len(quest_files), desc="Quest metadata", unit="files") as pbar:
@@ -865,6 +926,7 @@ def importAnecdote(
     quest_id = payload["quest_id"]
     title_text_map_hash = payload["title_text_map_hash"]
     desc_text_map_hash = payload["desc_text_map_hash"]
+    long_desc_text_map_hash = payload["long_desc_text_map_hash"]
     new_talk_rows = payload["talk_rows"]
     source_type = payload["source_type"]
     source_code_raw = payload["source_code_raw"]
@@ -878,18 +940,16 @@ def importAnecdote(
     sql2 = _build_quest_talk_insert_sql()
     new_signature = _build_quest_dialogue_signature(cursor, new_talk_rows)
 
-    existing_quest_row = cursor.execute(
-        "SELECT titleTextMapHash, descTextMapHash, chapterId, source_type, source_code_raw FROM quest WHERE questId=?",
-        (quest_id,),
-    ).fetchone()
+    existing_quest_row = _get_existing_quest_meta_row(cursor, quest_id)
     is_new_quest = existing_quest_row is None
-    quest_changed = (
-        is_new_quest
-        or existing_quest_row[0] != title_text_map_hash
-        or existing_quest_row[1] != desc_text_map_hash
-        or existing_quest_row[2] is not None
-        or existing_quest_row[3] != source_type
-        or existing_quest_row[4] != source_code_raw
+    quest_changed = _quest_row_changed(
+        existing_quest_row,
+        title_text_map_hash=title_text_map_hash,
+        desc_text_map_hash=desc_text_map_hash,
+        long_desc_text_map_hash=long_desc_text_map_hash,
+        chapter_id=None,
+        source_type=source_type,
+        source_code_raw=source_code_raw,
     )
     old_talk_rows = _fetch_existing_quest_talk_rows(cursor, quest_id)
     talk_links_changed = old_talk_rows != new_talk_rows
@@ -897,7 +957,15 @@ def importAnecdote(
     if quest_changed:
         cursor.execute(
             sql1,
-            (quest_id, title_text_map_hash, desc_text_map_hash, None, source_type, source_code_raw),
+            (
+                quest_id,
+                title_text_map_hash,
+                desc_text_map_hash,
+                long_desc_text_map_hash,
+                None,
+                source_type,
+                source_code_raw,
+            ),
         )
     if talk_links_changed:
         _delete_quest_talk_rows(cursor, quest_id)
@@ -950,6 +1018,7 @@ def importAnecdoteForDiff(
     quest_id = payload["quest_id"]
     title_text_map_hash = payload["title_text_map_hash"]
     desc_text_map_hash = payload["desc_text_map_hash"]
+    long_desc_text_map_hash = payload["long_desc_text_map_hash"]
     new_talk_rows = payload["talk_rows"]
     source_type = payload["source_type"]
     source_code_raw = payload["source_code_raw"]
@@ -990,17 +1059,15 @@ def importAnecdoteForDiff(
             title_changed = True
 
     text_changed = dialogue_changed or title_changed
-    old_quest_meta_row = cursor.execute(
-        "SELECT titleTextMapHash, descTextMapHash, chapterId, source_type, source_code_raw FROM quest WHERE questId=?",
-        (quest_id,),
-    ).fetchone()
-    quest_row_changed = (
-        old_quest_meta_row is None
-        or old_quest_meta_row[0] != title_text_map_hash
-        or old_quest_meta_row[1] != desc_text_map_hash
-        or old_quest_meta_row[2] is not None
-        or old_quest_meta_row[3] != source_type
-        or old_quest_meta_row[4] != source_code_raw
+    old_quest_meta_row = _get_existing_quest_meta_row(cursor, quest_id)
+    quest_row_changed = _quest_row_changed(
+        old_quest_meta_row,
+        title_text_map_hash=title_text_map_hash,
+        desc_text_map_hash=desc_text_map_hash,
+        long_desc_text_map_hash=long_desc_text_map_hash,
+        chapter_id=None,
+        source_type=source_type,
+        source_code_raw=source_code_raw,
     )
     old_talk_rows = _fetch_existing_quest_talk_rows(cursor, quest_id)
     talk_links_changed = old_talk_rows != new_talk_rows
@@ -1021,6 +1088,7 @@ def importAnecdoteForDiff(
                 quest_id,
                 title_text_map_hash,
                 desc_text_map_hash,
+                long_desc_text_map_hash,
                 None,
                 source_type,
                 source_code_raw,
@@ -1270,7 +1338,7 @@ def importHangout(
         _ensure_quest_version_tables(cursor)
 
     existing_quest_row = cursor.execute(
-        "SELECT titleTextMapHash, descTextMapHash, chapterId, source_type, source_code_raw FROM quest WHERE questId=?",
+        _QUEST_META_SELECT_SQL,
         (quest_id,),
     ).fetchone()
     payload = build_hangout_payload(
@@ -1285,6 +1353,7 @@ def importHangout(
 
     title_text_map_hash = payload["title_text_map_hash"]
     desc_text_map_hash = payload["desc_text_map_hash"]
+    long_desc_text_map_hash = payload["long_desc_text_map_hash"]
     chapter_id = payload["chapter_id"]
     source_type = payload["source_type"]
     source_code_raw = payload["source_code_raw"]
@@ -1302,13 +1371,14 @@ def importHangout(
     new_signature = _build_quest_dialogue_signature(cursor, new_talk_rows)
 
     is_new_quest = existing_quest_row is None
-    quest_changed = (
-        is_new_quest
-        or existing_quest_row[0] != title_text_map_hash
-        or existing_quest_row[1] != desc_text_map_hash
-        or existing_quest_row[2] != chapter_id
-        or existing_quest_row[3] != source_type
-        or existing_quest_row[4] != source_code_raw
+    quest_changed = _quest_row_changed(
+        existing_quest_row,
+        title_text_map_hash=title_text_map_hash,
+        desc_text_map_hash=desc_text_map_hash,
+        long_desc_text_map_hash=long_desc_text_map_hash,
+        chapter_id=chapter_id,
+        source_type=source_type,
+        source_code_raw=source_code_raw,
     )
     compare_scope = QUEST_TALK_SCOPE_COOP if is_real_existing_quest else QUEST_TALK_SCOPE_ALL
     old_talk_rows = _fetch_existing_quest_talk_rows(cursor, quest_id, scope=compare_scope)
@@ -1317,7 +1387,15 @@ def importHangout(
     if quest_changed:
         cursor.execute(
             sql1,
-            (quest_id, title_text_map_hash, desc_text_map_hash, chapter_id, source_type, source_code_raw),
+            (
+                quest_id,
+                title_text_map_hash,
+                desc_text_map_hash,
+                long_desc_text_map_hash,
+                chapter_id,
+                source_type,
+                source_code_raw,
+            ),
         )
     if talk_links_changed:
         _delete_quest_talk_rows(cursor, quest_id, scope=compare_scope)
@@ -1350,7 +1428,7 @@ def importHangoutForDiff(
     version = current_version or get_current_version()
     get_or_create_version_id(version)
     existing_quest_row = cursor.execute(
-        "SELECT titleTextMapHash, descTextMapHash, chapterId, source_type, source_code_raw FROM quest WHERE questId=?",
+        _QUEST_META_SELECT_SQL,
         (quest_id,),
     ).fetchone()
     payload = build_hangout_payload(
@@ -1365,6 +1443,7 @@ def importHangoutForDiff(
 
     title_text_map_hash = payload["title_text_map_hash"]
     desc_text_map_hash = payload["desc_text_map_hash"]
+    long_desc_text_map_hash = payload["long_desc_text_map_hash"]
     chapter_id = payload["chapter_id"]
     source_type = payload["source_type"]
     source_code_raw = payload["source_code_raw"]
@@ -1407,17 +1486,15 @@ def importHangoutForDiff(
             title_changed = True
 
     text_changed = dialogue_changed or title_changed
-    old_quest_meta_row = cursor.execute(
-        "SELECT titleTextMapHash, descTextMapHash, chapterId, source_type, source_code_raw FROM quest WHERE questId=?",
-        (quest_id,),
-    ).fetchone()
-    quest_row_changed = (
-        old_quest_meta_row is None
-        or old_quest_meta_row[0] != title_text_map_hash
-        or old_quest_meta_row[1] != desc_text_map_hash
-        or old_quest_meta_row[2] != chapter_id
-        or old_quest_meta_row[3] != source_type
-        or old_quest_meta_row[4] != source_code_raw
+    old_quest_meta_row = _get_existing_quest_meta_row(cursor, quest_id)
+    quest_row_changed = _quest_row_changed(
+        old_quest_meta_row,
+        title_text_map_hash=title_text_map_hash,
+        desc_text_map_hash=desc_text_map_hash,
+        long_desc_text_map_hash=long_desc_text_map_hash,
+        chapter_id=chapter_id,
+        source_type=source_type,
+        source_code_raw=source_code_raw,
     )
     compare_scope = QUEST_TALK_SCOPE_COOP if is_real_existing_quest else QUEST_TALK_SCOPE_ALL
     old_talk_rows = _fetch_existing_quest_talk_rows(cursor, quest_id, scope=compare_scope)
@@ -1435,7 +1512,16 @@ def importHangoutForDiff(
     if is_new_quest or quest_row_changed or text_changed or talk_links_changed or created_version_changed:
         cursor.execute(
             sql1,
-            (quest_id, title_text_map_hash, desc_text_map_hash, chapter_id, source_type, source_code_raw, created_version),
+            (
+                quest_id,
+                title_text_map_hash,
+                desc_text_map_hash,
+                long_desc_text_map_hash,
+                chapter_id,
+                source_type,
+                source_code_raw,
+                created_version,
+            ),
         )
     if talk_links_changed:
         _delete_quest_talk_rows(cursor, quest_id, scope=compare_scope)
@@ -1708,6 +1794,14 @@ def importTalk(
         talkRoleTypeKey = "_type"
         talkRoleIdKey = "_id"
         talkContentTextMapHashKey = "CMKPOJOEHHA"
+    elif "AADKDKPMGNO" in obj and "GALIDJOEHOC" in obj:
+        talkIdKey = "AADKDKPMGNO"
+        dialogueListKey = "GALIDJOEHOC"
+        dialogueIdKey = "NFIEHACCECI"
+        talkRoleKey = "PIBKEGJOJHN"
+        talkRoleTypeKey = "_type"
+        talkRoleIdKey = "_id"
+        talkContentTextMapHashKey = "AIGJBMCHCJG"
     else:
         if skip_collector is not None:
             skip_collector.append(fileName)

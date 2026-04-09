@@ -1,5 +1,13 @@
 _QUEST_SCHEMA_VARIANTS = [
     {
+        "quest_id": "NFIEHACCECI",
+        "title_hash": "BPNEONFJEEO",
+        "chapter_id": "BALAIBAGIEL",
+        "chapter_id_fallback": None,
+        "talks_key": "NFFIGDHFAJG",
+        "talk_id": "NFIEHACCECI",
+    },
+    {
         "quest_id": "id",
         "title_hash": "titleTextMapHash",
         "chapter_id": "chapterId",
