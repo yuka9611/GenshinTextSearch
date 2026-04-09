@@ -1,3 +1,4 @@
+import gc
 import json
 import os
 import logging
@@ -5,8 +6,9 @@ import re
 import subprocess
 import sys
 import time
+from contextlib import contextmanager
 from dataclasses import dataclass
-from typing import Iterable
+from typing import Iterable, Mapping
 
 try:
     import pygit2 as _pygit2  # type: ignore[import-untyped]
@@ -36,12 +38,19 @@ from quest_hash_map_utils import (
 from quest_source_utils import (
     SOURCE_TYPE_ANECDOTE,
     SOURCE_TYPE_HANGOUT,
+    extract_anecdote_core_fields,
     extract_main_coop_ids,
     extract_storyboard_group_talk_ids,
 )
 from quest_utils import extract_quest_row as _extract_quest_row
 from version_control import backfill_quest_created_version_from_textmap as _backfill_quest_created_version_from_textmap
 from subtitle_utils import parse_srt_rows as _parse_srt_rows
+from text_source_path_utils import (
+    build_readable_rel_path_from_record as _build_readable_record_rel_path,
+    build_subtitle_rel_path,
+    build_subtitle_rel_path_from_record as _build_subtitle_record_rel_path,
+    normalize_subtitle_rel_path,
+)
 from version_control import subtitle_text_changed_keys as _subtitle_text_changed_keys
 from textmap_name_utils import parse_textmap_file_name, analyze_readable_version_exceptions, analyze_subtitle_version_exceptions, analyze_textmap_version_exceptions, report_version_exceptions
 from version_control import (
@@ -97,6 +106,43 @@ _git_show_text_cache_order: list[tuple[str, str]] = []
 _git_show_json_cache: dict[tuple[str, str], object] = {}
 _git_show_text_cache_stats = {"hits": 0, "misses": 0}
 _pygit2_repo_cache: dict[str, object] = {}
+
+
+@contextmanager
+def _suspend_automatic_gc(label: str):
+    was_enabled = gc.isenabled()
+    if was_enabled:
+        gc.disable()
+        logger.info(f"{label}: 已临时关闭 Python 自动 GC，避免大对象图遍历卡顿")
+    try:
+        yield
+    finally:
+        if was_enabled:
+            collected = gc.collect()
+            gc.enable()
+            logger.info(f"{label}: 已恢复 Python 自动 GC，手动回收 {collected} 个对象")
+
+
+def _clear_history_runtime_caches(
+    *,
+    clear_git_command_cache: bool = False,
+    clear_snapshot_metadata: bool = False,
+    clear_repo_cache: bool = False,
+):
+    _snapshot_textmap_file_groups_cache.clear()
+    _snapshot_textmap_group_cache.clear()
+    _git_show_text_cache.clear()
+    _git_show_text_cache_order.clear()
+    _git_show_json_cache.clear()
+    _git_show_text_cache_stats["hits"] = 0
+    _git_show_text_cache_stats["misses"] = 0
+    if clear_git_command_cache:
+        _git_cache.clear()
+        _first_commit_version_cache.clear()
+    if clear_snapshot_metadata:
+        _snapshot_metadata_cache.clear()
+    if clear_repo_cache:
+        _pygit2_repo_cache.clear()
 
 # Git 命令缓存
 
@@ -715,7 +761,14 @@ def _backfill_textmap_git_versions(
             pbar.current = start_idx
             pbar.update(0)
             with pbar:
-                textmap_files = [f"TextMap/{textmap_file}.json" for textmap_file in textmap_lang_map.keys()]
+                textmap_groups = _list_snapshot_textmap_groups(DATA_PATH, "HEAD")
+                textmap_files: list[str] = []
+                for base_name in sorted(textmap_lang_map.keys()):
+                    group_files = textmap_groups.get(base_name)
+                    if group_files:
+                        textmap_files.extend(group_files)
+                    else:
+                        textmap_files.append(f"TextMap/{base_name}")
                 total_files = len(textmap_files)
                 file_start_idx = start_idx if 0 <= start_idx < total_files else 0
                 pending_by_hash: dict[str, list[tuple[int, int]]] = {}
@@ -1106,6 +1159,169 @@ def _normalize_text_for_compare(text: str | None) -> str:
     return text.replace("\r\n", "\n").replace("\r", "\n")
 
 
+_TEXTMAP_COMPARE_MISSING = object()
+
+
+def _normalize_textmap_value_for_compare(value: object) -> object:
+    if isinstance(value, str):
+        return _normalize_text_for_compare(value)
+    return value
+
+
+def _textmap_values_match(left: object, right: object) -> bool:
+    if left is _TEXTMAP_COMPARE_MISSING or right is _TEXTMAP_COMPARE_MISSING:
+        return left is right
+    return (
+        _normalize_textmap_value_for_compare(left)
+        == _normalize_textmap_value_for_compare(right)
+    )
+
+
+def _iter_textmap_common_items(
+    snapshot_obj: Mapping[str, object],
+    current_obj: Mapping[str, object],
+):
+    if len(snapshot_obj) <= len(current_obj):
+        for raw_hash, snapshot_content in snapshot_obj.items():
+            current_content = current_obj.get(raw_hash, _TEXTMAP_COMPARE_MISSING)
+            if current_content is _TEXTMAP_COMPARE_MISSING:
+                continue
+            yield raw_hash, snapshot_content, current_content
+        return
+
+    for raw_hash, current_content in current_obj.items():
+        snapshot_content = snapshot_obj.get(raw_hash, _TEXTMAP_COMPARE_MISSING)
+        if snapshot_content is _TEXTMAP_COMPARE_MISSING:
+            continue
+        yield raw_hash, snapshot_content, current_content
+
+
+def _textmap_snapshot_has_current_matches(
+    snapshot_obj: Mapping[str, object],
+    current_obj: Mapping[str, object],
+) -> bool:
+    for _raw_hash, snapshot_content, current_content in _iter_textmap_common_items(
+        snapshot_obj,
+        current_obj,
+    ):
+        if _textmap_values_match(snapshot_content, current_content):
+            return True
+    return False
+
+
+def _should_backfill_textmap_updated_version(
+    previous_content: object,
+    snapshot_content: object,
+    current_content: object,
+) -> bool:
+    """
+    Only treat a snapshot as the updated version when this hash itself changes
+    into the current text at that snapshot.
+    """
+    if not _textmap_values_match(snapshot_content, current_content):
+        return False
+    return not _textmap_values_match(previous_content, current_content)
+
+
+def _build_textmap_history_update_rows(
+    *,
+    snapshot_obj: Mapping[str, object],
+    previous_snapshot_obj: Mapping[str, object] | None,
+    current_obj: Mapping[str, object],
+    lang_id: int,
+    version_id: int,
+    existing_map: Mapping[int, tuple[int | None, int | None]],
+) -> list[tuple[int | None, int | None, int, int]]:
+    previous_snapshot = previous_snapshot_obj or {}
+    update_rows: list[tuple[int | None, int | None, int, int]] = []
+
+    for raw_hash, snapshot_content, current_content in _iter_textmap_common_items(
+        snapshot_obj,
+        current_obj,
+    ):
+        try:
+            hash_value = int(_to_hash_value(raw_hash))
+        except Exception:
+            continue
+
+        version_info = existing_map.get(hash_value)
+        if version_info is None:
+            continue
+
+        existing_created_version, existing_updated_version = version_info
+        created_version = existing_created_version
+        updated_version = existing_updated_version
+
+        if should_update_version(existing_created_version, version_id, is_created=True):
+            created_version = version_id
+
+        previous_content = previous_snapshot.get(raw_hash, _TEXTMAP_COMPARE_MISSING)
+        if _should_backfill_textmap_updated_version(
+            previous_content,
+            snapshot_content,
+            current_content,
+        ) and (
+            existing_updated_version is None
+            or should_update_version(existing_updated_version, version_id, is_created=True)
+        ):
+            updated_version = version_id
+
+        if (
+            created_version != existing_created_version
+            or updated_version != existing_updated_version
+        ):
+            update_rows.append((created_version, updated_version, lang_id, hash_value))
+
+    return update_rows
+
+
+def _load_textmap_version_cache_for_current_group(
+    cursor,
+    *,
+    lang_id: int,
+    current_obj: Mapping[str, object],
+    batch_size: int,
+) -> dict[int, tuple[int | None, int | None]]:
+    hash_values: list[int] = []
+    seen_hashes: set[int] = set()
+    for raw_hash in current_obj.keys():
+        try:
+            hash_value = int(_to_hash_value(raw_hash))
+        except Exception:
+            continue
+        if hash_value in seen_hashes:
+            continue
+        seen_hashes.add(hash_value)
+        hash_values.append(hash_value)
+
+    if not hash_values:
+        return {}
+
+    version_map: dict[int, tuple[int | None, int | None]] = {}
+    chunk_size = max(1, int(batch_size))
+    for idx in range(0, len(hash_values), chunk_size):
+        chunk = hash_values[idx : idx + chunk_size]
+        placeholders = ",".join(["?"] * len(chunk))
+        params = [lang_id, *chunk]
+        rows = cursor.execute(
+            f"SELECT hash, created_version_id, updated_version_id "
+            f"FROM textMap WHERE lang=? AND hash IN ({placeholders})",
+            params,
+        ).fetchall()
+        for row_hash, created_version_id, updated_version_id in rows:
+            version_map[int(row_hash)] = (created_version_id, updated_version_id)
+
+    return version_map
+
+
+def _merge_textmap_version_updates_into_cache(
+    version_map: dict[int, tuple[int | None, int | None]],
+    update_rows: Iterable[tuple[int | None, int | None, int, int]],
+) -> None:
+    for created_version, updated_version, _lang_id, hash_value in update_rows:
+        version_map[int(hash_value)] = (created_version, updated_version)
+
+
 def _load_worktree_textmap_group(repo_path: str, base_name: str) -> dict[str, object] | None:
     """Load current AnimeGameData TextMap files related to one canonical base name."""
     textmap_dir = os.path.join(repo_path, "TextMap")
@@ -1186,7 +1402,10 @@ def _load_snapshot_textmap_group(
     merged: dict[str, object] = {}
     matched = False
     groups = _list_snapshot_textmap_groups(repo_path, commit_sha)
-    for rel_path in groups.get(base_name, []):
+    group_paths = groups.get(base_name, [])
+    if group_paths:
+        _prefetch_git_show_texts(repo_path, commit_sha, group_paths)
+    for rel_path in group_paths:
         payload = _git_show_json(repo_path, commit_sha, rel_path)
         if not isinstance(payload, dict):
             continue
@@ -1225,53 +1444,19 @@ def _resolve_version_id(version_label: str) -> int | None:
     """解析并获取版本 ID。"""
     return get_or_create_version_id(normalize_version_label(version_label) or version_label)
 
-
-def _normalize_anecdote_int_list(values) -> list[int]:
-    result: list[int] = []
-    seen: set[int] = set()
-    if not isinstance(values, list):
-        return result
-    for value in values:
-        if not isinstance(value, int) or value <= 0 or value in seen:
-            continue
-        seen.add(value)
-        result.append(value)
-    return result
-
-
-def _extract_storyboard_group_talk_ids_from_history(obj: dict) -> list[int]:
-    if not isinstance(obj, dict):
-        return []
-    talks = obj.get("DGJMIPFDEOF")
-    if not isinstance(talks, list):
-        return []
-    result: list[int] = []
-    seen: set[int] = set()
-    for talk in talks:
-        if not isinstance(talk, dict):
-            continue
-        talk_id = talk.get("BLKKAMEMBBJ")
-        if not isinstance(talk_id, int) or talk_id <= 0 or talk_id in seen:
-            continue
-        seen.add(talk_id)
-        result.append(talk_id)
-    return result
-
-
-def _extract_anecdote_history_row(row: dict) -> tuple[int, int | None, int | None, list[int]] | None:
-    if not isinstance(row, dict):
+def _extract_anecdote_history_row(
+    row: dict,
+) -> tuple[int, int | None, int | None, int | None, list[int]] | None:
+    core_fields = extract_anecdote_core_fields(row)
+    if core_fields is None:
         return None
-    anecdote_id = row.get("DBGCFNMLHAJ")
-    if not isinstance(anecdote_id, int) or anecdote_id <= 0:
-        return None
-    title_hash = row.get("EJMLGHMLPLD")
-    if not isinstance(title_hash, int) or title_hash == 0:
-        title_hash = None
-    desc_hash = row.get("JKNBFACAMCF")
-    if not isinstance(desc_hash, int) or desc_hash == 0:
-        desc_hash = None
-    group_ids = normalize_unique_ints(row.get("LIIPHELCPKJ"), positive_only=True)
-    return anecdote_id, title_hash, desc_hash, group_ids
+    return (
+        core_fields["quest_id"],
+        core_fields["title_text_map_hash"],
+        core_fields["desc_text_map_hash"],
+        core_fields["long_desc_text_map_hash"],
+        core_fields["group_ids"],
+    )
 
 
 def _load_anecdote_history_payload(repo_path: str, commit_sha: str, anecdote_id: int) -> dict | None:
@@ -1289,7 +1474,7 @@ def _load_anecdote_history_payload(repo_path: str, commit_sha: str, anecdote_id:
     if matched_row is None:
         return None
 
-    _quest_id, title_hash, desc_hash, group_ids = matched_row
+    _quest_id, title_hash, desc_hash, long_desc_hash, group_ids = matched_row
     talk_ids: list[int] = []
     seen: set[int] = set()
     for group_id in group_ids:
@@ -1305,29 +1490,9 @@ def _load_anecdote_history_payload(repo_path: str, commit_sha: str, anecdote_id:
         "quest_id": anecdote_id,
         "title_hash": title_hash,
         "desc_hash": desc_hash,
+        "long_desc_hash": long_desc_hash,
         "talk_ids": talk_ids,
     }
-
-
-def _extract_hangout_history_main_coop_ids(rows, quest_id: int) -> list[int]:
-    if not isinstance(rows, list):
-        return []
-    result: list[int] = []
-    seen: set[int] = set()
-    for row in rows:
-        if not isinstance(row, dict):
-            continue
-        raw_id = row.get("id")
-        if not isinstance(raw_id, int) or raw_id <= 0:
-            raw_id = row.get("JLJFKNHFLJP")
-        if not isinstance(raw_id, int) or raw_id <= 0:
-            continue
-        if raw_id // 100 != quest_id or raw_id in seen:
-            continue
-        seen.add(raw_id)
-        result.append(raw_id)
-    return result
-
 
 def _load_hangout_history_payload(repo_path: str, commit_sha: str, quest_id: int) -> dict | None:
     rows = _git_show_json(repo_path, commit_sha, MAIN_COOP_CONFIG_PATH)
@@ -1641,14 +1806,7 @@ def _backfill_quest_version_by_commit_entry(
             return 0
         updated_total = 0
         seen_quest_ids: set[int] = set()
-        for row in rows:
-            if not isinstance(row, dict):
-                continue
-            raw_id = row.get("id")
-            if not isinstance(raw_id, int) or raw_id <= 0:
-                raw_id = row.get("JLJFKNHFLJP")
-            if not isinstance(raw_id, int) or raw_id <= 0:
-                continue
+        for raw_id in extract_main_coop_ids(rows):
             quest_id = raw_id // 100
             if quest_id in seen_quest_ids:
                 continue
@@ -1936,7 +2094,8 @@ def apply_quest_version_delta_from_textmap(
                         FROM quest_hash_map qhm
                         JOIN _changed_textmap_hash c ON c.hash = qhm.hash
                         JOIN quest q ON q.questId = qhm.questId
-                        WHERE {quest_scope_filter}
+                        WHERE qhm.source_type IN ('title', 'dialogue')
+                          AND {quest_scope_filter}
                         ON CONFLICT(questId, lang) DO UPDATE SET
                         updated_version_id={_build_version_preference_case_sql(
                             existing_expr="quest_version.updated_version_id",
@@ -2147,6 +2306,7 @@ def _backfill_versions_from_snapshots(
     process_entry_fn,
     pbar_desc: str,
     commit_batch_size: int = DEFAULT_HISTORY_COMMIT_BATCH_SIZE,
+    refresh_version_catalog: bool = True,
 ):
     """通用版本快照回放入口，按版本快照批次处理指定资源。"""
     commit_batch_size = max(1, int(commit_batch_size))
@@ -2175,6 +2335,10 @@ def _backfill_versions_from_snapshots(
     resolved_target = target_snapshot.commit_sha if target_snapshot else replay_range.raw_target_commit
     resolved_from = from_snapshot.commit_sha if from_snapshot else None
     resume_scope = replay_range.resume_scope
+    gc_was_enabled = gc.isenabled()
+    if gc_was_enabled:
+        gc.disable()
+        logger.info(f"{table_name} 版本快照回放: 已临时关闭 Python 自动 GC，避免大对象图遍历卡顿")
 
     try:
         if target_snapshot is None:
@@ -2316,6 +2480,11 @@ def _backfill_versions_from_snapshots(
                     except Exception as e:
                         logger.error(f"Error processing snapshot {idx}: {e}")
                         pbar.update(postfix=postfix)
+                    finally:
+                        # Snapshot-scoped caches can balloon during force replay, especially
+                        # for TextMap. Drop them eagerly to keep memory bounded.
+                        _clear_history_runtime_caches()
+                        gc.collect()
                 if processed_snapshots > 0 and last_snapshot is not None:
                     try:
                         conn.commit()
@@ -2355,7 +2524,8 @@ def _backfill_versions_from_snapshots(
                 set_meta(meta_title_key, target_snapshot.version_label)
             set_meta(resume_target_key, "")
             set_meta(resume_done_key, "")
-            rebuild_version_catalog([table_name])
+            if refresh_version_catalog:
+                rebuild_version_catalog([table_name])
         except Exception as e:
             logger.error(f"Error finalizing metadata: {e}")
 
@@ -2363,6 +2533,11 @@ def _backfill_versions_from_snapshots(
     except Exception as e:
         logger.error(f"{table_name} 版本快照回放失败: {e}", exc_info=True)
         raise
+    finally:
+        if gc_was_enabled:
+            collected = gc.collect()
+            gc.enable()
+            logger.info(f"{table_name} 版本快照回放: 已恢复 Python 自动 GC，手动回收 {collected} 个对象")
 
 
 def _backfill_versions_from_history(
@@ -2381,6 +2556,7 @@ def _backfill_versions_from_history(
     process_entry_fn,
     pbar_desc: str,
     commit_batch_size: int = DEFAULT_HISTORY_COMMIT_BATCH_SIZE,
+    refresh_version_catalog: bool = True,
 ):
     """兼容旧入口名，内部改走版本快照回放。"""
     _backfill_versions_from_snapshots(
@@ -2398,6 +2574,7 @@ def _backfill_versions_from_history(
         process_entry_fn=process_entry_fn,
         pbar_desc=pbar_desc,
         commit_batch_size=commit_batch_size,
+        refresh_version_catalog=refresh_version_catalog,
     )
 
 
@@ -2473,16 +2650,24 @@ def backfill_versions_from_history(
         for name, func in backfill_functions:
             try:
                 logger.info(f"开始执行 {name} 版本快照回放...")
-                func(
-                    target_commit=target_commit,
-                    from_commit=from_commit,
-                    force=force,
-                    batch_size=batch_size,
-                    verbose=verbose,
-                )
+                with _suspend_automatic_gc(f"{name} 版本快照回放"):
+                    func(
+                        target_commit=target_commit,
+                        from_commit=from_commit,
+                        force=force,
+                        batch_size=batch_size,
+                        verbose=verbose,
+                    )
                 logger.info(f"{name} 版本快照回放完成")
             except Exception as e:
                 logger.error(f"{name} 版本快照回放失败: {e}", exc_info=True)
+            finally:
+                _clear_history_runtime_caches(
+                    clear_git_command_cache=True,
+                    clear_snapshot_metadata=True,
+                    clear_repo_cache=True,
+                )
+                gc.collect()
     try:
         if resolved_from is None:
             set_meta("db_history_versions_commit", resolved_target)
@@ -2524,10 +2709,13 @@ def backfill_textmap_versions_from_history(
     force: bool = False,
     batch_size: int = DEFAULT_BATCH_SIZE,
     verbose: bool = False,
+    refresh_version_catalog: bool = True,
 ):
     """回填 TextMap 历史版本。"""
     textmap_lang_map = _get_textmap_lang_id_map()
     local_textmap_cache: dict[str, dict[str, object] | None] = {}
+    textmap_version_cache: dict[str, dict[int, tuple[int | None, int | None]]] = {}
+    processed_snapshot_groups: set[tuple[str, str]] = set()
 
     def process_textmap_entry(cursor, repo_path, commit_sha, parent_sha, entry, version_id, version_label, batch_size):
         """处理单个 TextMap 版本快照条目。"""
@@ -2547,6 +2735,10 @@ def backfill_textmap_versions_from_history(
         lang_id = textmap_lang_map.get(base_name)
         if lang_id is None:
             return
+        processed_key = (commit_sha, base_name)
+        if processed_key in processed_snapshot_groups:
+            return
+        processed_snapshot_groups.add(processed_key)
 
         snapshot_obj = _load_snapshot_textmap_group(repo_path, commit_sha, base_name)
         if snapshot_obj is None:
@@ -2558,55 +2750,27 @@ def backfill_textmap_versions_from_history(
         if not isinstance(current_obj, dict):
             return
 
-        candidate_items: list[tuple[int, object, object]] = []
-        for raw_hash, current_content in current_obj.items():
-            if raw_hash not in snapshot_obj:
-                continue
-            try:
-                hash_value = int(_to_hash_value(raw_hash))
-            except Exception:
-                continue
-            candidate_items.append((hash_value, snapshot_obj[raw_hash], current_content))
-        if not candidate_items:
-            return
+        if base_name not in textmap_version_cache:
+            textmap_version_cache[base_name] = _load_textmap_version_cache_for_current_group(
+                cursor,
+                lang_id=lang_id,
+                current_obj=current_obj,
+                batch_size=batch_size,
+            )
+        existing_map = textmap_version_cache[base_name]
 
-        existing_map: dict[int, tuple[int | None, int | None]] = {}
-        chunk_size = max(1, int(batch_size))
-        for idx in range(0, len(candidate_items), chunk_size):
-            chunk = candidate_items[idx : idx + chunk_size]
-            placeholders = ",".join(["?"] * len(chunk))
-            params = [lang_id, *[hash_value for hash_value, _history_content, _current_content in chunk]]
-            rows = cursor.execute(
-                f"SELECT hash, created_version_id, updated_version_id "
-                f"FROM textMap WHERE lang=? AND hash IN ({placeholders})",
-                params,
-            ).fetchall()
-            for row_hash, created_version_id, updated_version_id in rows:
-                existing_map[int(row_hash)] = (created_version_id, updated_version_id)
+        previous_snapshot_obj = None
+        if parent_sha and _textmap_snapshot_has_current_matches(snapshot_obj, current_obj):
+            previous_snapshot_obj = _load_snapshot_textmap_group(repo_path, parent_sha, base_name)
 
-        update_rows = []
-        for hash_value, history_content, current_content in candidate_items:
-            version_info = existing_map.get(hash_value)
-            if version_info is None:
-                continue
-            existing_created_version, existing_updated_version = version_info
-            created_version = existing_created_version
-            updated_version = existing_updated_version
-
-            if should_update_version(existing_created_version, version_id, is_created=True):
-                created_version = version_id
-
-            if history_content == current_content and (
-                existing_updated_version is None
-                or should_update_version(existing_updated_version, version_id, is_created=True)
-            ):
-                updated_version = version_id
-
-            if (
-                created_version != existing_created_version
-                or updated_version != existing_updated_version
-            ):
-                update_rows.append((created_version, updated_version, lang_id, hash_value))
+        update_rows = _build_textmap_history_update_rows(
+            snapshot_obj=snapshot_obj,
+            previous_snapshot_obj=previous_snapshot_obj,
+            current_obj=current_obj,
+            lang_id=lang_id,
+            version_id=version_id,
+            existing_map=existing_map,
+        )
 
         if update_rows:
             executemany_batched(
@@ -2616,6 +2780,7 @@ def backfill_textmap_versions_from_history(
                 update_rows,
                 batch_size=batch_size,
             )
+            _merge_textmap_version_updates_into_cache(existing_map, update_rows)
 
     _backfill_versions_from_history(
         target_commit=target_commit,
@@ -2631,7 +2796,8 @@ def backfill_textmap_versions_from_history(
         resume_done_key="db_history_versions_commit_textmap_resume_done",
         process_entry_fn=process_textmap_entry,
         pbar_desc="TextMap backfill",
-        commit_batch_size=DEFAULT_HISTORY_COMMIT_BATCH_SIZE,
+        commit_batch_size=5,
+        refresh_version_catalog=refresh_version_catalog,
     )
 
     print("TextMap history phase-1.5: Git history backfill for textmap without version data")
@@ -2662,6 +2828,7 @@ def backfill_readable_versions_from_history(
     force: bool = False,
     batch_size: int = DEFAULT_BATCH_SIZE,
     verbose: bool = False,
+    refresh_version_catalog: bool = True,
 ):
     """回填 Readable 历史版本。"""
 
@@ -2749,20 +2916,17 @@ def backfill_readable_versions_from_history(
         process_entry_fn=process_readable_entry,
         pbar_desc="Readable backfill",
         commit_batch_size=10,
+        refresh_version_catalog=refresh_version_catalog,
     )
 
     print("Readable 历史阶段 1.5：为缺少版本数据的 Readable 执行 Git 回溯")
     cursor = conn.cursor()
     try:
-        def build_readable_file_path(record):
-            file_name, lang = record
-            return f"Readable/{lang}/{file_name}"
-
         _backfill_git_versions(
             cursor,
             "Readable",
             "SELECT fileName, lang FROM readable WHERE created_version_id IS NULL",
-            build_readable_file_path,
+            _build_readable_record_rel_path,
             "UPDATE readable SET created_version_id = ?, updated_version_id = ? WHERE fileName = ? AND lang = ?",
             "Readable Git 回溯",
         )
@@ -2790,6 +2954,7 @@ def backfill_subtitle_versions_from_history(
     force: bool = False,
     batch_size: int = DEFAULT_BATCH_SIZE,
     verbose: bool = False,
+    refresh_version_catalog: bool = True,
 ):
     """回填 Subtitle 历史版本。"""
     local_rows_cache: dict[str, dict[str, str] | None] = {}
@@ -2800,22 +2965,16 @@ def backfill_subtitle_versions_from_history(
         old_path = entry.get("old_path")
         new_path = entry.get("new_path")
         rel_path = (new_path or old_path or "").replace("\\", "/")
-        if not rel_path:
+        parsed = normalize_subtitle_rel_path(rel_path)
+        if parsed is None:
             return
-        if not (rel_path.startswith("Subtitle/") and rel_path.endswith(".srt")):
-            return
-        parts = rel_path.split("/", 2)
-        if len(parts) < 3:
-            return
-        lang_name = parts[1]
-        lang_id = LANG_CODE_MAP.get(lang_name)
-        if lang_id is None:
-            return
-
-        rel_under_lang = parts[2]
+        lang_name, lang_id, clean_file_name = parsed
+        rel_under_lang = f"{clean_file_name}.srt"
         new_text = _git_show_text(repo_path, commit_sha, rel_path) if action != "D" else None
         history_rows = _parse_srt_rows(new_text, lang_id, rel_under_lang) if new_text is not None else {}
-        current_rel_path = f"Subtitle/{lang_name}/{rel_under_lang}"
+        current_rel_path = build_subtitle_rel_path(clean_file_name, lang_name)
+        if current_rel_path is None:
+            return
         if current_rel_path not in local_rows_cache:
             current_text = _read_worktree_text(repo_path, current_rel_path)
             local_rows_cache[current_rel_path] = (
@@ -2831,7 +2990,6 @@ def backfill_subtitle_versions_from_history(
         for changed_key in _subtitle_text_changed_keys(history_rows, current_rows):
             matching_current_keys.discard(changed_key)
 
-        clean_file_name = os.path.splitext(rel_under_lang)[0].replace("\\", "/")
         cursor.execute(
             "SELECT subtitleKey, created_version_id, updated_version_id "
             "FROM subtitle WHERE fileName=? AND lang=?",
@@ -2884,34 +3042,17 @@ def backfill_subtitle_versions_from_history(
         process_entry_fn=process_subtitle_entry,
         pbar_desc="Subtitle backfill",
         commit_batch_size=10,
+        refresh_version_catalog=refresh_version_catalog,
     )
 
     print("Subtitle 历史阶段 1.5：为缺少版本数据的 Subtitle 执行 Git 回溯")
     cursor = conn.cursor()
     try:
-        def build_subtitle_file_path(record):
-            subtitle_key, = record
-            parts = subtitle_key.split('_')
-            if len(parts) < 4:
-                return None
-
-            file_name = '_'.join(parts[:-3])
-            lang_part = parts[-3]
-            lang_dir = None
-            for lang_name, lang_id in LANG_CODE_MAP.items():
-                if str(lang_id) == lang_part:
-                    lang_dir = lang_name
-                    break
-            if not lang_dir:
-                return None
-
-            return f"Subtitle/{lang_dir}/{file_name}.srt"
-
         _backfill_git_versions(
             cursor,
             "Subtitle",
             "SELECT subtitleKey FROM subtitle WHERE created_version_id IS NULL",
-            build_subtitle_file_path,
+            _build_subtitle_record_rel_path,
             "UPDATE subtitle SET created_version_id = ?, updated_version_id = ? WHERE subtitleKey = ?",
             "Subtitle Git 回溯",
         )
@@ -2939,6 +3080,7 @@ def backfill_npc_versions_from_history(
     force: bool = False,
     batch_size: int = DEFAULT_BATCH_SIZE,
     verbose: bool = False,
+    refresh_version_catalog: bool = True,
 ):
     """回填 NPC 在 NpcExcelConfigData.json 中首次出现的版本。"""
     current_npc_ids: set[int] | None = None
@@ -3047,6 +3189,7 @@ def backfill_npc_versions_from_history(
         process_entry_fn=process_npc_entry,
         pbar_desc="NPC backfill",
         commit_batch_size=10,
+        refresh_version_catalog=refresh_version_catalog,
     )
 
 
@@ -3400,6 +3543,7 @@ def backfill_quest_versions_from_history(
     unresolved_ratio_threshold: float = 0.05,
     batch_size: int = DEFAULT_BATCH_SIZE,
     verbose: bool = False,
+    refresh_version_catalog: bool = True,
 ) -> dict[str, int | str]:
     """执行任务版本快照回放。"""
     ensure_version_schema()
@@ -3630,7 +3774,8 @@ def backfill_quest_versions_from_history(
         set_meta(meta_title_key, target_snapshot.version_label)
     set_meta(resume_target_key, "")
     set_meta(resume_done_key, "")
-    rebuild_version_catalog(["quest"])
+    if refresh_version_catalog:
+        rebuild_version_catalog(["quest"])
 
     print("\n=== Quest Version Validation ===")
     validate_quest_versions(fix=True)

@@ -16,9 +16,15 @@ from localization_utils import (
     load_document_loc_title_hash,
     load_localization_entries,
 )
+from text_source_path_utils import (
+    build_readable_full_path,
+    normalize_readable_rel_path,
+)
 from version_control import assign_readable_versions_by_text, should_update_version
 from version_control import ensure_version_schema, get_current_version, get_or_create_version_id
 from textmap_name_utils import analyze_readable_exceptions, report_exceptions, delete_empty_readable_entries
+
+
 def _load_readable_filename_map() -> dict:
     print("Loading document and localization configs...")
     loc_id_to_title_hash = load_document_loc_title_hash(DATA_PATH)
@@ -59,22 +65,6 @@ def _build_plain_readable_upsert_sql() -> str:
         "OR NOT (readable.readableId IS excluded.readableId)"
     )
 
-
-def _normalize_readable_rel_path(rel_path: str) -> tuple[str, str, str] | None:
-    normalized = rel_path.replace("\\", "/").strip("/")
-    parts = normalized.split("/", 1)
-    if len(parts) != 2:
-        return None
-    lang, rel_under_lang = parts
-    if not lang or not rel_under_lang:
-        return None
-    file_name = os.path.basename(rel_under_lang)
-    if not file_name:
-        return None
-    full_path = os.path.join(READABLE_PATH, lang, rel_under_lang.replace("/", os.sep))
-    return lang, file_name, full_path
-
-
 def importReadableByFiles(
     changed_files: list[str] | set[str],
     deleted_files: list[str] | set[str],
@@ -106,11 +96,16 @@ def importReadableByFiles(
     skipped_paths: list[str] = []
     changed_tasks: list[tuple[str, str, str]] = []
     for rel_path in changed_list:
-        parsed = _normalize_readable_rel_path(rel_path)
+        parsed = normalize_readable_rel_path(rel_path)
         if parsed is None:
             skipped_paths.append(rel_path)
             continue
-        changed_tasks.append(parsed)
+        lang, file_name = parsed
+        full_path = build_readable_full_path(file_name, lang, readable_root=READABLE_PATH)
+        if full_path is None:
+            skipped_paths.append(rel_path)
+            continue
+        changed_tasks.append((lang, file_name, full_path))
 
     print(
         "Readable diff import: "
@@ -124,7 +119,14 @@ def importReadableByFiles(
                 pbar.update()
                 continue
             name_without_ext = os.path.splitext(file_name)[0]
-            info = filename_to_info.get(name_without_ext) or filename_to_info.get(file_name)
+            base_name = os.path.basename(file_name)
+            base_name_without_ext = os.path.splitext(base_name)[0]
+            info = (
+                filename_to_info.get(name_without_ext)
+                or filename_to_info.get(file_name)
+                or filename_to_info.get(base_name)
+                or filename_to_info.get(base_name_without_ext)
+            )
             title_hash = info["titleHash"] if info else None
             readable_id = info["readableId"] if info else None
             try:
@@ -166,11 +168,11 @@ def importReadableByFiles(
 
     delete_rows: list[tuple[str, str]] = []
     for rel_path in deleted_list:
-        parsed = _normalize_readable_rel_path(rel_path)
+        parsed = normalize_readable_rel_path(rel_path)
         if parsed is None:
             skipped_paths.append(rel_path)
             continue
-        lang, file_name, _ = parsed
+        lang, file_name = parsed
         delete_rows.append((file_name, lang))
     if delete_rows:
         cursor.executemany("DELETE FROM readable WHERE fileName=? AND lang=?", delete_rows)

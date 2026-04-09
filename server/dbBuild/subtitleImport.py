@@ -14,9 +14,15 @@ from import_utils import (
 from lang_constants import LANG_CODE_MAP
 from localization_utils import build_subtitle_filename_map, load_localization_entries
 from subtitle_utils import iter_srt_entries, subtitle_key
+from text_source_path_utils import (
+    build_subtitle_full_path,
+    normalize_subtitle_rel_path,
+)
 from version_control import assign_subtitle_versions_by_text, should_update_version
 from version_control import ensure_version_schema, get_current_version, get_or_create_version_id
 from textmap_name_utils import analyze_subtitle_exceptions, report_exceptions, delete_empty_subtitle_entries
+
+
 def _load_subtitle_filename_map() -> dict:
     print("Loading localization configs for subtitles...")
     localization_entries = load_localization_entries(DATA_PATH)
@@ -64,25 +70,6 @@ def _build_plain_subtitle_upsert_sql() -> str:
         "OR NOT (subtitle.subtitleId IS excluded.subtitleId)"
     )
 
-
-def _normalize_subtitle_rel_path(rel_path: str) -> tuple[str, int, str, str] | None:
-    normalized = rel_path.replace("\\", "/").strip("/")
-    parts = normalized.split("/", 1)
-    if len(parts) != 2:
-        return None
-    lang_name, rel_under_lang = parts
-    if not lang_name or not rel_under_lang:
-        return None
-    lang_id = LANG_CODE_MAP.get(lang_name)
-    if lang_id is None:
-        return None
-    if not rel_under_lang.lower().endswith(".srt"):
-        return None
-    clean_file_name = os.path.splitext(rel_under_lang)[0].replace("\\", "/")
-    full_path = os.path.join(DATA_PATH, "Subtitle", lang_name, rel_under_lang.replace("/", os.sep))
-    return lang_name, lang_id, clean_file_name, full_path
-
-
 def importSubtitlesByFiles(
     changed_files: list[str] | set[str],
     deleted_files: list[str] | set[str],
@@ -114,11 +101,20 @@ def importSubtitlesByFiles(
     skipped_paths: list[str] = []
     changed_tasks: list[tuple[str, int, str, str]] = []
     for rel_path in changed_list:
-        parsed = _normalize_subtitle_rel_path(rel_path)
+        parsed = normalize_subtitle_rel_path(rel_path)
         if parsed is None:
             skipped_paths.append(rel_path)
             continue
-        changed_tasks.append(parsed)
+        lang_name, lang_id, clean_file_name = parsed
+        full_path = build_subtitle_full_path(
+            clean_file_name,
+            lang_name,
+            subtitle_root=os.path.join(DATA_PATH, "Subtitle"),
+        )
+        if full_path is None:
+            skipped_paths.append(rel_path)
+            continue
+        changed_tasks.append((lang_name, lang_id, clean_file_name, full_path))
 
     print(
         "Subtitle diff import: "
@@ -211,11 +207,11 @@ def importSubtitlesByFiles(
 
     delete_rows: list[tuple[str, int]] = []
     for rel_path in deleted_list:
-        parsed = _normalize_subtitle_rel_path(rel_path)
+        parsed = normalize_subtitle_rel_path(rel_path)
         if parsed is None:
             skipped_paths.append(rel_path)
             continue
-        _, lang_id, clean_file_name, _ = parsed
+        _, lang_id, clean_file_name = parsed
         delete_rows.append((clean_file_name, lang_id))
     if delete_rows:
         cursor.executemany("DELETE FROM subtitle WHERE fileName=? AND lang=?", delete_rows)
