@@ -29,11 +29,37 @@ _QUEST_SOURCE_RAW_BY_ID: dict[int, str] | None = None
 _HANGOUT_QUEST_IDS: set[int] | None = None
 _MAIN_COOP_IDS_BY_QUEST_ID: dict[int, list[int]] | None = None
 
-
-def normalize_nonzero_int(value):
-    if isinstance(value, int) and value != 0:
-        return value
+def _extract_first_positive_int(row: dict, *keys: str) -> int | None:
+    for key in keys:
+        value = row.get(key)
+        if isinstance(value, int) and value > 0:
+            return value
     return None
+
+
+def extract_anecdote_core_fields(row: dict) -> dict | None:
+    if not isinstance(row, dict):
+        return None
+
+    anecdote_id = _extract_first_positive_int(row, "GBDGFHNLDFF", "DBGCFNMLHAJ")
+    if anecdote_id is None:
+        return None
+
+    title_text_map_hash = _extract_first_positive_int(row, "PPANCKHJOGI", "EJMLGHMLPLD")
+    desc_text_map_hash = _extract_first_positive_int(row, "AJKAHOPOBJB", "JKNBFACAMCF")
+    long_desc_text_map_hash = _extract_first_positive_int(row, "OBLBGMIHBHL")
+
+    group_ids = normalize_unique_ints(row.get("BBOMCGBIOFM"), positive_only=True)
+    if not group_ids:
+        group_ids = normalize_unique_ints(row.get("LIIPHELCPKJ"), positive_only=True)
+
+    return {
+        "quest_id": anecdote_id,
+        "title_text_map_hash": title_text_map_hash,
+        "desc_text_map_hash": desc_text_map_hash,
+        "long_desc_text_map_hash": long_desc_text_map_hash,
+        "group_ids": group_ids,
+    }
 
 
 def normalize_source_code_raw(value) -> str:
@@ -73,7 +99,9 @@ def load_quest_source_raw_by_id() -> dict[int, str]:
             quest_id = extract_quest_id(obj)
             if not isinstance(quest_id, int) or quest_id <= 0:
                 continue
-            mapping[quest_id] = normalize_source_code_raw(obj.get("DLPKMDPABFM"))
+            mapping[quest_id] = normalize_source_code_raw(
+                obj.get("HAHEIAHBPEJ") or obj.get("DLPKMDPABFM")
+            )
 
     _QUEST_SOURCE_RAW_BY_ID = mapping
     return mapping
@@ -166,7 +194,9 @@ def resolve_quest_source_fields(quest_id: int | None, *, is_anecdote: bool = Fal
 
 
 def get_quest_subquests(obj: dict) -> list[dict]:
-    subquests = obj.get("NLCNGJKMAEN")
+    subquests = obj.get("MEGJPCLADOG")
+    if not isinstance(subquests, list):
+        subquests = obj.get("NLCNGJKMAEN")
     if not isinstance(subquests, list):
         subquests = obj.get("subQuests")
     if not isinstance(subquests, list):
@@ -177,7 +207,14 @@ def get_quest_subquests(obj: dict) -> list[dict]:
 
 
 def get_step_desc_text_map_hash(step_obj: dict) -> int | None:
-    for key in ("stepDescTextMapHash", "OCMKKHHNKJO", "BMBANCMPPOM", "NAEMBIJFJCA", "HMLBMECMBGA"):
+    for key in (
+        "AJGGCMPLKHK",
+        "stepDescTextMapHash",
+        "OCMKKHHNKJO",
+        "BMBANCMPPOM",
+        "NAEMBIJFJCA",
+        "HMLBMECMBGA",
+    ):
         value = step_obj.get(key)
         if isinstance(value, int) and value != 0:
             return value
@@ -188,7 +225,9 @@ def get_step_talk_ids(step_obj: dict) -> list[int]:
     talk_ids: list[int] = []
     seen: set[int] = set()
 
-    conditions = step_obj.get("AACKELGGJGC")
+    conditions = step_obj.get("POPHAFEBKIH")
+    if not isinstance(conditions, list):
+        conditions = step_obj.get("AACKELGGJGC")
     if not isinstance(conditions, list):
         conditions = step_obj.get("finishCond")
     if not isinstance(conditions, list):
@@ -200,14 +239,16 @@ def get_step_talk_ids(step_obj: dict) -> list[int]:
         if not isinstance(condition, dict):
             continue
         cond_type = (
-            condition.get("DLPKMDPABFM")
+            condition.get("HAHEIAHBPEJ")
+            or condition.get("DLPKMDPABFM")
             or condition.get("type")
             or condition.get("PAINLIBBLDK")
         )
         if cond_type != "QUEST_CONTENT_COMPLETE_TALK":
             continue
         params = (
-            condition.get("IEKGEJMAOCN")
+            condition.get("AAHAKNIPEDM")
+            or condition.get("IEKGEJMAOCN")
             or condition.get("param")
             or condition.get("paramList")
             or condition.get("LNHLPKELCAL")
@@ -235,7 +276,7 @@ def build_step_title_hash_by_talk_id(obj: dict) -> dict[int, int]:
 def resolve_main_quest_id_for_subquest(subquest: dict, fallback_quest_id: int | None = None) -> int | None:
     if isinstance(fallback_quest_id, int) and fallback_quest_id > 0:
         return fallback_quest_id
-    for key in ("mainQuestId", "GNGFBMPFBOK", "JKHGFFKOFFN"):
+    for key in ("JPBOKMKMHCJ", "mainQuestId", "GNGFBMPFBOK", "JKHGFFKOFFN"):
         value = subquest.get(key)
         if isinstance(value, int) and value > 0:
             return value
@@ -279,7 +320,9 @@ def load_talk_excel_perform_cfg_map() -> dict[int, list[str]]:
 def extract_storyboard_group_talk_ids(obj: dict) -> list[int]:
     if not isinstance(obj, dict):
         return []
-    items = obj.get("DGJMIPFDEOF")
+    items = obj.get("NFFIGDHFAJG")
+    if not isinstance(items, list):
+        items = obj.get("DGJMIPFDEOF")
     if not isinstance(items, list):
         items = obj.get("talks")
     if not isinstance(items, list):
@@ -290,7 +333,9 @@ def extract_storyboard_group_talk_ids(obj: dict) -> list[int]:
     for item in items:
         if not isinstance(item, dict):
             continue
-        talk_id = item.get("BLKKAMEMBBJ")
+        talk_id = item.get("NFIEHACCECI")
+        if not isinstance(talk_id, int) or talk_id <= 0 or talk_id in seen:
+            talk_id = item.get("BLKKAMEMBBJ")
         if not isinstance(talk_id, int) or talk_id <= 0 or talk_id in seen:
             continue
         seen.add(talk_id)
@@ -306,15 +351,15 @@ def extract_anecdote_payload(
     missing_talk_excel_collector: list[str] | None = None,
     normal_coop_id: int = 0,
 ) -> dict | None:
-    if not isinstance(row, dict):
-        return None
-    anecdote_id = row.get("DBGCFNMLHAJ")
-    if not isinstance(anecdote_id, int) or anecdote_id <= 0:
+    core_fields = extract_anecdote_core_fields(row)
+    if core_fields is None:
         return None
 
-    title_text_map_hash = normalize_nonzero_int(row.get("EJMLGHMLPLD"))
-    desc_text_map_hash = normalize_nonzero_int(row.get("JKNBFACAMCF"))
-    group_ids = normalize_unique_ints(row.get("LIIPHELCPKJ"), positive_only=True)
+    anecdote_id = core_fields["quest_id"]
+    title_text_map_hash = core_fields["title_text_map_hash"]
+    desc_text_map_hash = core_fields["desc_text_map_hash"]
+    long_desc_text_map_hash = core_fields["long_desc_text_map_hash"]
+    group_ids = core_fields["group_ids"]
     talk_ids: list[int] = []
     seen_talk_ids: set[int] = set()
     storyboard_group_root = os.path.join(DATA_PATH, "BinOutput", "Talk", "StoryboardGroup")
@@ -348,6 +393,7 @@ def extract_anecdote_payload(
         "quest_id": anecdote_id,
         "title_text_map_hash": title_text_map_hash,
         "desc_text_map_hash": desc_text_map_hash,
+        "long_desc_text_map_hash": long_desc_text_map_hash,
         "talk_rows": [(talk_id, None, normal_coop_id) for talk_id in sorted(talk_ids)],
         "source_type": SOURCE_TYPE_ANECDOTE,
         "source_code_raw": SOURCE_TYPE_ANECDOTE,
@@ -359,7 +405,7 @@ def extract_nested_text_map_hash(node) -> int | None:
         return node
     if not isinstance(node, dict):
         return None
-    for key in ("AEMBEELBLML", "textMapHash", "hash"):
+    for key in ("BKGOAJFIHCO", "AEMBEELBLML", "textMapHash", "hash"):
         value = node.get(key)
         if isinstance(value, int) and value != 0:
             return value
@@ -377,8 +423,16 @@ def load_hangout_codex_hashes(quest_id: int) -> tuple[int | None, int | None]:
             continue
         if not isinstance(obj, dict):
             continue
-        title_hash = extract_nested_text_map_hash(obj.get("HCGANIMKKLM"))
-        desc_hash = extract_nested_text_map_hash(obj.get("NCBJBOHPGNA"))
+        title_hash = None
+        for key in ("HOBBPLPNMDP", "HCGANIMKKLM"):
+            title_hash = extract_nested_text_map_hash(obj.get(key))
+            if title_hash is not None:
+                break
+        desc_hash = None
+        for key in ("PIAAIKBBCGB", "NCBJBOHPGNA"):
+            desc_hash = extract_nested_text_map_hash(obj.get(key))
+            if desc_hash is not None:
+                break
         if title_hash is not None or desc_hash is not None:
             return title_hash, desc_hash
     return None, None
@@ -438,7 +492,9 @@ def collect_hangout_talk_rows(
                 continue
             if not isinstance(talk_obj, dict):
                 continue
-            talk_id = talk_obj.get("LBPGKDMGFBN")
+            talk_id = talk_obj.get("AADKDKPMGNO")
+            if not isinstance(talk_id, int) or talk_id <= 0:
+                talk_id = talk_obj.get("LBPGKDMGFBN")
             if not isinstance(talk_id, int) or talk_id <= 0:
                 continue
             key = (talk_id, coop_quest_id)
@@ -452,8 +508,8 @@ def collect_hangout_talk_rows(
 def is_existing_real_hangout_quest(existing_row) -> bool:
     if not existing_row:
         return False
-    chapter_id = existing_row[2]
-    source_code_raw = existing_row[4]
+    chapter_id = existing_row[3]
+    source_code_raw = existing_row[5]
     return chapter_id is not None or source_code_raw in BASE_QUEST_SOURCE_TYPES
 
 
@@ -482,8 +538,8 @@ def build_hangout_payload(
     if is_real_existing_quest:
         title_text_map_hash = existing_quest_row[0] if existing_quest_row[0] not in (0,) else codex_title_hash
         desc_text_map_hash = existing_quest_row[1] if existing_quest_row[1] not in (0,) else codex_desc_hash
-        chapter_id = existing_quest_row[2]
-        raw_source = existing_quest_row[4]
+        chapter_id = existing_quest_row[3]
+        raw_source = existing_quest_row[5]
         source_code_raw = raw_source if raw_source in BASE_QUEST_SOURCE_TYPES else SOURCE_TYPE_HANGOUT
     else:
         title_text_map_hash = codex_title_hash
@@ -495,6 +551,7 @@ def build_hangout_payload(
         "quest_id": quest_id,
         "title_text_map_hash": title_text_map_hash,
         "desc_text_map_hash": desc_text_map_hash,
+        "long_desc_text_map_hash": None,
         "chapter_id": chapter_id,
         "source_type": SOURCE_TYPE_HANGOUT,
         "source_code_raw": source_code_raw,

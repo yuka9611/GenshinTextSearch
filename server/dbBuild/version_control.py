@@ -483,6 +483,8 @@ def _quest_hash_map_available(cursor) -> bool:
         return False
     row = cursor.execute("SELECT 1 FROM quest_hash_map LIMIT 1").fetchone()
     return row is not None
+
+
 def _build_qh_source_sql(
     cursor,
     *,
@@ -501,6 +503,7 @@ def _build_qh_source_sql(
                 JOIN quest_hash_map qhm ON qhm.questId = q.questId
                 JOIN quest_version qv ON qv.questId = q.questId
                 WHERE qv.updated_version_id=?
+                  AND qhm.source_type IN ('title', 'dialogue')
                   AND qhm.hash IS NOT NULL
                   AND qhm.hash <> 0
                   {target_filter_q}
@@ -510,7 +513,8 @@ def _build_qh_source_sql(
             SELECT DISTINCT q.questId AS questId, qhm.hash AS hash
             FROM quest q
             JOIN quest_hash_map qhm ON qhm.questId = q.questId
-            WHERE qhm.hash IS NOT NULL
+            WHERE qhm.source_type IN ('title', 'dialogue')
+              AND qhm.hash IS NOT NULL
               AND qhm.hash <> 0
               {target_filter_q}
         """

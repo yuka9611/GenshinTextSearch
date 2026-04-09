@@ -106,6 +106,7 @@ create table quest
     questId          integer,
     titleTextMapHash integer,
     descTextMapHash  integer,
+    longDescTextMapHash integer,
     chapterId        integer,
     created_version_id INTEGER,
     git_created_version_id INTEGER,
