@@ -2443,6 +2443,7 @@ def apply_quest_version_delta_from_textmap(
                     quest_updated_version=version_label,
                     quest_ids=quest_scope,
                     overwrite_existing=False,
+                    authoritative=quest_scope is not None,
                     with_stats=True,
                 )
                 created_rows, updated_rows = _extract_quest_backfill_stats(backfill_result)
@@ -2488,6 +2489,7 @@ def _backfill_quest_phase1_with_progress(
                     quest_ids=quest_ids,
                     overwrite_existing=False,
                     overwrite_updated_existing=True,
+                    authoritative=True,
                     with_stats=True,
                 )
                 created_rows, updated_rows = _extract_quest_backfill_stats(backfill_result)

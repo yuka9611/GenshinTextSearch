@@ -1,5 +1,7 @@
 from collections import Counter, defaultdict
 from collections.abc import Mapping, Sequence
+import os
+import sys
 from DBConfig import conn
 from DBInit import ensure_base_schema
 from import_utils import reset_temp_table
@@ -12,6 +14,20 @@ from versioning import (
     rebuild_version_catalog as _rebuild_version_catalog_impl,
     set_current_version as _set_current_version_impl,
 )
+
+try:
+    from quest_text_filters import (
+        build_quest_text_not_excluded_sql,
+        get_quest_text_filter_lang_id,
+    )
+except ImportError:
+    SERVER_DIR = os.path.normpath(os.path.join(os.path.dirname(__file__), os.pardir))
+    if SERVER_DIR not in sys.path:
+        sys.path.insert(0, SERVER_DIR)
+    from quest_text_filters import (  # type: ignore
+        build_quest_text_not_excluded_sql,
+        get_quest_text_filter_lang_id,
+    )
 
 
 _VERSION_SORT_KEY_MAX = 2147483647
@@ -628,6 +644,7 @@ def backfill_quest_created_version_from_textmap(
     quest_ids: list[int] | set[int] | tuple[int, ...] | None = None,
     overwrite_existing: bool = False,
     overwrite_updated_existing: bool = False,
+    authoritative: bool = False,
     with_stats: bool = False,
 ) -> int | tuple[int, int]:
     """
@@ -639,12 +656,26 @@ def backfill_quest_created_version_from_textmap(
         "questId INTEGER PRIMARY KEY, inferred_created_version_id INTEGER)",
         "_quest_inferred_created_version",
     )
-    using_target_quest_id = quest_ids is not None
-    if using_target_quest_id:
+    reset_temp_table(
+        cursor,
+        "CREATE TEMP TABLE IF NOT EXISTS _quest_inferred_updated_version("
+        "questId INTEGER NOT NULL, lang INTEGER NOT NULL, inferred_updated_version_id INTEGER, "
+        "PRIMARY KEY(questId, lang))",
+        "_quest_inferred_updated_version",
+    )
+    use_target_quest_id = authoritative or quest_ids is not None
+    if use_target_quest_id:
         reset_temp_table(
             cursor,
             "CREATE TEMP TABLE IF NOT EXISTS _target_quest_id(questId INTEGER PRIMARY KEY)",
             "_target_quest_id",
+        )
+    if authoritative:
+        reset_temp_table(
+            cursor,
+            "CREATE TEMP TABLE IF NOT EXISTS _quest_authoritative_created_version("
+            "questId INTEGER PRIMARY KEY, final_created_version_id INTEGER)",
+            "_quest_authoritative_created_version",
         )
     reset_temp_table(
         cursor,
@@ -673,6 +704,10 @@ def backfill_quest_created_version_from_textmap(
             cursor.executemany("INSERT OR IGNORE INTO _target_quest_id(questId) VALUES (?)", normalized_ids)
             target_filter_q = " AND q.questId IN (SELECT questId FROM _target_quest_id)"
             target_filter_qt = " AND qt.questId IN (SELECT questId FROM _target_quest_id)"
+        elif authoritative:
+            cursor.execute("INSERT OR IGNORE INTO _target_quest_id(questId) SELECT questId FROM quest")
+            target_filter_q = " AND q.questId IN (SELECT questId FROM _target_quest_id)"
+            target_filter_qt = " AND qt.questId IN (SELECT questId FROM _target_quest_id)"
 
         target_updated_version_id: int | None = None
         if quest_updated_version:
@@ -693,6 +728,16 @@ def backfill_quest_created_version_from_textmap(
         cursor.execute("CREATE INDEX IF NOT EXISTS _quest_hash_source_hash_idx ON _quest_hash_source(hash)")
         cursor.execute("CREATE INDEX IF NOT EXISTS _quest_hash_source_quest_idx ON _quest_hash_source(questId)")
 
+        chs_lang_id = get_quest_text_filter_lang_id(cursor)
+        created_not_excluded_sql = ""
+        created_filter_params: tuple[object, ...] = tuple()
+        created_lang_sql = "tm.lang = (SELECT id FROM langCode WHERE codeName = 'TextMapCHS.json' LIMIT 1)"
+        if chs_lang_id is not None:
+            created_lang_sql = "tm.lang = ?"
+            created_not_excluded_sql, created_not_excluded_params = build_quest_text_not_excluded_sql("tm.content")
+            created_not_excluded_sql = " AND " + created_not_excluded_sql
+            created_filter_params = (chs_lang_id, *created_not_excluded_params)
+
         created_sql = f"""
         WITH candidates AS (
             SELECT
@@ -704,7 +749,8 @@ def backfill_quest_created_version_from_textmap(
             LEFT JOIN version_dim vd ON vd.id = tm.created_version_id
             WHERE tm.created_version_id IS NOT NULL
               AND qh.hash <> 0
-              AND tm.lang = (SELECT id FROM langCode WHERE codeName = 'TextMapCHS.json' LIMIT 1)
+              AND {created_lang_sql}
+              {created_not_excluded_sql}
         ),
         ranked AS (
             SELECT
@@ -726,30 +772,72 @@ def backfill_quest_created_version_from_textmap(
             SELECT questId, created_version_id
             FROM ranked
             WHERE rn = 1
-            """
+            """,
+            created_filter_params,
         )
 
-        update_created_sql = f"""
-        UPDATE quest
-        SET created_version_id = (
-            SELECT t.inferred_created_version_id
-            FROM _quest_inferred_created_version t
-            WHERE t.questId = quest.questId
-        )
-        WHERE questId IN (SELECT questId FROM _quest_inferred_created_version)
-          AND (created_version_id IS NULL OR {_version_precedes_sql(
-              "(SELECT t.inferred_created_version_id FROM _quest_inferred_created_version t WHERE t.questId = quest.questId)",
-              "created_version_id",
-          )})
-        """
-        cursor.execute(update_created_sql)
-        created_backfilled = cursor.rowcount
+        if authoritative:
+            cursor.execute(
+                f"""
+                INSERT OR REPLACE INTO _quest_authoritative_created_version(questId, final_created_version_id)
+                SELECT
+                    target.questId,
+                    CASE
+                        WHEN inferred.inferred_created_version_id IS NULL THEN quest.git_created_version_id
+                        WHEN quest.git_created_version_id IS NULL THEN inferred.inferred_created_version_id
+                        WHEN {_version_precedes_sql('inferred.inferred_created_version_id', 'quest.git_created_version_id')}
+                        THEN inferred.inferred_created_version_id
+                        ELSE quest.git_created_version_id
+                    END AS final_created_version_id
+                FROM _target_quest_id target
+                JOIN quest ON quest.questId = target.questId
+                LEFT JOIN _quest_inferred_created_version inferred
+                    ON inferred.questId = target.questId
+                """
+            )
+            cursor.execute(
+                """
+                UPDATE quest
+                SET created_version_id = (
+                    SELECT final_created_version_id
+                    FROM _quest_authoritative_created_version t
+                    WHERE t.questId = quest.questId
+                )
+                WHERE questId IN (SELECT questId FROM _target_quest_id)
+                  AND COALESCE(created_version_id, -1) <> COALESCE(
+                      (
+                          SELECT final_created_version_id
+                          FROM _quest_authoritative_created_version t
+                          WHERE t.questId = quest.questId
+                      ),
+                      -1
+                  )
+                """
+            )
+            created_backfilled = int(cursor.rowcount or 0)
+        else:
+            update_created_sql = f"""
+            UPDATE quest
+            SET created_version_id = (
+                SELECT t.inferred_created_version_id
+                FROM _quest_inferred_created_version t
+                WHERE t.questId = quest.questId
+            )
+            WHERE questId IN (SELECT questId FROM _quest_inferred_created_version)
+              AND (created_version_id IS NULL OR {_version_precedes_sql(
+                  "(SELECT t.inferred_created_version_id FROM _quest_inferred_created_version t WHERE t.questId = quest.questId)",
+                  "created_version_id",
+              )})
+            """
+            cursor.execute(update_created_sql)
+            created_backfilled = int(cursor.rowcount or 0)
 
         lang_rows = cursor.execute("SELECT id FROM langCode WHERE imported=1").fetchall()
         languages = [row[0] for row in lang_rows]
 
         updated_backfilled = 0
         for lang in languages:
+            updated_not_excluded_sql, updated_not_excluded_params = build_quest_text_not_excluded_sql("tm.content")
             updated_sql = f"""
             WITH candidates AS (
                 SELECT
@@ -762,6 +850,7 @@ def backfill_quest_created_version_from_textmap(
                 WHERE tm.updated_version_id IS NOT NULL
                   AND qh.hash <> 0
                   AND tm.lang = ?
+                  AND {updated_not_excluded_sql}
             ),
             ranked AS (
                 SELECT
@@ -774,25 +863,50 @@ def backfill_quest_created_version_from_textmap(
                     ) AS rn
                 FROM candidates
             )
-            INSERT INTO quest_version(questId, lang, updated_version_id)
+            INSERT OR REPLACE INTO _quest_inferred_updated_version(questId, lang, inferred_updated_version_id)
             SELECT questId, ?, updated_version_id
             FROM ranked
             WHERE rn = 1
-            ON CONFLICT(questId, lang) DO UPDATE SET
-            updated_version_id={_build_version_preference_case_sql(
-                existing_expr="quest_version.updated_version_id",
-                candidate_expr="excluded.updated_version_id",
-                is_created=False,
-            )}
             """
-            cursor.execute(updated_sql, (lang, lang))
-            updated_backfilled += cursor.rowcount
+            cursor.execute(updated_sql, (lang, *updated_not_excluded_params, lang))
+            if not authoritative:
+                cursor.execute(
+                    f"""
+                    INSERT INTO quest_version(questId, lang, updated_version_id)
+                    SELECT questId, lang, inferred_updated_version_id
+                    FROM _quest_inferred_updated_version
+                    WHERE lang = ?
+                    ON CONFLICT(questId, lang) DO UPDATE SET
+                    updated_version_id={_build_version_preference_case_sql(
+                        existing_expr="quest_version.updated_version_id",
+                        candidate_expr="excluded.updated_version_id",
+                        is_created=False,
+                    )}
+                    """,
+                    (lang,),
+                )
+                updated_backfilled += int(cursor.rowcount or 0)
+
+        if authoritative:
+            cursor.execute("DELETE FROM quest_version WHERE questId IN (SELECT questId FROM _target_quest_id)")
+            cursor.execute(
+                """
+                INSERT INTO quest_version(questId, lang, updated_version_id)
+                SELECT questId, lang, inferred_updated_version_id
+                FROM _quest_inferred_updated_version
+                WHERE inferred_updated_version_id IS NOT NULL
+                """
+            )
+            updated_backfilled = int(cursor.rowcount or 0)
 
         return (created_backfilled, updated_backfilled) if with_stats else created_backfilled
     finally:
         cursor.execute("DELETE FROM _quest_hash_source")
         cursor.execute("DELETE FROM _quest_inferred_created_version")
-        if using_target_quest_id:
+        cursor.execute("DELETE FROM _quest_inferred_updated_version")
+        if authoritative:
+            cursor.execute("DELETE FROM _quest_authoritative_created_version")
+        if use_target_quest_id:
             cursor.execute("DELETE FROM _target_quest_id")
 
 

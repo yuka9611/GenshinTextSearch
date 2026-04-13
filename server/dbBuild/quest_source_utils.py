@@ -24,6 +24,10 @@ BASE_QUEST_SOURCE_TYPES = {
     SOURCE_TYPE_EQ,
     SOURCE_TYPE_IQ,
 }
+_STEP_TALK_CONDITION_TYPES = {
+    "QUEST_CONTENT_COMPLETE_TALK",
+    "QUEST_CONTENT_FINISH_PLOT",
+}
 
 _QUEST_SOURCE_RAW_BY_ID: dict[int, str] | None = None
 _HANGOUT_QUEST_IDS: set[int] | None = None
@@ -244,7 +248,7 @@ def get_step_talk_ids(step_obj: dict) -> list[int]:
             or condition.get("type")
             or condition.get("PAINLIBBLDK")
         )
-        if cond_type != "QUEST_CONTENT_COMPLETE_TALK":
+        if cond_type not in _STEP_TALK_CONDITION_TYPES:
             continue
         params = (
             condition.get("AAHAKNIPEDM")

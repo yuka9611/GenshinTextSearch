@@ -1,6 +1,7 @@
 import os
 import hashlib
 import re
+import sys
 from pathlib import PurePosixPath
 from lightweight_progress import LightweightProgress
 
@@ -39,6 +40,24 @@ from version_control import (
     get_or_create_version_id,
     should_update_version,
 )
+
+try:
+    from quest_text_filters import (
+        build_quest_text_excluded_sql,
+        build_quest_text_not_excluded_sql,
+        get_quest_text_filter_lang_id,
+        sanitize_quest_text_hash,
+    )
+except ImportError:
+    SERVER_DIR = os.path.normpath(os.path.join(os.path.dirname(__file__), os.pardir))
+    if SERVER_DIR not in sys.path:
+        sys.path.insert(0, SERVER_DIR)
+    from quest_text_filters import (  # type: ignore
+        build_quest_text_excluded_sql,
+        build_quest_text_not_excluded_sql,
+        get_quest_text_filter_lang_id,
+        sanitize_quest_text_hash,
+    )
 
 
 _MAIN_QUEST_DESC_HASH_BY_ID: dict[int, int | None] | None = None
@@ -551,6 +570,29 @@ def _build_quest_dialogue_signature(cursor, talk_rows):
     normalized_rows = _filter_quest_talk_rows_by_available_dialogues(cursor, talk_rows)
     if not normalized_rows:
         return ""
+    filter_lang_id = get_quest_text_filter_lang_id(cursor)
+    linked_filter_sql = ""
+    direct_filter_sql = ""
+    filter_params: tuple[object, ...] = tuple()
+    if filter_lang_id is not None:
+        not_excluded_sql, not_excluded_params = build_quest_text_not_excluded_sql("tm.content")
+        linked_filter_sql = (
+            " AND ("
+            "NOT EXISTS (SELECT 1 FROM textMap tm WHERE tm.hash = d.textHash AND tm.lang = ?)"
+            " OR EXISTS (SELECT 1 FROM textMap tm WHERE tm.hash = d.textHash AND tm.lang = ? AND "
+            + not_excluded_sql
+            + ")"
+            ")"
+        )
+        direct_filter_sql = (
+            " AND ("
+            "NOT EXISTS (SELECT 1 FROM textMap tm WHERE tm.hash = dialogue.textHash AND tm.lang = ?)"
+            " OR EXISTS (SELECT 1 FROM textMap tm WHERE tm.hash = dialogue.textHash AND tm.lang = ? AND "
+            + not_excluded_sql
+            + ")"
+            ")"
+        )
+        filter_params = (filter_lang_id, filter_lang_id, *not_excluded_params)
     if _has_any_talk_dialogue_links(cursor):
         conditions: list[str] = []
         params: list[int] = []
@@ -569,10 +611,13 @@ def _build_quest_dialogue_signature(cursor, talk_rows):
             )
               AND d.textHash IS NOT NULL
               AND d.textHash <> 0
+            """
+            + linked_filter_sql
+            + """
             GROUP BY d.textHash
             ORDER BY d.textHash
             """,
-            tuple(params),
+            tuple(params) + filter_params,
         ).fetchall()
     else:
         conditions = []
@@ -595,16 +640,24 @@ def _build_quest_dialogue_signature(cursor, talk_rows):
             )
               AND textHash IS NOT NULL
               AND textHash <> 0
+            """
+            + direct_filter_sql
+            + """
             GROUP BY textHash
             ORDER BY textHash
             """,
-            tuple(params),
+            tuple(params) + filter_params,
         ).fetchall()
     payload = "|".join(f"{text_hash}:{count}" for text_hash, count in rows)
     return hashlib.sha1(payload.encode("utf-8")).hexdigest()
 
 
+def _sanitize_quest_title_text_map_hash(cursor, title_text_map_hash):
+    return sanitize_quest_text_hash(cursor, title_text_map_hash)
+
+
 def _upsert_quest_text_signature(cursor, quest_id, title_text_map_hash, dialogue_signature):
+    sanitized_title_hash = _sanitize_quest_title_text_map_hash(cursor, title_text_map_hash)
     cursor.execute(
         "INSERT INTO quest_text_signature(questId, titleTextMapHash, dialogue_signature) VALUES (?,?,?) "
         "ON CONFLICT(questId) DO UPDATE SET "
@@ -612,8 +665,158 @@ def _upsert_quest_text_signature(cursor, quest_id, title_text_map_hash, dialogue
         "dialogue_signature=excluded.dialogue_signature "
         "WHERE "
         "NOT (quest_text_signature.dialogue_signature IS excluded.dialogue_signature)",
-        (quest_id, title_text_map_hash, dialogue_signature),
+        (quest_id, sanitized_title_hash, dialogue_signature),
     )
+
+
+def _normalize_target_quest_ids(quest_ids) -> list[int]:
+    return normalize_unique_ints(quest_ids or [])
+
+
+def refresh_quest_text_signatures(
+    cursor,
+    quest_ids,
+) -> int:
+    normalized_ids = _normalize_target_quest_ids(quest_ids)
+    if not normalized_ids:
+        return 0
+    refreshed = 0
+    for quest_id in normalized_ids:
+        row = cursor.execute(
+            "SELECT titleTextMapHash FROM quest WHERE questId=?",
+            (quest_id,),
+        ).fetchone()
+        if row is None:
+            continue
+        talk_rows = _fetch_existing_quest_talk_rows(cursor, quest_id, scope=QUEST_TALK_SCOPE_NORMAL)
+        dialogue_signature = _build_quest_dialogue_signature(cursor, talk_rows)
+        _upsert_quest_text_signature(cursor, quest_id, row[0], dialogue_signature)
+        refreshed += 1
+    return refreshed
+
+
+def collect_quests_with_excluded_test_texts(cursor, quest_ids=None) -> set[int]:
+    normalized_ids = _normalize_target_quest_ids(quest_ids)
+    target_filter_sql = ""
+    target_params: tuple[object, ...] = tuple()
+    if normalized_ids:
+        placeholders = ",".join("?" for _ in normalized_ids)
+        target_filter_sql = f" AND q.questId IN ({placeholders})"
+        target_params = tuple(normalized_ids)
+
+    filter_lang_id = get_quest_text_filter_lang_id(cursor)
+    if filter_lang_id is None:
+        return set(normalized_ids)
+
+    excluded_match_sql, excluded_params = build_quest_text_excluded_sql("tm.content")
+
+    queries = (
+        (
+            "SELECT q.questId "
+            "FROM quest q JOIN textMap tm ON tm.hash = q.titleTextMapHash "
+            "WHERE tm.lang=? AND "
+            + excluded_match_sql
+            + target_filter_sql,
+            (filter_lang_id, *excluded_params, *target_params),
+        ),
+        (
+            "SELECT q.questId "
+            "FROM quest q JOIN textMap tm ON tm.hash = q.descTextMapHash "
+            "WHERE tm.lang=? AND "
+            + excluded_match_sql
+            + target_filter_sql,
+            (filter_lang_id, *excluded_params, *target_params),
+        ),
+        (
+            "SELECT q.questId "
+            "FROM quest q JOIN textMap tm ON tm.hash = q.longDescTextMapHash "
+            "WHERE tm.lang=? AND "
+            + excluded_match_sql
+            + target_filter_sql,
+            (filter_lang_id, *excluded_params, *target_params),
+        ),
+        (
+            "SELECT DISTINCT qt.questId "
+            "FROM questTalk qt "
+            "JOIN textMap tm ON tm.hash = qt.stepTitleTextMapHash "
+            "JOIN quest q ON q.questId = qt.questId "
+            "WHERE tm.lang=? AND "
+            + excluded_match_sql
+            + target_filter_sql,
+            (filter_lang_id, *excluded_params, *target_params),
+        ),
+        (
+            "SELECT DISTINCT qt.questId "
+            "FROM questTalk qt "
+            + (
+                "JOIN talk_dialogue_link tdl "
+                "ON tdl.talkId = qt.talkId AND tdl.coopQuestId = coalesce(qt.coopQuestId, 0) "
+                "JOIN dialogue d ON d.dialogueId = tdl.dialogueId "
+                if _has_any_talk_dialogue_links(cursor)
+                else "JOIN dialogue d ON d.talkId = qt.talkId "
+                "AND (((coalesce(qt.coopQuestId, 0) = 0) AND d.coopQuestId IS NULL) "
+                "OR (coalesce(qt.coopQuestId, 0) > 0 AND d.coopQuestId = qt.coopQuestId)) "
+            )
+            + "JOIN textMap tm ON tm.hash = d.textHash "
+            "JOIN quest q ON q.questId = qt.questId "
+            "WHERE tm.lang=? AND "
+            + excluded_match_sql
+            + target_filter_sql,
+            (filter_lang_id, *excluded_params, *target_params),
+        ),
+    )
+    affected: set[int] = set()
+    for sql, params in queries:
+        rows = cursor.execute(sql, params).fetchall()
+        for row in rows:
+            try:
+                affected.add(int(row[0]))
+            except Exception:
+                continue
+    return affected
+
+
+def repair_excluded_quest_test_texts(
+    *,
+    cursor=None,
+    quest_ids=None,
+    batch_size: int = DEFAULT_BATCH_SIZE,
+    commit: bool = True,
+) -> dict[str, int]:
+    own_cursor = cursor is None
+    if own_cursor:
+        cursor = conn.cursor()
+    _ensure_quest_version_tables(cursor)
+    target_quest_ids = collect_quests_with_excluded_test_texts(cursor, quest_ids=quest_ids)
+    stats = {
+        "affected_quests": len(target_quest_ids),
+        "refreshed_hash_map_quests": 0,
+        "refreshed_signatures": 0,
+        "created_rows": 0,
+        "updated_rows": 0,
+    }
+    if target_quest_ids:
+        stats["refreshed_hash_map_quests"] = _refresh_quest_hash_map_for_quest_ids(
+            cursor,
+            target_quest_ids,
+            batch_size=batch_size,
+        )
+        stats["refreshed_signatures"] = refresh_quest_text_signatures(cursor, target_quest_ids)
+        created_rows, updated_rows = _backfill_quest_created_version_from_textmap(
+            cursor,
+            quest_ids=target_quest_ids,
+            overwrite_existing=True,
+            overwrite_updated_existing=True,
+            authoritative=True,
+            with_stats=True,
+        )
+        stats["created_rows"] = int(created_rows)
+        stats["updated_rows"] = int(updated_rows)
+    if own_cursor:
+        cursor.close()
+        if commit:
+            conn.commit()
+    return stats
 
 
 def importQuest(
@@ -784,27 +987,13 @@ def importQuestForDiff(
     ).fetchone()
     dialogue_changed = old_signature_row is None or old_signature_row[0] != new_signature
 
-    title_changed = False
-    if titleTextMapHash:
-        current_title_content = cursor.execute(
-            "SELECT content FROM textMap WHERE hash=? LIMIT 1",
-            (titleTextMapHash,),
-        ).fetchone()
-        old_title_hash_row = cursor.execute(
-            "SELECT titleTextMapHash FROM quest WHERE questId=?",
-            (questId,),
-        ).fetchone()
-
-        if old_title_hash_row and old_title_hash_row[0]:
-            old_title_content = cursor.execute(
-                "SELECT content FROM textMap WHERE hash=? LIMIT 1",
-                (old_title_hash_row[0],),
-            ).fetchone()
-            current_content = current_title_content[0] if current_title_content else None
-            old_content = old_title_content[0] if old_title_content else None
-            title_changed = current_content != old_content
-        else:
-            title_changed = True
+    sanitized_title_hash = _sanitize_quest_title_text_map_hash(cursor, titleTextMapHash)
+    old_title_hash_row = cursor.execute(
+        "SELECT titleTextMapHash FROM quest_text_signature WHERE questId=?",
+        (questId,),
+    ).fetchone()
+    old_sanitized_title_hash = old_title_hash_row[0] if old_title_hash_row else None
+    title_changed = old_sanitized_title_hash != sanitized_title_hash
 
     text_changed = dialogue_changed or title_changed
 
@@ -1010,6 +1199,7 @@ def importAllQuestsForDiff(
                 cursor,
                 quest_ids=imported_quest_ids,
                 overwrite_existing=False,
+                authoritative=True,
             )
 
         conn.commit()
@@ -1563,6 +1753,7 @@ def importAllAnecdotesForDiff(
                 cursor,
                 quest_ids=imported_quest_ids,
                 overwrite_existing=False,
+                authoritative=True,
             )
         else:
             refreshed_hash_map_quests = 0
@@ -1975,6 +2166,7 @@ def importAllHangoutsForDiff(
                 cursor,
                 quest_ids=imported_quest_ids,
                 overwrite_existing=False,
+                authoritative=True,
             )
         else:
             refreshed_hash_map_quests = 0

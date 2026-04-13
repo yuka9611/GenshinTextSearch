@@ -1,6 +1,23 @@
 from __future__ import annotations
 
+import os
+import sys
+
 from import_utils import DEFAULT_BATCH_SIZE, executemany_batched, normalize_unique_ints
+
+try:
+    from quest_text_filters import (
+        build_quest_text_excluded_sql,
+        get_quest_text_filter_lang_id,
+    )
+except ImportError:
+    SERVER_DIR = os.path.normpath(os.path.join(os.path.dirname(__file__), os.pardir))
+    if SERVER_DIR not in sys.path:
+        sys.path.insert(0, SERVER_DIR)
+    from quest_text_filters import (  # type: ignore
+        build_quest_text_excluded_sql,
+        get_quest_text_filter_lang_id,
+    )
 
 QUEST_HASH_SOURCE_TYPE_TITLE = "title"
 QUEST_HASH_SOURCE_TYPE_DESC = "desc"
@@ -144,6 +161,53 @@ def refresh_quest_hash_map_for_talk_ids(
 
 
 def _refresh_quest_hash_map_by_target_table(cursor):
+    excluded_sql, excluded_params = build_quest_text_excluded_sql("tm.content")
+    filter_lang_id = get_quest_text_filter_lang_id(cursor)
+    title_exclusion_sql = ""
+    title_exclusion_params: tuple[object, ...] = tuple()
+    if filter_lang_id is not None:
+        title_exclusion_sql = (
+            " AND NOT EXISTS ("
+            "SELECT 1 FROM textMap tm "
+            "WHERE tm.hash = q.titleTextMapHash AND tm.lang = ? AND "
+            + excluded_sql
+            + ")"
+        )
+        title_exclusion_params = (filter_lang_id, *excluded_params)
+    desc_exclusion_sql = ""
+    desc_exclusion_params: tuple[object, ...] = tuple()
+    if filter_lang_id is not None:
+        desc_exclusion_sql = (
+            " AND NOT EXISTS ("
+            "SELECT 1 FROM textMap tm "
+            "WHERE tm.hash = q.descTextMapHash AND tm.lang = ? AND "
+            + excluded_sql
+            + ")"
+        )
+        desc_exclusion_params = (filter_lang_id, *excluded_params)
+    long_desc_exclusion_sql = ""
+    long_desc_exclusion_params: tuple[object, ...] = tuple()
+    if filter_lang_id is not None:
+        long_desc_exclusion_sql = (
+            " AND NOT EXISTS ("
+            "SELECT 1 FROM textMap tm "
+            "WHERE tm.hash = q.longDescTextMapHash AND tm.lang = ? AND "
+            + excluded_sql
+            + ")"
+        )
+        long_desc_exclusion_params = (filter_lang_id, *excluded_params)
+    dialogue_exclusion_sql = ""
+    dialogue_exclusion_params: tuple[object, ...] = tuple()
+    if filter_lang_id is not None:
+        dialogue_exclusion_sql = (
+            " AND NOT EXISTS ("
+            "SELECT 1 FROM textMap tm "
+            "WHERE tm.hash = d.textHash AND tm.lang = ? AND "
+            + excluded_sql
+            + ")"
+        )
+        dialogue_exclusion_params = (filter_lang_id, *excluded_params)
+
     cursor.execute(
         """
         DELETE FROM quest_hash_map
@@ -158,8 +222,9 @@ def _refresh_quest_hash_map_by_target_table(cursor):
         JOIN _qhm_target_quest_id t ON t.questId = q.questId
         WHERE q.titleTextMapHash IS NOT NULL
           AND q.titleTextMapHash <> 0
-        """,
-        (QUEST_HASH_SOURCE_TYPE_TITLE,),
+        """
+        + title_exclusion_sql,
+        (QUEST_HASH_SOURCE_TYPE_TITLE, *title_exclusion_params),
     )
     cursor.execute(
         """
@@ -169,8 +234,9 @@ def _refresh_quest_hash_map_by_target_table(cursor):
         JOIN _qhm_target_quest_id t ON t.questId = q.questId
         WHERE q.descTextMapHash IS NOT NULL
           AND q.descTextMapHash <> 0
-        """,
-        (QUEST_HASH_SOURCE_TYPE_DESC,),
+        """
+        + desc_exclusion_sql,
+        (QUEST_HASH_SOURCE_TYPE_DESC, *desc_exclusion_params),
     )
     cursor.execute(
         """
@@ -180,8 +246,9 @@ def _refresh_quest_hash_map_by_target_table(cursor):
         JOIN _qhm_target_quest_id t ON t.questId = q.questId
         WHERE q.longDescTextMapHash IS NOT NULL
           AND q.longDescTextMapHash <> 0
-        """,
-        (QUEST_HASH_SOURCE_TYPE_LONG_DESC,),
+        """
+        + long_desc_exclusion_sql,
+        (QUEST_HASH_SOURCE_TYPE_LONG_DESC, *long_desc_exclusion_params),
     )
     # Keep quest updated-version tracking scoped to title/dialogue text only.
     # Quest description and step-title metadata are UI-only and must not affect quest_version.
@@ -196,8 +263,9 @@ def _refresh_quest_hash_map_by_target_table(cursor):
         + """
         WHERE d.textHash IS NOT NULL
           AND d.textHash <> 0
-        """,
-        (QUEST_HASH_SOURCE_TYPE_DIALOGUE,),
+        """
+        + dialogue_exclusion_sql,
+        (QUEST_HASH_SOURCE_TYPE_DIALOGUE, *dialogue_exclusion_params),
     )
 
 
