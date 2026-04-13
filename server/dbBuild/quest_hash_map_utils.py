@@ -6,6 +6,7 @@ QUEST_HASH_SOURCE_TYPE_TITLE = "title"
 QUEST_HASH_SOURCE_TYPE_DESC = "desc"
 QUEST_HASH_SOURCE_TYPE_LONG_DESC = "long_desc"
 QUEST_HASH_SOURCE_TYPE_DIALOGUE = "dialogue"
+TALK_DIALOGUE_LINK_TABLE = "talk_dialogue_link"
 QUEST_VERSION_TRACKED_HASH_SOURCE_TYPES = (
     QUEST_HASH_SOURCE_TYPE_TITLE,
     QUEST_HASH_SOURCE_TYPE_DIALOGUE,
@@ -19,7 +20,42 @@ def _quest_talk_dialogue_join_condition(qt_alias: str = "qt", d_alias: str = "d"
     )
 
 
+def ensure_talk_dialogue_link_schema(cursor):
+    cursor.execute(
+        f"""
+        CREATE TABLE IF NOT EXISTS {TALK_DIALOGUE_LINK_TABLE} (
+            talkId INTEGER NOT NULL,
+            coopQuestId INTEGER NOT NULL DEFAULT 0,
+            dialogueId INTEGER NOT NULL,
+            PRIMARY KEY (talkId, coopQuestId, dialogueId)
+        )
+        """
+    )
+    cursor.execute(
+        f"CREATE INDEX IF NOT EXISTS {TALK_DIALOGUE_LINK_TABLE}_dialogueId_index "
+        f"ON {TALK_DIALOGUE_LINK_TABLE}(dialogueId)"
+    )
+    cursor.execute(
+        f"CREATE INDEX IF NOT EXISTS {TALK_DIALOGUE_LINK_TABLE}_talkId_coopQuestId_index "
+        f"ON {TALK_DIALOGUE_LINK_TABLE}(talkId, coopQuestId)"
+    )
+
+
+def _quest_talk_dialogue_link_join_sql(
+    qt_alias: str = "qt",
+    tdl_alias: str = "tdl",
+    d_alias: str = "d",
+) -> str:
+    return (
+        f"JOIN {TALK_DIALOGUE_LINK_TABLE} {tdl_alias} "
+        f"ON {tdl_alias}.talkId = {qt_alias}.talkId "
+        f"AND {tdl_alias}.coopQuestId = coalesce({qt_alias}.coopQuestId, 0) "
+        f"JOIN dialogue {d_alias} ON {d_alias}.dialogueId = {tdl_alias}.dialogueId "
+    )
+
+
 def ensure_quest_hash_map_schema(cursor):
+    ensure_talk_dialogue_link_schema(cursor)
     cursor.execute(
         """
         CREATE TABLE IF NOT EXISTS quest_hash_map (
@@ -155,12 +191,9 @@ def _refresh_quest_hash_map_by_target_table(cursor):
         SELECT DISTINCT qt.questId, d.textHash, ?
         FROM questTalk qt
         JOIN _qhm_target_quest_id t ON t.questId = qt.questId
-        JOIN dialogue d ON d.talkId = qt.talkId
-           AND (
-               """
-        + _quest_talk_dialogue_join_condition("qt", "d")
+        """
+        + _quest_talk_dialogue_link_join_sql("qt", "tdl", "d")
         + """
-           )
         WHERE d.textHash IS NOT NULL
           AND d.textHash <> 0
         """,

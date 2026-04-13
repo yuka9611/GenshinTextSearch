@@ -146,6 +146,23 @@ def importTalk(
     )
 
 
+def deleteTalkScope(
+    talk_id: int,
+    coop_quest_id: int | None,
+    *,
+    cursor=None,
+    commit: bool = True,
+    batch_size: int = DEFAULT_BATCH_SIZE,
+) -> list[int]:
+    return questImport.deleteTalkScope(
+        talk_id,
+        coop_quest_id,
+        cursor=cursor,
+        commit=commit,
+        batch_size=batch_size,
+    )
+
+
 def importAllTalkItems(
     *,
     commit: bool = True,

@@ -44,6 +44,21 @@ create index dialogue_dialogueId_index
 create index dialogue_textHash_index
     on dialogue (textHash);
 
+create table talk_dialogue_link
+(
+    talkId      integer not null,
+    coopQuestId integer not null default 0,
+    dialogueId  integer not null,
+    constraint talk_dialogue_link_pk
+        primary key (talkId, coopQuestId, dialogueId)
+);
+
+create index talk_dialogue_link_dialogueId_index
+    on talk_dialogue_link (dialogueId);
+
+create index talk_dialogue_link_talkId_coopQuestId_index
+    on talk_dialogue_link (talkId, coopQuestId);
+
 
 create table fetters
 (

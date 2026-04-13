@@ -3,6 +3,7 @@ import re
 import json
 import subprocess
 from datetime import datetime, timezone
+from pathlib import PurePosixPath
 
 from lightweight_progress import LightweightProgress
 
@@ -300,6 +301,35 @@ def _normalize_path(p: str | None) -> str | None:
     return p.replace("\\", "/")
 
 
+def _normalize_talk_rel_path(rel_path: str | None) -> str | None:
+    normalized = _normalize_path(rel_path)
+    if normalized is None:
+        return None
+    text = normalized.strip().strip("/")
+    if not text:
+        return None
+    parts = [
+        part
+        for part in PurePosixPath(text).parts
+        if part not in ("", "/", ".")
+    ]
+    if not parts:
+        return None
+    return "/".join(parts)
+
+
+def _resolve_local_talk_path(talk_file_rel: str) -> str | None:
+    normalized = _normalize_talk_rel_path(talk_file_rel)
+    if normalized is None:
+        return None
+    parts = [
+        part
+        for part in PurePosixPath(normalized).parts
+        if part not in ("", "/")
+    ]
+    return os.path.join(DATA_PATH, "BinOutput", "Talk", *parts)
+
+
 def _resolve_talk_keys(obj: dict):
     if not isinstance(obj, dict):
         return None
@@ -313,6 +343,8 @@ def _resolve_talk_keys(obj: dict):
         return "FEOACBMDCKJ"
     if "LBPGKDMGFBN" in obj and "LOJEOMAPIIM" in obj:
         return "LBPGKDMGFBN"
+    if "AADKDKPMGNO" in obj and "GALIDJOEHOC" in obj:
+        return "AADKDKPMGNO"
     return None
 
 
@@ -324,19 +356,14 @@ def _extract_talk_scope(file_name: str, obj: dict):
     if talk_id is None:
         return None
 
-    coop_match = re.match(r"^Coop[\\/]([0-9]+)_[0-9]+.json$", file_name)
+    normalized_file_name = _normalize_talk_rel_path(file_name) or ""
+    coop_match = re.match(r"^Coop[\\/]([0-9]+)_[0-9]+.json$", normalized_file_name)
     coop_quest_id = int(coop_match.group(1)) if coop_match else None
     return talk_id, coop_quest_id
 
 
 def _delete_talk_scope(talk_id: int, coop_quest_id: int | None):
-    cur = conn.cursor()
-    if coop_quest_id is None:
-        cur.execute("DELETE FROM dialogue WHERE talkId=? AND coopQuestId IS NULL", (talk_id,))
-    else:
-        cur.execute("DELETE FROM dialogue WHERE talkId=? AND coopQuestId=?", (talk_id, coop_quest_id))
-    conn.commit()
-    cur.close()
+    DBBuild.deleteTalkScope(talk_id, coop_quest_id, commit=True)
 
 
 def _get_blob_json(repo_path: str, commit: str, rel_git_path: str):
@@ -353,11 +380,14 @@ def _get_blob_json(repo_path: str, commit: str, rel_git_path: str):
 
 
 def _delete_talk_file_from_old_commit(repo_path: str, from_commit: str, talk_file_rel: str):
-    git_path = f"BinOutput/Talk/{talk_file_rel.replace('\\', '/')}"
+    normalized_talk_file_rel = _normalize_talk_rel_path(talk_file_rel)
+    if normalized_talk_file_rel is None:
+        return None
+    git_path = f"BinOutput/Talk/{normalized_talk_file_rel}"
     obj = _get_blob_json(repo_path, from_commit, git_path)
     if not isinstance(obj, dict):
         return None
-    scope = _extract_talk_scope(talk_file_rel, obj)
+    scope = _extract_talk_scope(normalized_talk_file_rel, obj)
     if scope is None:
         return None
     _delete_talk_scope(scope[0], scope[1])
@@ -365,7 +395,12 @@ def _delete_talk_file_from_old_commit(repo_path: str, from_commit: str, talk_fil
 
 
 def _replace_talk_file_from_local(talk_file_rel: str):
-    full_path = os.path.join(DATA_PATH, "BinOutput", "Talk", talk_file_rel)
+    normalized_talk_file_rel = _normalize_talk_rel_path(talk_file_rel)
+    if normalized_talk_file_rel is None:
+        return None, False
+    full_path = _resolve_local_talk_path(normalized_talk_file_rel)
+    if full_path is None:
+        return None, False
     if not os.path.isfile(full_path):
         return None, False
 
@@ -373,12 +408,12 @@ def _replace_talk_file_from_local(talk_file_rel: str):
         obj = json.load(f)
     if DBBuild._is_non_dialog_talk_obj(obj):
         return None, False
-    scope = _extract_talk_scope(talk_file_rel, obj)
+    scope = _extract_talk_scope(normalized_talk_file_rel, obj)
     if scope is not None:
         _delete_talk_scope(scope[0], scope[1])
     talk_skipped: list[str] = []
     DBBuild.importTalk(
-        talk_file_rel,
+        normalized_talk_file_rel,
         skip_collector=talk_skipped,
         log_skip=False,
         refresh_hash_map=False,
@@ -449,7 +484,9 @@ def _analyze_diff(diff_entries: list[dict]) -> dict:
         """
         # 处理Talk文件
         if rel.startswith("BinOutput/Talk/") and rel.endswith(".json"):
-            file_rel = rel[len("BinOutput/Talk/") :].replace("/", "\\")
+            file_rel = _normalize_talk_rel_path(rel[len("BinOutput/Talk/") :])
+            if file_rel is None:
+                return
             if action == "D" or (action.startswith("R") and old_side):
                 plan["talk_deleted"].add(file_rel)
             elif not old_side:
