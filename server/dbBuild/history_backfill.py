@@ -8,7 +8,7 @@ import sys
 import time
 from contextlib import contextmanager
 from dataclasses import dataclass
-from typing import Iterable, Mapping
+from typing import Callable, Collection, Iterable, Mapping
 
 try:
     import pygit2 as _pygit2  # type: ignore[import-untyped]
@@ -24,9 +24,11 @@ from DBConfig import conn, DATA_PATH
 from git_utils import resolve_commit as _resolve_commit_impl, run_git as _run_git_impl
 from import_utils import (
     DEFAULT_BATCH_SIZE,
+    drop_temp_table,
     executemany_batched,
     fast_import_pragmas,
     normalize_unique_ints,
+    reset_temp_table,
     to_hash_value as _to_hash_value,
 )
 from lang_constants import LANG_CODE_MAP
@@ -50,6 +52,19 @@ from text_source_path_utils import (
     build_subtitle_rel_path,
     build_subtitle_rel_path_from_record as _build_subtitle_record_rel_path,
     normalize_subtitle_rel_path,
+)
+from textmap_match_utils import (
+    TextMapContentIndex,
+    TextMapLineageState,
+    TEXTMAP_MATCH_KIND_NEW,
+    TEXTMAP_MATCH_KIND_SAME_CONTENT,
+    allocate_textmap_current_matches,
+    build_textmap_content_index,
+    build_textmap_lineage_states,
+    match_textmap_lineage_to_previous,
+    textmap_content_key,
+    normalize_textmap_value_for_compare,
+    textmap_values_match,
 )
 from version_control import subtitle_text_changed_keys as _subtitle_text_changed_keys
 from textmap_name_utils import parse_textmap_file_name, analyze_readable_version_exceptions, analyze_subtitle_version_exceptions, analyze_textmap_version_exceptions, report_version_exceptions
@@ -100,6 +115,7 @@ _git_cache = {}
 _snapshot_metadata_cache: dict[str, dict[str, object]] = {}
 _snapshot_textmap_file_groups_cache: dict[tuple[str, str], dict[str, list[str]]] = {}
 _snapshot_textmap_group_cache: dict[tuple[str, str, str], dict[str, object] | None] = {}
+_snapshot_textmap_group_index_cache: dict[tuple[str, str, str], TextMapContentIndex] = {}
 _GIT_SHOW_TEXT_CACHE_MAX = int(os.environ.get("GTS_GIT_SHOW_TEXT_CACHE_MAX", "1024"))
 _git_show_text_cache: dict[tuple[str, str], str | None] = {}
 _git_show_text_cache_order: list[tuple[str, str]] = []
@@ -131,6 +147,7 @@ def _clear_history_runtime_caches(
 ):
     _snapshot_textmap_file_groups_cache.clear()
     _snapshot_textmap_group_cache.clear()
+    _snapshot_textmap_group_index_cache.clear()
     _git_show_text_cache.clear()
     _git_show_text_cache_order.clear()
     _git_show_json_cache.clear()
@@ -143,6 +160,58 @@ def _clear_history_runtime_caches(
         _snapshot_metadata_cache.clear()
     if clear_repo_cache:
         _pygit2_repo_cache.clear()
+
+
+def _clear_textmap_replay_runtime_buffers() -> None:
+    _snapshot_textmap_group_cache.clear()
+    _snapshot_textmap_group_index_cache.clear()
+    _git_show_text_cache.clear()
+    _git_show_text_cache_order.clear()
+    _git_show_json_cache.clear()
+    _git_show_text_cache_stats["hits"] = 0
+    _git_show_text_cache_stats["misses"] = 0
+
+
+def _discard_git_show_cache_keys(cache_keys: Iterable[tuple[str, str]]) -> None:
+    keys_to_remove = {
+        cache_key
+        for cache_key in cache_keys
+        if cache_key in _git_show_text_cache or cache_key in _git_show_json_cache
+    }
+    if not keys_to_remove:
+        return
+
+    for cache_key in keys_to_remove:
+        _git_show_text_cache.pop(cache_key, None)
+        _git_show_json_cache.pop(cache_key, None)
+
+    if _git_show_text_cache_order:
+        _git_show_text_cache_order[:] = [
+            cache_key
+            for cache_key in _git_show_text_cache_order
+            if cache_key not in keys_to_remove
+        ]
+
+
+def _evict_snapshot_textmap_group_artifacts(
+    repo_path: str,
+    commit_sha: str | None,
+    base_name: str,
+) -> None:
+    if not commit_sha:
+        return
+
+    cache_key = (repo_path, commit_sha, base_name)
+    _snapshot_textmap_group_cache.pop(cache_key, None)
+    _snapshot_textmap_group_index_cache.pop(cache_key, None)
+
+    groups = _snapshot_textmap_file_groups_cache.get((repo_path, commit_sha))
+    if not isinstance(groups, dict):
+        return
+    rel_paths = groups.get(base_name)
+    if not rel_paths:
+        return
+    _discard_git_show_cache_keys((commit_sha, rel_path) for rel_path in rel_paths)
 
 # Git 命令缓存
 
@@ -440,14 +509,38 @@ def _resolve_commit_version(repo_path: str, commit_sha: str, commit_title: str) 
         return commit_sha, None
 
 
-def _extract_history_version_parts(commit_title: str | None) -> tuple[str | None, str | None]:
+_HISTORY_VERSION_LABEL_OVERRIDE_BY_COMMIT: dict[str, str] = {
+    "1a6597f5a67382119494beae22a4039a1cefc8e1": "3.3",
+}
+
+
+def _apply_history_version_overrides(
+    commit_sha: str,
+    normalized_label: str | None,
+    version_tag: str | None,
+) -> tuple[str | None, str | None]:
+    overridden_label = _HISTORY_VERSION_LABEL_OVERRIDE_BY_COMMIT.get(commit_sha)
+    if overridden_label:
+        return overridden_label, overridden_label
+
+    if normalized_label and version_tag == "4.0" and "4.0.1" in normalized_label:
+        return "4.1", "4.1"
+
+    return normalized_label, version_tag
+
+
+def _extract_history_version_parts(
+    commit_title: str | None,
+    *,
+    commit_sha: str = "",
+) -> tuple[str | None, str | None]:
     normalized = normalize_version_label(commit_title) if commit_title else None
     if not normalized:
         return None, None
     version_tag = _extract_version_tag(normalized)
     if not version_tag:
         return None, None
-    return normalized, version_tag
+    return _apply_history_version_overrides(commit_sha, normalized, version_tag)
 
 
 def _build_snapshot_specs_from_commit_rows(
@@ -456,13 +549,19 @@ def _build_snapshot_specs_from_commit_rows(
     commit_to_version_tag: dict[str, str | None] = {}
     canonical_by_tag: dict[str, tuple[str, str]] = {}
     current_tag: str | None = None
+    current_label: str | None = None
 
     for commit_sha, commit_title in commit_rows:
-        version_label, explicit_tag = _extract_history_version_parts(commit_title)
+        version_label, explicit_tag = _extract_history_version_parts(
+            commit_title,
+            commit_sha=commit_sha,
+        )
         if explicit_tag:
             current_tag = explicit_tag
-            canonical_by_tag[explicit_tag] = (
-                version_label or explicit_tag,
+            current_label = version_label or explicit_tag
+        if current_tag:
+            canonical_by_tag[current_tag] = (
+                current_label or current_tag,
                 commit_sha,
             )
         commit_to_version_tag[commit_sha] = current_tag
@@ -730,140 +829,74 @@ def _backfill_textmap_git_versions(
     """
     Git-based TextMap backfill helper.
     """
-    backfilled_count = 0
-    checkpoint_every = max(1, int(DEFAULT_GIT_BACKFILL_CHECKPOINT_EVERY))
     try:
-        cursor.execute("SELECT lang, hash FROM textMap WHERE created_version_id IS NULL")
-        no_version_records = cursor.fetchall()
+        rows = cursor.execute(
+            """
+            SELECT tm.lang, tm.hash, tm.content, lc.codeName
+            FROM textMap AS tm
+            LEFT JOIN langCode AS lc ON lc.id = tm.lang
+            WHERE tm.created_version_id IS NULL
+            """
+        ).fetchall()
+        if not rows:
+            print("TextMap 没有需要 Git 回溯的记录")
+            return 0
 
-        if no_version_records:
-            print(f"TextMap 需要 Git 回溯回填：{len(no_version_records)} 条")
-            total_records = len(no_version_records)
-            resume_key = "git_backfill_textmap_resume"
-            start_idx = 0
+        metadata = _get_version_snapshot_metadata(DATA_PATH)
+        raw_snapshots = metadata.get("snapshots")
+        snapshots = tuple(
+            snapshot for snapshot in raw_snapshots if isinstance(snapshot, VersionSnapshot)
+        ) if isinstance(raw_snapshots, Iterable) else tuple()
+        if not snapshots:
+            print("TextMap Git 回溯跳过：没有可用的版本快照")
+            return 0
 
-            try:
-                resume_value = get_meta(resume_key, "")
-                if resume_value:
-                    try:
-                        start_idx = int(resume_value)
-                        if start_idx < 0 or start_idx >= total_records:
-                            start_idx = 0
-                        else:
-                            print(f"TextMap Git 回溯从第 {start_idx + 1} 个文件继续")
-                    except ValueError:
-                        start_idx = 0
-            except Exception as e:
-                logger.error(f"读取断点失败: {e}")
-                start_idx = 0
+        reverse_lang_map = {lang_id: base_name for base_name, lang_id in textmap_lang_map.items()}
+        unresolved_groups: dict[str, list[tuple[int, int, object]]] = {}
+        for lang_id, hash_value, content, code_name in rows:
+            parsed = parse_textmap_file_name(str(code_name).strip()) if code_name else None
+            base_name = parsed[0] if parsed is not None else reverse_lang_map.get(int(lang_id))
+            if not base_name:
+                continue
+            unresolved_groups.setdefault(base_name, []).append((int(lang_id), int(hash_value), content))
 
-            pbar = LightweightProgress(total_records, desc=desc, unit=unit, initial_print=False)
-            pbar.current = start_idx
-            pbar.update(0)
-            with pbar:
-                textmap_groups = _list_snapshot_textmap_groups(DATA_PATH, "HEAD")
-                textmap_files: list[str] = []
-                for base_name in sorted(textmap_lang_map.keys()):
-                    group_files = textmap_groups.get(base_name)
-                    if group_files:
-                        textmap_files.extend(group_files)
-                    else:
-                        textmap_files.append(f"TextMap/{base_name}")
-                total_files = len(textmap_files)
-                file_start_idx = start_idx if 0 <= start_idx < total_files else 0
-                pending_by_hash: dict[str, list[tuple[int, int]]] = {}
-                for pending_lang, pending_hash_value in no_version_records:
-                    pending_by_hash.setdefault(str(pending_hash_value), []).append((pending_lang, pending_hash_value))
+        if not unresolved_groups:
+            print("TextMap Git 回溯跳过：未能定位任何 TextMap 语言组")
+            return 0
 
-                update_textmap_sql = (
-                    "UPDATE textMap SET "
-                    "created_version_id=CASE "
-                    "WHEN created_version_id IS NULL OR "
-                    f"{_version_precedes_sql('?1', 'created_version_id')} THEN ?1 "
-                    "ELSE created_version_id END, "
-                    "updated_version_id=CASE "
-                    "WHEN updated_version_id IS NULL "
-                    "AND (created_version_id IS NULL OR "
-                    f"{_version_precedes_sql('?1', 'created_version_id')}) THEN ?1 "
-                    "WHEN updated_version_id = created_version_id "
-                    "AND "
-                    f"{_version_precedes_sql('?1', 'created_version_id')} THEN ?1 "
-                    "ELSE updated_version_id END "
-                    "WHERE lang = ?2 AND hash = ?3 "
-                    "AND (created_version_id IS NULL OR "
-                    f"{_version_precedes_sql('?1', 'created_version_id')})"
+        patch_rows: list[tuple[int, int, int | None, int | None]] = []
+        with LightweightProgress(len(unresolved_groups), desc=desc, unit=unit, initial_print=False) as pbar:
+            for base_name in sorted(unresolved_groups.keys()):
+                unresolved_rows = unresolved_groups[base_name]
+                current_obj = {
+                    str(hash_value): content
+                    for _lang_id, hash_value, content in unresolved_rows
+                }
+                version_plan = _compute_textmap_group_authoritative_versions(
+                    repo_path=DATA_PATH,
+                    base_name=base_name,
+                    current_obj=current_obj,
+                    target_hashes=[hash_value for _lang_id, hash_value, _content in unresolved_rows],
+                    snapshots=snapshots,
                 )
+                for lang_id, hash_value, _content in unresolved_rows:
+                    created_version, updated_version = version_plan.get(hash_value, (None, None))
+                    if created_version is None:
+                        continue
+                    patch_rows.append((lang_id, hash_value, created_version, updated_version))
+                pbar.update(postfix=base_name)
 
-                resolved_hashes: set[str] = set()
-                with LightweightProgress(total_files, desc=desc, unit="files", initial_print=False) as file_pbar:
-                    file_pbar.current = file_start_idx
-                    file_pbar.update(0)
-                    for file_idx in range(file_start_idx, total_files):
-                        file_path = textmap_files[file_idx]
-                        remaining_hashes = set(pending_by_hash.keys())
-                        try:
-                            out = _run_git(
-                                DATA_PATH,
-                                ["log", "--reverse", "--format=%H", "--", file_path],
-                                check=False
-                            )
-                            commits = out.splitlines() if out else []
-                            for commit_sha in commits:
-                                if not remaining_hashes:
-                                    break
-                                content = _git_show_json(DATA_PATH, commit_sha, file_path)
-                                if not isinstance(content, dict):
-                                    continue
-                                content_keys = {str(key) for key in content.keys()}
-                                matched_hashes = remaining_hashes.intersection(content_keys)
-                                if not matched_hashes:
-                                    continue
-
-                                commit_title = _resolve_commit_title(DATA_PATH, commit_sha)
-                                _version_label, version_id = _resolve_commit_version(DATA_PATH, commit_sha, commit_title)
-                                if not version_id:
-                                    continue
-
-                                update_rows = []
-                                for matched_hash in matched_hashes:
-                                    if matched_hash not in resolved_hashes:
-                                        backfilled_count += len(pending_by_hash[matched_hash])
-                                        resolved_hashes.add(matched_hash)
-                                    for matched_lang, matched_hash_value in pending_by_hash[matched_hash]:
-                                        update_rows.append(
-                                            (
-                                                version_id,
-                                                matched_lang,
-                                                matched_hash_value,
-                                            )
-                                        )
-                                if update_rows:
-                                    executemany_batched(cursor, update_textmap_sql, update_rows)
-                                remaining_hashes.difference_update(matched_hashes)
-                        except Exception as e:
-                            print(f"[ERROR] TextMap 的 Git 回溯失败 {file_path}: {e}")
-                        finally:
-                            file_pbar.update(postfix=file_path)
-                            if (file_idx + 1) % checkpoint_every == 0:
-                                try:
-                                    _commit_and_checkpoint(conn, resume_key, str(file_idx + 1))
-                                except Exception as e:
-                                    logger.error(f"保存断点失败: {e}")
-
-            _commit_and_checkpoint(conn)
-            try:
-                set_meta(resume_key, "")
-            except Exception as e:
-                logger.error(f"清理断点失败: {e}")
-            print(f"TextMap Git 回溯完成：更新 {backfilled_count} 条")
-            return backfilled_count
-
-        print("TextMap 没有需要 Git 回溯的记录")
+        updated_rows = _apply_textmap_version_patch_rows(
+            cursor,
+            patch_rows,
+            batch_size=DEFAULT_BATCH_SIZE,
+        )
+        conn.commit()
+        print(f"TextMap Git 回溯完成：更新 {updated_rows} 条")
+        return updated_rows
     except Exception as e:
         print(f"[ERROR] TextMap Git 回溯失败: {e}")
-        backfilled_count = 0
-
-    return backfilled_count
+        return 0
 
 def _latest_commit_meta_title(commits: list[tuple[str, str]]) -> str | None:
     """提取最新提交对应的版本标题。"""
@@ -1159,68 +1192,127 @@ def _normalize_text_for_compare(text: str | None) -> str:
     return text.replace("\r\n", "\n").replace("\r", "\n")
 
 
-_TEXTMAP_COMPARE_MISSING = object()
-
-
 def _normalize_textmap_value_for_compare(value: object) -> object:
-    if isinstance(value, str):
-        return _normalize_text_for_compare(value)
-    return value
+    return normalize_textmap_value_for_compare(value)
 
 
 def _textmap_values_match(left: object, right: object) -> bool:
-    if left is _TEXTMAP_COMPARE_MISSING or right is _TEXTMAP_COMPARE_MISSING:
-        return left is right
-    return (
-        _normalize_textmap_value_for_compare(left)
-        == _normalize_textmap_value_for_compare(right)
+    return textmap_values_match(left, right)
+
+
+_TEXTMAP_CONTENT_MISSING = object()
+
+
+def _lookup_textmap_snapshot_content(
+    snapshot_obj: Mapping[object, object] | None,
+    hash_value: int,
+) -> object:
+    if not snapshot_obj:
+        return _TEXTMAP_CONTENT_MISSING
+    if hash_value in snapshot_obj:
+        return snapshot_obj[hash_value]
+    return snapshot_obj.get(str(hash_value), _TEXTMAP_CONTENT_MISSING)
+
+
+def _restrict_textmap_content_index(
+    index: TextMapContentIndex,
+    allowed_hashes: Collection[int],
+) -> TextMapContentIndex:
+    allowed = {int(hash_value) for hash_value in allowed_hashes}
+    if not allowed:
+        return TextMapContentIndex(hash_to_content={}, hashes_by_content={})
+    if allowed == set(index.hash_to_content.keys()):
+        return index
+
+    hash_to_content: dict[int, object] = {}
+    hashes_by_content: dict[tuple[str, object], tuple[int, ...]] = {}
+    for content_key, hash_values in index.hashes_by_content.items():
+        filtered_hashes = tuple(hash_value for hash_value in hash_values if hash_value in allowed)
+        if not filtered_hashes:
+            continue
+        hashes_by_content[content_key] = filtered_hashes
+        for hash_value in filtered_hashes:
+            hash_to_content[hash_value] = index.hash_to_content[hash_value]
+
+    return TextMapContentIndex(
+        hash_to_content=hash_to_content,
+        hashes_by_content=hashes_by_content,
     )
 
 
-def _iter_textmap_common_items(
-    snapshot_obj: Mapping[str, object],
-    current_obj: Mapping[str, object],
-):
-    if len(snapshot_obj) <= len(current_obj):
-        for raw_hash, snapshot_content in snapshot_obj.items():
-            current_content = current_obj.get(raw_hash, _TEXTMAP_COMPARE_MISSING)
-            if current_content is _TEXTMAP_COMPARE_MISSING:
-                continue
-            yield raw_hash, snapshot_content, current_content
-        return
+def _build_textmap_same_hash_match_map(
+    current_index: TextMapContentIndex,
+    snapshot_obj: Mapping[object, object] | None,
+    *,
+    allowed_hashes: Collection[int] | None = None,
+) -> dict[int, int]:
+    if not snapshot_obj:
+        return {}
 
-    for raw_hash, current_content in current_obj.items():
-        snapshot_content = snapshot_obj.get(raw_hash, _TEXTMAP_COMPARE_MISSING)
-        if snapshot_content is _TEXTMAP_COMPARE_MISSING:
+    candidate_hashes = allowed_hashes or current_index.hash_to_content.keys()
+    matched: dict[int, int] = {}
+    for hash_value in candidate_hashes:
+        current_content = current_index.hash_to_content.get(int(hash_value), _TEXTMAP_CONTENT_MISSING)
+        if current_content is _TEXTMAP_CONTENT_MISSING:
             continue
-        yield raw_hash, snapshot_content, current_content
+        snapshot_content = _lookup_textmap_snapshot_content(snapshot_obj, int(hash_value))
+        if snapshot_content is _TEXTMAP_CONTENT_MISSING:
+            continue
+        if textmap_values_match(current_content, snapshot_content):
+            matched[int(hash_value)] = int(hash_value)
+    return matched
 
 
-def _textmap_snapshot_has_current_matches(
-    snapshot_obj: Mapping[str, object],
-    current_obj: Mapping[str, object],
-) -> bool:
-    for _raw_hash, snapshot_content, current_content in _iter_textmap_common_items(
-        snapshot_obj,
-        current_obj,
-    ):
-        if _textmap_values_match(snapshot_content, current_content):
-            return True
-    return False
+def _build_textmap_cross_hash_match_map(
+    current_index: TextMapContentIndex,
+    snapshot_obj: Mapping[object, object] | None,
+    *,
+    allowed_hashes: Collection[int] | None = None,
+    consumed_history_hashes: Collection[int] | None = None,
+) -> dict[int, int]:
+    if not snapshot_obj:
+        return {}
+
+    target_index = (
+        _restrict_textmap_content_index(current_index, allowed_hashes)
+        if allowed_hashes is not None
+        else current_index
+    )
+    if not target_index.hashes_by_content:
+        return {}
+
+    target_content_keys = set(target_index.hashes_by_content.keys())
+    consumed_history = {int(hash_value) for hash_value in (consumed_history_hashes or ())}
+    history_hashes_by_content: dict[tuple[str, object], list[int]] = {}
+
+    for raw_hash, snapshot_content in snapshot_obj.items():
+        content_key = textmap_content_key(snapshot_content)
+        if content_key not in target_content_keys:
+            continue
+        try:
+            hash_value = int(_to_hash_value(raw_hash))
+        except Exception:
+            continue
+        if hash_value in consumed_history:
+            continue
+        history_hashes_by_content.setdefault(content_key, []).append(hash_value)
+
+    matched: dict[int, int] = {}
+    for content_key, current_hashes in target_index.hashes_by_content.items():
+        history_hashes = history_hashes_by_content.get(content_key)
+        if not history_hashes:
+            continue
+        for current_hash, history_hash in zip(current_hashes, sorted(history_hashes)):
+            matched[current_hash] = history_hash
+
+    return matched
 
 
-def _should_backfill_textmap_updated_version(
-    previous_content: object,
-    snapshot_content: object,
-    current_content: object,
-) -> bool:
-    """
-    Only treat a snapshot as the updated version when this hash itself changes
-    into the current text at that snapshot.
-    """
-    if not _textmap_values_match(snapshot_content, current_content):
-        return False
-    return not _textmap_values_match(previous_content, current_content)
+def _build_textmap_history_match_map(
+    current_index: TextMapContentIndex,
+    snapshot_index: TextMapContentIndex | None,
+) -> dict[int, int]:
+    return allocate_textmap_current_matches(current_index, snapshot_index)
 
 
 def _build_textmap_history_update_rows(
@@ -1231,19 +1323,43 @@ def _build_textmap_history_update_rows(
     lang_id: int,
     version_id: int,
     existing_map: Mapping[int, tuple[int | None, int | None]],
+    current_index: TextMapContentIndex | None = None,
+    snapshot_index: TextMapContentIndex | None = None,
+    previous_snapshot_index: TextMapContentIndex | None = None,
+    snapshot_matches: Mapping[int, int] | None = None,
+    previous_matches: Mapping[int, int] | None = None,
 ) -> list[tuple[int | None, int | None, int, int]]:
-    previous_snapshot = previous_snapshot_obj or {}
     update_rows: list[tuple[int | None, int | None, int, int]] = []
+    if not existing_map:
+        return update_rows
 
-    for raw_hash, snapshot_content, current_content in _iter_textmap_common_items(
-        snapshot_obj,
-        current_obj,
-    ):
-        try:
-            hash_value = int(_to_hash_value(raw_hash))
-        except Exception:
-            continue
+    if current_index is None:
+        current_index = build_textmap_content_index(
+            current_obj,
+            allowed_hashes=set(existing_map.keys()),
+        )
+    if snapshot_index is None:
+        snapshot_index = build_textmap_content_index(snapshot_obj)
 
+    if snapshot_matches is None:
+        snapshot_matches = _build_textmap_history_match_map(current_index, snapshot_index)
+    if not snapshot_matches:
+        return update_rows
+
+    snapshot_states = {
+        hash_value: TextMapLineageState(
+            snapshot_hash=int(snapshot_matches[hash_value]),
+            content=current_index.hash_to_content[hash_value],
+        )
+        for hash_value in sorted(snapshot_matches.keys())
+        if hash_value in current_index.hash_to_content
+    }
+    predecessor_matches = match_textmap_lineage_to_previous(
+        snapshot_states,
+        previous_snapshot_obj,
+    )
+
+    for hash_value in sorted(snapshot_matches.keys()):
         version_info = existing_map.get(hash_value)
         if version_info is None:
             continue
@@ -1255,24 +1371,190 @@ def _build_textmap_history_update_rows(
         if should_update_version(existing_created_version, version_id, is_created=True):
             created_version = version_id
 
-        previous_content = previous_snapshot.get(raw_hash, _TEXTMAP_COMPARE_MISSING)
-        if _should_backfill_textmap_updated_version(
-            previous_content,
-            snapshot_content,
-            current_content,
-        ) and (
-            existing_updated_version is None
-            or should_update_version(existing_updated_version, version_id, is_created=True)
-        ):
+        predecessor_match = predecessor_matches.get(hash_value)
+        if predecessor_match is None or predecessor_match.match_kind != TEXTMAP_MATCH_KIND_SAME_CONTENT:
             updated_version = version_id
 
-        if (
-            created_version != existing_created_version
-            or updated_version != existing_updated_version
-        ):
+        if created_version != existing_created_version or updated_version != existing_updated_version:
             update_rows.append((created_version, updated_version, lang_id, hash_value))
 
     return update_rows
+
+
+def _compute_textmap_group_authoritative_versions(
+    *,
+    repo_path: str,
+    base_name: str,
+    current_obj: Mapping[str, object],
+    target_hashes: Collection[int],
+    snapshots: tuple[VersionSnapshot, ...],
+    progress_callback: Callable[..., None] | None = None,
+) -> dict[int, tuple[int | None, int | None]]:
+    current_states = build_textmap_lineage_states(current_obj, allowed_hashes=target_hashes)
+    if not current_states:
+        return {}
+
+    head_contents = {
+        hash_value: state.content
+        for hash_value, state in current_states.items()
+    }
+    created_versions: dict[int, int | None] = {
+        hash_value: None
+        for hash_value in current_states.keys()
+    }
+    updated_versions: dict[int, int | None] = {
+        hash_value: None
+        for hash_value in current_states.keys()
+    }
+    active_states = dict(current_states)
+    total_snapshots = len(snapshots)
+
+    for idx in range(len(snapshots) - 1, -1, -1):
+        if not active_states:
+            break
+
+        snapshot = snapshots[idx]
+        previous_snapshot = snapshots[idx - 1] if idx > 0 else None
+        previous_snapshot_index = (
+            _load_snapshot_textmap_group_index(repo_path, previous_snapshot.commit_sha, base_name)
+            if previous_snapshot is not None
+            else TextMapContentIndex(hash_to_content={}, hashes_by_content={})
+        )
+        predecessor_matches = match_textmap_lineage_to_previous(
+            active_states,
+            previous_obj=None,
+            previous_index=previous_snapshot_index,
+        )
+        next_active_states: dict[int, TextMapLineageState] = {}
+
+        for head_hash, state in active_states.items():
+            head_content = head_contents[head_hash]
+            predecessor_match = predecessor_matches.get(head_hash)
+            if predecessor_match is None or predecessor_match.match_kind == TEXTMAP_MATCH_KIND_NEW:
+                if (
+                    updated_versions[head_hash] is None
+                    and textmap_values_match(state.content, head_content)
+                ):
+                    updated_versions[head_hash] = snapshot.version_id
+                created_versions[head_hash] = snapshot.version_id
+                continue
+
+            predecessor_content = predecessor_match.predecessor_content
+            if (
+                updated_versions[head_hash] is None
+                and textmap_values_match(state.content, head_content)
+                and not textmap_values_match(state.content, predecessor_content)
+            ):
+                updated_versions[head_hash] = snapshot.version_id
+
+            predecessor_hash = predecessor_match.predecessor_hash
+            if predecessor_hash is None:
+                created_versions[head_hash] = snapshot.version_id
+                continue
+            next_active_states[head_hash] = TextMapLineageState(
+                snapshot_hash=int(predecessor_hash),
+                content=predecessor_content,
+            )
+
+        _evict_snapshot_textmap_group_artifacts(
+            repo_path,
+            previous_snapshot.commit_sha if previous_snapshot is not None else None,
+            base_name,
+        )
+        if progress_callback is not None:
+            try:
+                progress_callback(
+                    snapshot_idx=total_snapshots - idx,
+                    total_snapshots=total_snapshots,
+                    snapshot=snapshot,
+                    active_count=len(active_states),
+                    continuing_count=len(next_active_states),
+                )
+            except Exception:
+                logger.debug("TextMap progress callback failed", exc_info=True)
+        active_states = next_active_states
+
+    if snapshots:
+        fallback_version_id = snapshots[-1].version_id
+    else:
+        fallback_version_id = None
+    version_plan: dict[int, tuple[int | None, int | None]] = {}
+    for hash_value in sorted(current_states.keys()):
+        created_version = created_versions.get(hash_value)
+        if created_version is None:
+            created_version = fallback_version_id
+        updated_version = updated_versions.get(hash_value)
+        if updated_version is None:
+            updated_version = created_version
+        version_plan[hash_value] = (created_version, updated_version)
+    return version_plan
+
+
+def _collect_textmap_version_patch_rows(
+    *,
+    lang_id: int,
+    existing_map: Mapping[int, tuple[int, int | None, int | None]],
+    version_plan: Mapping[int, tuple[int | None, int | None]],
+) -> list[tuple[int, int | None, int | None]]:
+    patch_rows: list[tuple[int, int | None, int | None]] = []
+    for hash_value, (created_version, updated_version) in sorted(version_plan.items()):
+        existing_row = existing_map.get(hash_value)
+        if existing_row is None:
+            continue
+        row_id, existing_created_version, existing_updated_version = existing_row
+        if (
+            existing_created_version == created_version
+            and existing_updated_version == updated_version
+        ):
+            continue
+        patch_rows.append((row_id, created_version, updated_version))
+    return patch_rows
+
+
+def _apply_textmap_version_patch_rows(
+    cursor,
+    patch_rows: list[tuple[int, int | None, int | None]],
+    *,
+    batch_size: int,
+) -> int:
+    if not patch_rows:
+        return 0
+
+    reset_temp_table(
+        cursor,
+        (
+            "CREATE TEMP TABLE IF NOT EXISTS _textmap_version_patch("
+            "id INTEGER NOT NULL, "
+            "created_version_id INTEGER, "
+            "updated_version_id INTEGER, "
+            "PRIMARY KEY(id))"
+        ),
+        "_textmap_version_patch",
+    )
+    try:
+        executemany_batched(
+            cursor,
+            (
+                "INSERT OR REPLACE INTO _textmap_version_patch("
+                "id, created_version_id, updated_version_id"
+                ") VALUES (?,?,?)"
+            ),
+            patch_rows,
+            batch_size=batch_size,
+        )
+        cursor.execute(
+            """
+            UPDATE textMap AS t
+            SET created_version_id = p.created_version_id,
+                updated_version_id = p.updated_version_id
+            FROM _textmap_version_patch AS p
+            WHERE t.id = p.id
+            """
+        )
+    finally:
+        drop_temp_table(cursor, "_textmap_version_patch")
+
+    return len(patch_rows)
 
 
 def _load_textmap_version_cache_for_current_group(
@@ -1281,7 +1563,7 @@ def _load_textmap_version_cache_for_current_group(
     lang_id: int,
     current_obj: Mapping[str, object],
     batch_size: int,
-) -> dict[int, tuple[int | None, int | None]]:
+) -> dict[int, tuple[int, int | None, int | None]]:
     hash_values: list[int] = []
     seen_hashes: set[int] = set()
     for raw_hash in current_obj.keys():
@@ -1297,19 +1579,19 @@ def _load_textmap_version_cache_for_current_group(
     if not hash_values:
         return {}
 
-    version_map: dict[int, tuple[int | None, int | None]] = {}
+    version_map: dict[int, tuple[int, int | None, int | None]] = {}
     chunk_size = max(1, int(batch_size))
     for idx in range(0, len(hash_values), chunk_size):
         chunk = hash_values[idx : idx + chunk_size]
         placeholders = ",".join(["?"] * len(chunk))
         params = [lang_id, *chunk]
         rows = cursor.execute(
-            f"SELECT hash, created_version_id, updated_version_id "
+            f"SELECT id, hash, created_version_id, updated_version_id "
             f"FROM textMap WHERE lang=? AND hash IN ({placeholders})",
             params,
         ).fetchall()
-        for row_hash, created_version_id, updated_version_id in rows:
-            version_map[int(row_hash)] = (created_version_id, updated_version_id)
+        for row_id, row_hash, created_version_id, updated_version_id in rows:
+            version_map[int(row_hash)] = (int(row_id), created_version_id, updated_version_id)
 
     return version_map
 
@@ -1415,6 +1697,23 @@ def _load_snapshot_textmap_group(
     result = merged if matched else None
     _snapshot_textmap_group_cache[cache_key] = result
     return result
+
+
+def _load_snapshot_textmap_group_index(
+    repo_path: str,
+    commit_sha: str,
+    base_name: str,
+) -> TextMapContentIndex:
+    cache_key = (repo_path, commit_sha, base_name)
+    cached = _snapshot_textmap_group_index_cache.get(cache_key)
+    if cached is not None:
+        return cached
+
+    snapshot_obj = _load_snapshot_textmap_group(repo_path, commit_sha, base_name)
+    index = build_textmap_content_index(snapshot_obj)
+    _snapshot_textmap_group_cache.pop(cache_key, None)
+    _snapshot_textmap_group_index_cache[cache_key] = index
+    return index
 
 
 def _git_show_json(repo_path: str, commit: str, rel_path: str):
@@ -2310,6 +2609,7 @@ def _backfill_versions_from_snapshots(
 ):
     """通用版本快照回放入口，按版本快照批次处理指定资源。"""
     commit_batch_size = max(1, int(commit_batch_size))
+    gc_collect_interval = max(1, min(commit_batch_size, 5))
 
     try:
         ensure_version_schema()
@@ -2484,7 +2784,9 @@ def _backfill_versions_from_snapshots(
                         # Snapshot-scoped caches can balloon during force replay, especially
                         # for TextMap. Drop them eagerly to keep memory bounded.
                         _clear_history_runtime_caches()
-                        gc.collect()
+                        snapshot_ordinal = idx - start_idx + 1
+                        if snapshot_ordinal % gc_collect_interval == 0 or idx == total_snapshots - 1:
+                            gc.collect()
                 if processed_snapshots > 0 and last_snapshot is not None:
                     try:
                         conn.commit()
@@ -2708,117 +3010,172 @@ def backfill_textmap_versions_from_history(
     from_commit: str | None = None,
     force: bool = False,
     batch_size: int = DEFAULT_BATCH_SIZE,
+    fast_db_write: bool = False,
     verbose: bool = False,
     refresh_version_catalog: bool = True,
 ):
     """回填 TextMap 历史版本。"""
-    textmap_lang_map = _get_textmap_lang_id_map()
-    local_textmap_cache: dict[str, dict[str, object] | None] = {}
-    textmap_version_cache: dict[str, dict[int, tuple[int | None, int | None]]] = {}
-    processed_snapshot_groups: set[tuple[str, str]] = set()
-
-    def process_textmap_entry(cursor, repo_path, commit_sha, parent_sha, entry, version_id, version_label, batch_size):
-        """处理单个 TextMap 版本快照条目。"""
-        old_path = entry.get("old_path")
-        new_path = entry.get("new_path")
-        rel_path = (new_path or old_path or "").replace("\\", "/")
-        if not rel_path:
-            return
-        if not (rel_path.startswith("TextMap/") and rel_path.endswith(".json")):
-            return
-
-        file_name = rel_path.split("/", 1)[1]
-        parsed = parse_textmap_file_name(file_name)
-        if parsed is None:
-            return
-        base_name, _split_part = parsed
-        lang_id = textmap_lang_map.get(base_name)
-        if lang_id is None:
-            return
-        processed_key = (commit_sha, base_name)
-        if processed_key in processed_snapshot_groups:
-            return
-        processed_snapshot_groups.add(processed_key)
-
-        snapshot_obj = _load_snapshot_textmap_group(repo_path, commit_sha, base_name)
-        if snapshot_obj is None:
-            snapshot_obj = {}
-
-        if base_name not in local_textmap_cache:
-            local_textmap_cache[base_name] = _load_worktree_textmap_group(repo_path, base_name)
-        current_obj = local_textmap_cache[base_name]
-        if not isinstance(current_obj, dict):
-            return
-
-        if base_name not in textmap_version_cache:
-            textmap_version_cache[base_name] = _load_textmap_version_cache_for_current_group(
-                cursor,
-                lang_id=lang_id,
-                current_obj=current_obj,
-                batch_size=batch_size,
-            )
-        existing_map = textmap_version_cache[base_name]
-
-        previous_snapshot_obj = None
-        if parent_sha and _textmap_snapshot_has_current_matches(snapshot_obj, current_obj):
-            previous_snapshot_obj = _load_snapshot_textmap_group(repo_path, parent_sha, base_name)
-
-        update_rows = _build_textmap_history_update_rows(
-            snapshot_obj=snapshot_obj,
-            previous_snapshot_obj=previous_snapshot_obj,
-            current_obj=current_obj,
-            lang_id=lang_id,
-            version_id=version_id,
-            existing_map=existing_map,
-        )
-
-        if update_rows:
-            executemany_batched(
-                cursor,
-                "UPDATE textMap SET created_version_id = ?, updated_version_id = ? "
-                "WHERE lang = ? AND hash = ?",
-                update_rows,
-                batch_size=batch_size,
-            )
-            _merge_textmap_version_updates_into_cache(existing_map, update_rows)
-
-    _backfill_versions_from_history(
+    repo_path = DATA_PATH
+    replay_range = _resolve_snapshot_replay_range(
+        repo_path,
         target_commit=target_commit,
         from_commit=from_commit,
-        force=force,
-        batch_size=batch_size,
-        verbose=verbose,
-        include_paths=TEXTMAP_ONLY_PATHS,
-        table_name="textMap",
-        meta_commit_key="db_history_versions_commit_textmap",
-        meta_title_key="db_history_versions_commit_title_textmap",
-        resume_target_key="db_history_versions_commit_textmap_resume_target",
-        resume_done_key="db_history_versions_commit_textmap_resume_done",
-        process_entry_fn=process_textmap_entry,
-        pbar_desc="TextMap backfill",
-        commit_batch_size=5,
-        refresh_version_catalog=refresh_version_catalog,
     )
+    target_snapshot = replay_range.target_snapshot
+    if target_snapshot is None:
+        logger.info(
+            f"TextMap 版本快照回放：目标提交 {replay_range.raw_target_commit[:8]} 未映射到任何版本快照，已跳过。"
+        )
+        return
 
-    print("TextMap history phase-1.5: Git history backfill for textmap without version data")
-    cursor = conn.cursor()
-    try:
-        _backfill_textmap_git_versions(cursor, textmap_lang_map)
-    finally:
-        cursor.close()
+    metadata = _get_version_snapshot_metadata(repo_path)
+    raw_snapshots = metadata.get("snapshots")
+    all_snapshots = tuple(
+        snapshot for snapshot in raw_snapshots if isinstance(snapshot, VersionSnapshot)
+    ) if isinstance(raw_snapshots, Iterable) else tuple()
+    target_idx = next(
+        (idx for idx, snapshot in enumerate(all_snapshots) if snapshot.version_tag == target_snapshot.version_tag),
+        None,
+    )
+    if target_idx is None:
+        logger.warning(f"TextMap 版本快照回放：未找到目标快照 {target_snapshot.version_tag}，已跳过。")
+        return
+    snapshots = all_snapshots[: target_idx + 1]
 
-    check_cursor = conn.cursor()
-    try:
-        exception_data = analyze_textmap_version_exceptions(check_cursor)
-        report_version_exceptions(exception_data, "TextMap")
+    resolved_target = target_snapshot.commit_sha
+    meta_commit_key = "db_history_versions_commit_textmap"
+    meta_title_key = "db_history_versions_commit_title_textmap"
+    if not force and from_commit is None and get_meta(meta_commit_key) == resolved_target and _has_any_version_data("textMap"):
+        logger.info(f"TextMap 版本快照回放已完成于 {target_snapshot.version_tag}，跳过。")
+        return
 
-        if exception_data['created_after_updated'] > 0:
-            print(f"Fixing {exception_data['created_after_updated']} TextMap rows where created_version_id is later than updated_version_id...")
-            fixed = fix_created_after_updated_versions(check_cursor, "textMap", ["lang", "hash"])
+    if from_commit is not None:
+        logger.info("TextMap 版本快照回放：为保证 lineage 准确性，将忽略 from_commit 并重算到目标版本。")
+
+    textmap_lang_map = _get_textmap_lang_id_map()
+    changed_total = 0
+
+    with fast_import_pragmas(conn, enabled=fast_db_write):
+        cursor = conn.cursor()
+        try:
+            with LightweightProgress(len(textmap_lang_map), desc="TextMap backfill", unit="groups", initial_print=False) as pbar:
+                for group_idx, base_name in enumerate(sorted(textmap_lang_map.keys()), start=1):
+                    group_started_at = time.time()
+                    lang_id = textmap_lang_map[base_name]
+                    current_obj = _load_worktree_textmap_group(repo_path, base_name)
+                    if not isinstance(current_obj, dict):
+                        pbar.update(postfix=f"{base_name} (missing)")
+                        continue
+
+                    existing_map = _load_textmap_version_cache_for_current_group(
+                        cursor,
+                        lang_id=lang_id,
+                        current_obj=current_obj,
+                        batch_size=batch_size,
+                    )
+                    if not existing_map:
+                        pbar.update(postfix=f"{base_name} (no rows)")
+                        continue
+
+                    total_group_rows = len(existing_map)
+                    pbar.update(
+                        0,
+                        postfix=(
+                            f"{group_idx}/{len(textmap_lang_map)} {base_name} "
+                            f"rows={total_group_rows:,} 准备回放"
+                        ),
+                    )
+
+                    def _report_group_snapshot_progress(
+                        *,
+                        snapshot_idx: int,
+                        total_snapshots: int,
+                        snapshot: VersionSnapshot,
+                        active_count: int,
+                        continuing_count: int,
+                    ) -> None:
+                        pbar.update(
+                            0,
+                            postfix=(
+                                f"{group_idx}/{len(textmap_lang_map)} {base_name} "
+                                f"rows={total_group_rows:,} "
+                                f"snap={snapshot_idx}/{total_snapshots} {snapshot.version_tag} "
+                                f"active={active_count:,}->{continuing_count:,}"
+                            ),
+                        )
+
+                    version_plan = _compute_textmap_group_authoritative_versions(
+                        repo_path=repo_path,
+                        base_name=base_name,
+                        current_obj=current_obj,
+                        target_hashes=existing_map.keys(),
+                        snapshots=snapshots,
+                        progress_callback=_report_group_snapshot_progress,
+                    )
+                    group_patch_rows = _collect_textmap_version_patch_rows(
+                        lang_id=lang_id,
+                        existing_map=existing_map,
+                        version_plan=version_plan,
+                    )
+                    group_changed = len(group_patch_rows)
+                    if group_patch_rows:
+                        changed_total += _apply_textmap_version_patch_rows(
+                            cursor,
+                            group_patch_rows,
+                            batch_size=batch_size,
+                        )
+                        conn.commit()
+
+                    group_elapsed = time.time() - group_started_at
+                    pbar.update(
+                        1,
+                        postfix=(
+                            f"{base_name} rows={total_group_rows:,} "
+                            f"changed={group_changed:,} "
+                            f"elapsed={group_elapsed:.1f}s"
+                        ),
+                    )
+                    print(
+                        f"[{group_idx}/{len(textmap_lang_map)}] {base_name}: "
+                        f"rows={total_group_rows:,} changed={group_changed:,} elapsed={group_elapsed:.1f}s"
+                    )
+                    _clear_textmap_replay_runtime_buffers()
+                    gc.collect()
+
+            _clear_history_runtime_caches()
             conn.commit()
-            print(f"TextMap exception fix complete: {fixed} row(s) updated.")
-    finally:
-        check_cursor.close()
+        finally:
+            cursor.close()
+
+        try:
+            if from_commit is None:
+                set_meta(meta_commit_key, resolved_target)
+                set_meta(meta_title_key, target_snapshot.version_label)
+            if refresh_version_catalog:
+                rebuild_version_catalog(["textMap"])
+        except Exception as e:
+            logger.error(f"Error finalizing TextMap metadata: {e}")
+
+        print(f"TextMap history authoritative replay complete: changed={changed_total}")
+        print("TextMap history phase-1.5: Git history backfill for unresolved textmap rows")
+        cursor = conn.cursor()
+        try:
+            _backfill_textmap_git_versions(cursor, textmap_lang_map)
+        finally:
+            cursor.close()
+
+        check_cursor = conn.cursor()
+        try:
+            exception_data = analyze_textmap_version_exceptions(check_cursor)
+            report_version_exceptions(exception_data, "TextMap")
+
+            if exception_data['created_after_updated'] > 0:
+                print(f"Fixing {exception_data['created_after_updated']} TextMap rows where created_version_id is later than updated_version_id...")
+                fixed = fix_created_after_updated_versions(check_cursor, "textMap", ["lang", "hash"])
+                conn.commit()
+                print(f"TextMap exception fix complete: {fixed} row(s) updated.")
+        finally:
+            check_cursor.close()
 
 
 def backfill_readable_versions_from_history(
