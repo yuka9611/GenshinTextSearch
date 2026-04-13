@@ -4,6 +4,11 @@ import sys
 from flask import Blueprint, current_app, request, jsonify
 
 from databaseHelper import selectTextMapFromKeywordPaged, selectVoiceFromKeywordPaged, getVoicePath, getTextMapByHash, getVersionData, getLangCodeMap
+from utils.browser_session import (
+    disconnect_browser_client,
+    is_browser_auto_shutdown_enabled,
+    touch_browser_client,
+)
 from utils.helpers import getLangFromRequest, normalizeSearchTerm, getLanguageName
 from utils.cache import search_cache
 
@@ -41,6 +46,22 @@ else:
     sys.path.pop(0)
 
 api_bp = Blueprint('api', __name__)
+
+
+def _get_browser_client_id() -> str:
+    payload = request.get_json(silent=True)
+    if isinstance(payload, dict):
+        client_id = payload.get("clientId", "")
+        if isinstance(client_id, str):
+            client_id = client_id.strip()
+            if client_id:
+                return client_id
+
+    client_id = request.form.get("clientId", "").strip()
+    if client_id:
+        return client_id
+
+    return request.args.get("clientId", "", type=str).strip()
 
 
 def _is_database_corruption_error(error: sqlite3.DatabaseError) -> bool:
@@ -295,10 +316,45 @@ def startupStatus():
     return jsonify({
         "data": {
             "assetDirValid": config.isAssetDirValid(),
-            "assetDir": config.getAssetDir()
+            "assetDir": config.getAssetDir(),
+            "browserAutoShutdownEnabled": is_browser_auto_shutdown_enabled(),
         },
         "code": 200,
         "msg": "ok"
+    })
+
+
+@api_bp.route("/api/browser-session/heartbeat", methods=["POST"])
+def browserSessionHeartbeat():
+    client_id = _get_browser_client_id()
+    if not client_id:
+        return jsonify({"data": None, "code": 400, "msg": "Missing clientId"})
+
+    active_clients = touch_browser_client(client_id)
+    return jsonify({
+        "data": {
+            "activeClients": active_clients,
+            "autoShutdownEnabled": is_browser_auto_shutdown_enabled(),
+        },
+        "code": 200,
+        "msg": "ok",
+    })
+
+
+@api_bp.route("/api/browser-session/disconnect", methods=["POST"])
+def browserSessionDisconnect():
+    client_id = _get_browser_client_id()
+    if not client_id:
+        return jsonify({"data": None, "code": 400, "msg": "Missing clientId"})
+
+    active_clients = disconnect_browser_client(client_id)
+    return jsonify({
+        "data": {
+            "activeClients": active_clients,
+            "autoShutdownEnabled": is_browser_auto_shutdown_enabled(),
+        },
+        "code": 200,
+        "msg": "ok",
     })
 
 @api_bp.route("/api/setAssetDir", methods=["POST"])

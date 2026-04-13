@@ -32,6 +32,7 @@ if not hasattr(pkgutil, "get_loader"):
 from flask import Flask, send_from_directory
 
 from utils.helpers import resource_path
+from utils.browser_session import start_browser_session_watchdog
 
 
 def create_app() -> Flask:
@@ -85,6 +86,19 @@ def maybe_open_browser(url: str):
             pass
 
     threading.Thread(target=_open, daemon=True).start()
+
+
+def run_local_server(app: Flask, host: str, port: int) -> None:
+    from werkzeug.serving import make_server
+
+    server = make_server(host, port, app, threaded=True)
+    start_browser_session_watchdog(app.logger, shutdown_callback=server.shutdown)
+    maybe_open_browser(f"http://{host}:{port}/")
+
+    try:
+        server.serve_forever()
+    finally:
+        server.server_close()
 
 
 if __name__ == "__main__":
@@ -148,6 +162,5 @@ if __name__ == "__main__":
             pass
 
     app = create_app()
-    maybe_open_browser("http://127.0.0.1:5000/")
     # 桌面发行版建议只监听本机
-    app.run(debug=False, host="127.0.0.1", port=5000)
+    run_local_server(app, host="127.0.0.1", port=5000)
