@@ -5,6 +5,7 @@ import pytest
 
 from fts_tokenizer import (
     normalize_segmenter_name,
+    normalize_search_keyword,
     _compact_spaces,
     _unique_tokens,
     _segment_with_char_bigram,
@@ -12,6 +13,30 @@ from fts_tokenizer import (
     build_fts_index_text,
     build_fts_query_terms,
 )
+
+
+# ---------------------------------------------------------------------------
+# normalize_search_keyword
+# ---------------------------------------------------------------------------
+
+class TestNormalizeSearchKeyword:
+    def test_returns_empty_for_empty_input(self):
+        assert normalize_search_keyword("") == ""
+
+    def test_strips_ascii_quotes(self):
+        assert normalize_search_keyword('"莉奈娅的"') == "莉奈娅的"
+
+    def test_strips_chinese_quotes(self):
+        assert normalize_search_keyword("「莉奈娅的」") == "莉奈娅的"
+
+    def test_strips_multiple_quote_layers(self):
+        assert normalize_search_keyword("“「莉奈娅的」”") == "莉奈娅的"
+
+    def test_strips_unbalanced_edge_quotes(self):
+        assert normalize_search_keyword("“莉奈娅的") == "莉奈娅的"
+
+    def test_preserves_inner_quotes(self):
+        assert normalize_search_keyword('莉奈娅说“你好”') == '莉奈娅说“你好”'
 
 
 # ---------------------------------------------------------------------------

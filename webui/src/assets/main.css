@@ -72,6 +72,23 @@ body::before {
     --theme-surface: #f6eedf;
     --theme-surface-strong: #ebdfca;
     --theme-highlight: #f3e7d3;
+    --voice-button-bg: var(--theme-input);
+    --voice-button-border: var(--theme-border);
+    --voice-button-color: var(--theme-text-muted);
+    --voice-button-shadow: 0 4px 12px rgba(44, 57, 54, 0.06);
+    --voice-button-hover-bg: var(--theme-accent-soft);
+    --voice-button-hover-border: var(--theme-accent);
+    --voice-button-hover-color: var(--theme-accent);
+    --voice-button-hover-shadow: 0 4px 12px rgba(44, 57, 54, 0.06);
+    --voice-button-ripple: rgba(183, 140, 79, 0.16);
+    --primary-button-bg: linear-gradient(135deg, var(--theme-primary), var(--theme-primary-strong));
+    --primary-button-hover-bg: linear-gradient(135deg, #377670, var(--theme-primary));
+    --primary-button-text: #ffffff;
+    --primary-button-shadow: 0 12px 22px rgba(var(--theme-primary-rgb), 0.22);
+    --primary-button-hover-shadow: 0 14px 26px rgba(var(--theme-primary-rgb), 0.28);
+    --primary-button-disabled-bg: linear-gradient(135deg, rgba(47, 105, 101, 0.42), rgba(36, 77, 74, 0.38));
+    --primary-button-disabled-border: transparent;
+    --primary-button-disabled-color: rgba(255, 255, 255, 0.76);
     --search-section-bg: rgba(255, 253, 248, 0.97);
     --search-section-border: rgba(190, 164, 124, 0.32);
     --search-section-border-hover: rgba(47, 105, 101, 0.26);
@@ -177,6 +194,23 @@ body::before {
     --theme-surface: #1e2826;
     --theme-surface-strong: #2a3834;
     --theme-highlight: #2a3834;
+    --voice-button-bg: var(--theme-input);
+    --voice-button-border: var(--theme-border);
+    --voice-button-color: var(--theme-text-muted);
+    --voice-button-shadow: 0 8px 18px rgba(0, 0, 0, 0.18);
+    --voice-button-hover-bg: rgba(212, 168, 98, 0.14);
+    --voice-button-hover-border: var(--theme-accent);
+    --voice-button-hover-color: var(--theme-accent);
+    --voice-button-hover-shadow: 0 8px 18px rgba(0, 0, 0, 0.18);
+    --voice-button-ripple: rgba(212, 168, 98, 0.18);
+    --primary-button-bg: linear-gradient(135deg, #57aaa4, #3a8480);
+    --primary-button-hover-bg: linear-gradient(135deg, #69bbb5, #4a9a95);
+    --primary-button-text: #112220;
+    --primary-button-shadow: 0 14px 24px rgba(0, 0, 0, 0.22);
+    --primary-button-hover-shadow: 0 16px 28px rgba(0, 0, 0, 0.28);
+    --primary-button-disabled-bg: linear-gradient(135deg, rgba(87, 170, 164, 0.34), rgba(58, 132, 128, 0.28));
+    --primary-button-disabled-border: rgba(74, 154, 149, 0.18);
+    --primary-button-disabled-color: rgba(224, 229, 228, 0.5);
     --search-section-bg: rgba(30, 40, 37, 0.96);
     --search-section-border: rgba(74, 154, 149, 0.18);
     --search-section-border-hover: rgba(74, 154, 149, 0.30);
@@ -381,15 +415,34 @@ i.centerIcon{
 }
 
 .el-button--primary {
-    background: linear-gradient(135deg, var(--theme-primary), var(--theme-primary-strong));
+    background: var(--primary-button-bg);
     border-color: transparent;
-    box-shadow: 0 12px 22px rgba(var(--theme-primary-rgb), 0.22);
+    color: var(--primary-button-text);
+    box-shadow: var(--primary-button-shadow);
 }
 
 .el-button--primary:hover,
 .el-button--primary:focus-visible {
-    background: linear-gradient(135deg, #377670, var(--theme-primary));
-    box-shadow: 0 14px 26px rgba(var(--theme-primary-rgb), 0.28);
+    background: var(--primary-button-hover-bg);
+    color: var(--primary-button-text);
+    box-shadow: var(--primary-button-hover-shadow);
+}
+
+.el-button.is-disabled,
+.el-button:disabled {
+    transform: none;
+}
+
+.el-button--primary.is-disabled,
+.el-button--primary.is-disabled:hover,
+.el-button--primary.is-disabled:focus-visible,
+.el-button--primary:disabled,
+.el-button--primary:disabled:hover,
+.el-button--primary:disabled:focus-visible {
+    background: var(--primary-button-disabled-bg);
+    border-color: var(--primary-button-disabled-border);
+    color: var(--primary-button-disabled-color);
+    box-shadow: none;
 }
 
 .el-button:not(.el-button--primary) {

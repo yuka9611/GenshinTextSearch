@@ -174,6 +174,7 @@ conn = get_connection()
 # 缓存字典
 _CACHE: dict[str, dict] = {
     "column": {},  # 表列信息缓存
+    "table": {},  # 表存在性缓存
     "fts": {  # FTS相关缓存
         "available": None,
         "tokenizer": None,
@@ -240,6 +241,23 @@ def _table_has_column(table_name: str, column_name: str) -> bool:
             return False
     exists = any(row[1] == column_name for row in rows)
     _CACHE["column"][key] = exists
+    return exists
+
+
+def _table_exists(table_name: str) -> bool:
+    if table_name in _CACHE["table"]:
+        return _CACHE["table"][table_name]
+    with closing(conn.cursor()) as cursor:
+        try:
+            row = cursor.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name=? LIMIT 1",
+                (table_name,),
+            ).fetchone()
+        except Exception:
+            _CACHE["table"][table_name] = False
+            return False
+    exists = row is not None
+    _CACHE["table"][table_name] = exists
     return exists
 
 
@@ -556,7 +574,8 @@ def _resolve_fts_query_filters() -> tuple[set[str], int, int]:
 
 
 def _build_textmap_fts_match(keyword: str, lang_code: int) -> str | None:
-    text = (keyword or "").strip()
+    raw_text = (keyword or "").strip()
+    text = fts_tokenizer.normalize_search_keyword(raw_text) or raw_text
     if not text:
         return None
 
@@ -587,37 +606,77 @@ def _build_textmap_fts_match(keyword: str, lang_code: int) -> str | None:
         escaped = text.replace('"', '""')
         return f"\"{escaped}\""
 
-    parts = fts_tokenizer.build_fts_query_terms(
+    def _filter_parts(parts: list[str]) -> list[str]:
+        dedup_parts = []
+        seen = set()
+        for part in parts:
+            if part in seen:
+                continue
+            seen.add(part)
+            dedup_parts.append(part)
+
+        filtered_parts = []
+        for part in dedup_parts:
+            plen = len(part)
+            if plen < min_len or plen > max_len:
+                continue
+            if part.lower() in stopwords:
+                continue
+            filtered_parts.append(part)
+        return filtered_parts
+
+    def _build_and_clause(parts: list[str]) -> str | None:
+        filtered_parts = _filter_parts(parts)
+        if not filtered_parts:
+            return None
+        return " AND ".join([f"\"{seg.replace('\"', '\"\"')}\"" for seg in filtered_parts])
+
+    clauses: list[str] = []
+
+    primary_parts = fts_tokenizer.build_fts_query_terms(
         text,
         lang_code,
         tokenizer,
         segmenter_mode=segmenter,
         user_dict_path=user_dict,
     )
-    if not parts:
-        parts = [text]
+    primary_clause = _build_and_clause(primary_parts or [text])
+    if primary_clause:
+        clauses.append(primary_clause)
 
-    dedup_parts = []
-    seen = set()
-    for part in parts:
-        if part in seen:
-            continue
-        seen.add(part)
-        dedup_parts.append(part)
-    parts = dedup_parts
+    # Query-time segmentation can differ from the historical index build
+    # environment (for example when jieba is available now but wasn't when
+    # the FTS index was created). Add a char-bigram fallback so old indexes
+    # remain searchable without rebuilding the DB.
+    if lang_code in CHINESE_LANG_CODES and segmenter != "char_bigram":
+        bigram_parts = fts_tokenizer.build_fts_query_terms(
+            text,
+            lang_code,
+            tokenizer,
+            segmenter_mode="char_bigram",
+            user_dict_path=user_dict,
+        )
+        bigram_clause = _build_and_clause(bigram_parts)
+        if bigram_clause:
+            clauses.append(bigram_clause)
 
-    filtered_parts = []
-    for part in parts:
-        plen = len(part)
-        if plen < min_len or plen > max_len:
+    text_len = len(text)
+    if min_len <= text_len <= max_len and text.lower() not in stopwords:
+        clauses.append(f"\"{text.replace('\"', '\"\"')}\"*")
+
+    dedup_clauses: list[str] = []
+    seen_clauses: set[str] = set()
+    for clause in clauses:
+        if clause in seen_clauses:
             continue
-        if part.lower() in stopwords:
-            continue
-        filtered_parts.append(part)
-    parts = filtered_parts
-    if not parts:
+        seen_clauses.add(clause)
+        dedup_clauses.append(clause)
+
+    if not dedup_clauses:
         return None
-    return " AND ".join([f"\"{seg.replace('\"', '\"\"')}\"" for seg in parts])
+    if len(dedup_clauses) == 1:
+        return dedup_clauses[0]
+    return " OR ".join([f"({clause})" for clause in dedup_clauses])
 
 
 def _execute_with_fallback(
@@ -679,6 +738,8 @@ def _build_like_patterns(keyword: str, lang_code: int) -> tuple[str, str]:
     """
     构建LIKE查询模式
     """
+    raw_keyword = str(keyword or "").strip()
+    keyword = fts_tokenizer.normalize_search_keyword(raw_keyword) or raw_keyword
     escaped = _escape_like(keyword)
     exact = f"%{escaped}%"
 
@@ -692,7 +753,8 @@ def _build_like_patterns(keyword: str, lang_code: int) -> tuple[str, str]:
 
 
 def _normalize_match_keyword(keyword: str | None, lang_code: int) -> str:
-    text = str(keyword or "").strip()
+    raw_text = str(keyword or "").strip()
+    text = fts_tokenizer.normalize_search_keyword(raw_text) or raw_text
     if lang_code in CHINESE_LANG_CODES:
         text = "".join(text.split())
     return text.lower()
@@ -1389,23 +1451,36 @@ def _map_fetter_switch_name_to_avatar_id(raw_name: str | None) -> int:
     return _load_fetter_avatar_mappings().get(text, 0)
 
 
+def _pick_fetter_source_value(source: dict, keys: tuple[str, ...]):
+    for key in keys:
+        value = source.get(key)
+        if value is not None:
+            return value
+    return None
+
+
 def _extract_fetter_voice_rows(content: dict) -> list[tuple[int, int, str]]:
-    raw_type = content.get("IACPGADBANJ")
-    if raw_type is None:
-        raw_type = content.get("Type", content.get("type"))
+    raw_type = _pick_fetter_source_value(
+        content,
+        ("JOMDCMBGNMB", "IACPGADBANJ", "Type", "type"),
+    )
     if str(raw_type or "").strip().lower() != "fetter":
         return []
 
-    raw_voice_file = content.get("MGOMDNKKLCP")
-    if raw_voice_file is None:
-        raw_voice_file = content.get("voiceFile", content.get("Id", content.get("id")))
+    raw_voice_file = _pick_fetter_source_value(
+        content,
+        ("BKGHEBIGJNC", "MGOMDNKKLCP", "voiceFile", "Id", "id"),
+    )
     voice_file = _coerce_optional_int(raw_voice_file)
     if voice_file is None:
         return []
 
-    source_nodes = content.get("OPGDOEDEJOJ")
+    source_nodes = _pick_fetter_source_value(
+        content,
+        ("NEJBKIJIBHJ", "OPGDOEDEJOJ", "SourceNames", "sourceNames"),
+    )
     if source_nodes is None:
-        source_nodes = content.get("SourceNames", content.get("sourceNames", []))
+        source_nodes = []
     if not isinstance(source_nodes, list):
         return []
 
@@ -1414,18 +1489,17 @@ def _extract_fetter_voice_rows(content: dict) -> list[tuple[int, int, str]]:
     for source in source_nodes:
         if not isinstance(source, dict):
             continue
-        switch_name = (
-            source.get("IEPAMKPOOII")
-            or source.get("avatarName")
-            or source.get("GDIJGLOHHFM")
-            or source.get("switchName")
+        switch_name = _pick_fetter_source_value(
+            source,
+            ("FBCCEBGJEDB", "IEPAMKPOOII", "avatarName", "GDIJGLOHHFM", "switchName"),
         )
         avatar_id = _map_fetter_switch_name_to_avatar_id(switch_name)
         if avatar_id <= 0:
             continue
-        voice_path = source.get("MDOCAGOFPAP")
-        if voice_path is None:
-            voice_path = source.get("sourceFileName", source.get("DCIHFJLBLAP", source.get("BJDAJEKPCFP")))
+        voice_path = _pick_fetter_source_value(
+            source,
+            ("sourceFileName", "NKPOOPONEHG", "MDOCAGOFPAP", "DCIHFJLBLAP", "BJDAJEKPCFP"),
+        )
         voice_path_text = str(voice_path or "").strip()
         row_key = (avatar_id, voice_path_text)
         if not voice_path_text or row_key in seen_rows:
@@ -1866,6 +1940,28 @@ def _quest_talk_dialogue_join_condition(qt_alias: str = "qt", d_alias: str = "d"
     return (
         f"(({qt_alias}.coopQuestId IS NULL OR {qt_alias}.coopQuestId = 0) AND {d_alias}.coopQuestId IS NULL) "
         f"OR ({qt_alias}.coopQuestId > 0 AND {d_alias}.coopQuestId = {qt_alias}.coopQuestId)"
+    )
+
+
+def _has_talk_dialogue_link_table() -> bool:
+    return _table_exists("talk_dialogue_link")
+
+
+def _quest_talk_dialogue_join_sql(
+    qt_alias: str = "qt",
+    d_alias: str = "d",
+    tdl_alias: str = "tdl",
+) -> str:
+    if _has_talk_dialogue_link_table():
+        return (
+            f"join talk_dialogue_link {tdl_alias} "
+            f"on {tdl_alias}.talkId = {qt_alias}.talkId "
+            f"and {tdl_alias}.coopQuestId = coalesce({qt_alias}.coopQuestId, 0) "
+            f"join dialogue {d_alias} on {d_alias}.dialogueId = {tdl_alias}.dialogueId "
+        )
+    return (
+        f"join dialogue {d_alias} on {d_alias}.talkId = {qt_alias}.talkId "
+        f"and ({_quest_talk_dialogue_join_condition(qt_alias, d_alias)}) "
     )
 
 
@@ -2483,6 +2579,71 @@ def getSourceFromFetter(textHash: int, langCode: int = 1):
             return None
 
         return "{} · {}".format(avatarName, _normalize_output_text(voiceTitle, langCode))
+
+
+def selectTextHashesWithKnownPrimarySource(text_hashes: list[int]) -> set[int]:
+    normalized_ids: list[int] = []
+    seen_ids: set[int] = set()
+    for value in text_hashes or []:
+        normalized = _coerce_optional_int(value)
+        if normalized is None or normalized in seen_ids:
+            continue
+        seen_ids.add(normalized)
+        normalized_ids.append(normalized)
+    if not normalized_ids:
+        return set()
+
+    placeholders = ",".join("?" for _ in normalized_ids)
+    query_specs: list[str] = []
+
+    if _table_exists("dialogue") and _table_has_column("dialogue", "textHash"):
+        query_specs.append(
+            f"SELECT DISTINCT textHash FROM dialogue WHERE textHash IN ({placeholders})"
+        )
+    if _table_exists("fetters") and _table_has_column("fetters", "voiceFileTextTextMapHash"):
+        query_specs.append(
+            f"SELECT DISTINCT voiceFileTextTextMapHash FROM fetters "
+            f"WHERE voiceFileTextTextMapHash IN ({placeholders})"
+        )
+    if _table_exists("fetterStory"):
+        query_specs.append(
+            "SELECT DISTINCT entries.contextHash "
+            f"FROM ({_avatar_story_entries_subquery()}) AS entries "
+            f"WHERE entries.contextHash IN ({placeholders})"
+        )
+    if _table_exists("quest_hash_map") and _table_has_column("quest_hash_map", "hash"):
+        query_specs.append(
+            f"SELECT DISTINCT hash FROM quest_hash_map WHERE hash IN ({placeholders})"
+        )
+    if _table_exists("text_source_entity"):
+        if _table_has_column("text_source_entity", "text_hash"):
+            query_specs.append(
+                f"SELECT DISTINCT text_hash FROM text_source_entity "
+                f"WHERE text_hash IN ({placeholders})"
+            )
+        if _table_has_column("text_source_entity", "title_hash"):
+            query_specs.append(
+                f"SELECT DISTINCT title_hash FROM text_source_entity "
+                f"WHERE title_hash IN ({placeholders})"
+            )
+    if _table_exists("readable") and _table_has_column("readable", "titleTextMapHash"):
+        query_specs.append(
+            f"SELECT DISTINCT titleTextMapHash FROM readable "
+            f"WHERE titleTextMapHash IN ({placeholders})"
+        )
+
+    matches: set[int] = set()
+    with closing(conn.cursor()) as cursor:
+        for sql in query_specs:
+            try:
+                rows = cursor.execute(sql, normalized_ids).fetchall()
+            except sqlite3.OperationalError:
+                continue
+            for row in rows:
+                normalized = _coerce_optional_int(row[0] if row else None)
+                if normalized is not None:
+                    matches.add(normalized)
+    return matches
 
 
 def selectQuestHashSources(text_hash: int, *, source_type: str | None = None) -> list[tuple[int, str]]:
@@ -3827,13 +3988,10 @@ def selectQuestByContentKeyword(
         match_sql_parts.append(
             "select distinct qt.questId as questId, 1 as match_rank, dialogueText.content as matched_text "
             "from questTalk qt "
-            "join dialogue d on d.talkId = qt.talkId "
-            "and ("
-            + _quest_talk_dialogue_join_condition("qt", "d")
-            + ") "
-            "join textMap dialogueText on dialogueText.hash=d.textHash "
-            "where dialogueText.lang=? "
-            "and (dialogueText.content like ? escape '\\' or dialogueText.content like ? escape '\\') "
+            + _quest_talk_dialogue_join_sql("qt", "d", "tdl")
+            + "join textMap dialogueText on dialogueText.hash=d.textHash "
+            + "where dialogueText.lang=? "
+            + "and (dialogueText.content like ? escape '\\' or dialogueText.content like ? escape '\\') "
         )
         match_sql = " union all ".join(match_sql_parts)
         sql = (
@@ -3888,13 +4046,11 @@ def selectQuestByNpcSpeakerKeyword(
             f"{version_select} "
             "from quest "
             "join questTalk qt on qt.questId = quest.questId "
-            "join dialogue d on d.talkId = qt.talkId and ("
-            + _quest_talk_dialogue_join_condition("qt", "d")
-            + ") "
-            "join npc on d.talkerType = 'TALK_ROLE_NPC' and d.talkerId = npc.npcId "
-            "join textMap npcName on npc.textHash = npcName.hash and npcName.lang = ? "
-            "left join textMap titleText on quest.titleTextMapHash = titleText.hash and titleText.lang = ? "
-            "where (npcName.content like ? escape '\\' or npcName.content like ? escape '\\') "
+            + _quest_talk_dialogue_join_sql("qt", "d", "tdl")
+            + "join npc on d.talkerType = 'TALK_ROLE_NPC' and d.talkerId = npc.npcId "
+            + "join textMap npcName on npc.textHash = npcName.hash and npcName.lang = ? "
+            + "left join textMap titleText on quest.titleTextMapHash = titleText.hash and titleText.lang = ? "
+            + "where (npcName.content like ? escape '\\' or npcName.content like ? escape '\\') "
         )
         params: list[object] = [langCode, langCode, exact, fuzzy]
         sql = _append_version_filter_clause(
@@ -3928,11 +4084,9 @@ def selectQuestByTalkerType(
             f"{version_select} "
             "from quest "
             "join questTalk qt on qt.questId = quest.questId "
-            "join dialogue d on d.talkId = qt.talkId and ("
-            + _quest_talk_dialogue_join_condition("qt", "d")
-            + ") "
-            "left join textMap titleText on quest.titleTextMapHash = titleText.hash and titleText.lang = ? "
-            "where d.talkerType = ? "
+            + _quest_talk_dialogue_join_sql("qt", "d", "tdl")
+            + "left join textMap titleText on quest.titleTextMapHash = titleText.hash and titleText.lang = ? "
+            + "where d.talkerType = ? "
         )
         params: list[object] = [langCode, talkerType]
         sql = _append_version_filter_clause(
@@ -4826,14 +4980,21 @@ def selectQuestTalkIds(questId: int):
 
 def countQuestDialogues(questId: int) -> int:
     with closing(conn.cursor()) as cursor:
-        sql = (
-            "select count(*) from dialogue d "
-            "join (select distinct talkId, coalesce(coopQuestId, 0) as coopQuestId from questTalk where questId=?) qt "
-            "on qt.talkId = d.talkId "
-            "and ("
-            + _quest_talk_dialogue_join_condition("qt", "d")
-            + ")"
-        )
+        if _has_talk_dialogue_link_table():
+            sql = (
+                "select count(*) "
+                "from (select distinct talkId, coalesce(coopQuestId, 0) as coopQuestId from questTalk where questId=?) qt "
+                + _quest_talk_dialogue_join_sql("qt", "d", "tdl")
+            )
+        else:
+            sql = (
+                "select count(*) from dialogue d "
+                "join (select distinct talkId, coalesce(coopQuestId, 0) as coopQuestId from questTalk where questId=?) qt "
+                "on qt.talkId = d.talkId "
+                "and ("
+                + _quest_talk_dialogue_join_condition("qt", "d")
+                + ")"
+            )
         cursor.execute(sql, (questId,))
         row = cursor.fetchone()
         return row[0] if row else 0
@@ -4845,16 +5006,24 @@ def selectQuestDialoguesPaged(
     offset: int | None = None,
 ):
     with closing(conn.cursor()) as cursor:
-        sql = (
-            "select d.textHash, d.talkerType, d.talkerId, d.dialogueId, d.talkId "
-            "from dialogue d "
-            "join (select distinct talkId, coalesce(coopQuestId, 0) as coopQuestId from questTalk where questId=?) qt "
-            "on qt.talkId = d.talkId "
-            "and ("
-            + _quest_talk_dialogue_join_condition("qt", "d")
-            + ") "
-            "order by qt.coopQuestId, d.talkId, d.dialogueId"
-        )
+        if _has_talk_dialogue_link_table():
+            sql = (
+                "select d.textHash, d.talkerType, d.talkerId, d.dialogueId, qt.talkId "
+                "from (select distinct talkId, coalesce(coopQuestId, 0) as coopQuestId from questTalk where questId=?) qt "
+                + _quest_talk_dialogue_join_sql("qt", "d", "tdl")
+                + "order by qt.coopQuestId, qt.talkId, d.dialogueId"
+            )
+        else:
+            sql = (
+                "select d.textHash, d.talkerType, d.talkerId, d.dialogueId, d.talkId "
+                "from dialogue d "
+                "join (select distinct talkId, coalesce(coopQuestId, 0) as coopQuestId from questTalk where questId=?) qt "
+                "on qt.talkId = d.talkId "
+                "and ("
+                + _quest_talk_dialogue_join_condition("qt", "d")
+                + ") "
+                "order by qt.coopQuestId, d.talkId, d.dialogueId"
+            )
         params = [questId]
         if limit is not None:
             sql += " limit ?"

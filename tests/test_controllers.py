@@ -14,6 +14,49 @@ controllers = importlib.util.module_from_spec(_SPEC)
 _SPEC.loader.exec_module(controllers)
 
 
+def _patch_avatar_story_dependencies(
+    monkeypatch,
+    *,
+    avatar_name="琴",
+    story_rows=None,
+    search_rows=None,
+    title_map=None,
+    translates_map=None,
+    version_map=None,
+):
+    monkeypatch.setattr(controllers.config, "getResultLanguages", lambda: [1])
+    monkeypatch.setattr(controllers.config, "getSourceLanguage", lambda: 1)
+    monkeypatch.setattr(controllers.databaseHelper, "getCharterName", lambda avatar_id, lang_code: avatar_name)
+    if story_rows is not None:
+        monkeypatch.setattr(controllers.databaseHelper, "selectAvatarStories", lambda avatar_id: story_rows)
+    if search_rows is not None:
+        monkeypatch.setattr(
+            controllers.databaseHelper,
+            "selectAvatarStoryItemsByFilters",
+            lambda *args, **kwargs: search_rows,
+        )
+
+    resolved_titles = dict(title_map or {})
+    resolved_translates = dict(translates_map or {})
+    resolved_versions = dict(version_map or {})
+
+    monkeypatch.setattr(
+        controllers,
+        "_get_text_map_content_with_fallback",
+        lambda text_hash, lang_code, langs: resolved_titles.get(text_hash),
+    )
+    monkeypatch.setattr(
+        controllers,
+        "_build_text_map_translates",
+        lambda text_hash, langs: resolved_translates.get(text_hash, {}),
+    )
+    monkeypatch.setattr(
+        controllers.databaseHelper,
+        "getTextMapVersionInfo",
+        lambda text_hash, lang_code: resolved_versions.get(text_hash),
+    )
+
+
 # ---------------------------------------------------------------------------
 # source_type filter helpers
 # ---------------------------------------------------------------------------
@@ -121,6 +164,90 @@ class TestAvatarStorySources:
         assert "_preferredSourceType" not in entry
 
 
+class TestAvatarStoryResultPayloads:
+    def test_get_avatar_stories_adds_story_primary_source(self, monkeypatch):
+        _patch_avatar_story_dependencies(
+            monkeypatch,
+            story_rows=[(10, 111, None, 222, 301, None)],
+            title_map={111: "故事一", 222: "未解锁故事"},
+            translates_map={301: {"1": "故事内容"}},
+            version_map={301: ("Version 4.0", "Version 4.2")},
+        )
+
+        result = controllers.getAvatarStories(10000003, searchLang=1)
+
+        assert result["avatarId"] == 10000003
+        assert result["avatarName"] == "琴"
+        assert len(result["stories"]) == 1
+        story = result["stories"][0]
+        assert story["origin"] == "琴 · 故事一"
+        assert story["storyTitle"] == "故事一"
+        assert story["primarySource"] == {
+            "sourceType": "story",
+            "title": "琴 · 故事一",
+            "subtitle": "角色故事",
+            "detailQuery": {"kind": "text", "textHash": 301},
+        }
+        assert story["sourceCount"] == 1
+        assert story["createdVersion"] == "4.0"
+        assert story["updatedVersion"] == "4.2"
+
+    def test_search_avatar_stories_by_filters_uses_locked_title_for_story_primary_source(self, monkeypatch):
+        _patch_avatar_story_dependencies(
+            monkeypatch,
+            search_rows=[(10000003, 10, 111, 222, 301)],
+            title_map={111: None, 222: "未解锁故事"},
+            translates_map={301: {"1": "未解锁故事内容"}},
+            version_map={301: ("Version 4.0", "Version 4.2")},
+        )
+
+        result = controllers.searchAvatarStoriesByFilters("未解锁", searchLang=1)
+
+        assert len(result["stories"]) == 1
+        story = result["stories"][0]
+        assert story["origin"] == "琴 · 未解锁故事"
+        assert story["storyTitle"] == "未解锁故事"
+        assert story["primarySource"] == {
+            "sourceType": "story",
+            "title": "琴 · 未解锁故事",
+            "subtitle": "角色故事",
+            "detailQuery": {"kind": "text", "textHash": 301},
+        }
+        assert story["sourceCount"] == 1
+        assert story["avatarId"] == 10000003
+        assert story["avatarName"] == "琴"
+
+    @pytest.mark.parametrize(
+        ("avatar_name", "expected_origin"),
+        [
+            ("琴", "琴"),
+            (None, "角色故事"),
+        ],
+    )
+    def test_get_avatar_stories_falls_back_when_story_title_missing(self, monkeypatch, avatar_name, expected_origin):
+        _patch_avatar_story_dependencies(
+            monkeypatch,
+            avatar_name=avatar_name,
+            story_rows=[(10, None, None, None, 301, None)],
+            translates_map={301: {"1": "故事内容"}},
+            version_map={301: ("Version 4.0", "Version 4.2")},
+        )
+
+        result = controllers.getAvatarStories(10000003, searchLang=1)
+
+        assert len(result["stories"]) == 1
+        story = result["stories"][0]
+        assert story["origin"] == expected_origin
+        assert story["storyTitle"] == ""
+        assert story["primarySource"] == {
+            "sourceType": "story",
+            "title": expected_origin,
+            "subtitle": "角色故事",
+            "detailQuery": {"kind": "text", "textHash": 301},
+        }
+        assert story["sourceCount"] == 1
+
+
 class TestSpeakerSourceQueries:
     def test_handle_speaker_only_query_voice_without_filter_returns_empty(self):
         result, total = controllers._handle_speaker_only_query("琴", 1, 1, 20, "without", None, None, "voice")
@@ -225,6 +352,218 @@ class TestMatchRanking:
         best = controllers._best_field_match(values, "hello", 4)
         assert best[0] == 0
         assert best[1] == 2
+
+
+# ---------------------------------------------------------------------------
+# search result sorting / source marking
+# ---------------------------------------------------------------------------
+
+class TestSearchResultSorting:
+    def test_sort_search_results_keeps_exact_hash_and_best_text_in_top_tier(self):
+        entries = [
+            {"hash": 200, "translates": {"4": "keyword"}, "voicePaths": ["vo_200"]},
+            {"hash": 123, "translates": {"4": "other text"}, "voicePaths": []},
+            {"hash": 300, "translates": {"4": "keyword suffix"}, "voicePaths": ["vo_300"], "primarySource": {"sourceType": "weapon"}},
+        ]
+
+        controllers._sort_search_results(entries, "keyword", 4, True, 123)
+
+        assert [entry["hash"] for entry in entries] == [200, 123, 300]
+
+    def test_sort_search_results_prefers_voice_then_source_then_hash(self):
+        entries = [
+            {"hash": 30, "translates": {"4": "keyword"}, "voicePaths": [], "primarySource": {"sourceType": "weapon"}},
+            {"hash": 10, "translates": {"4": "keyword"}, "voicePaths": ["vo_10"]},
+            {"hash": 20, "translates": {"4": "keyword"}, "voicePaths": ["vo_20"], "_hasKnownPrimarySource": True},
+        ]
+
+        controllers._sort_search_results(entries, "keyword", 4, False, None)
+
+        assert [entry["hash"] for entry in entries] == [20, 10, 30]
+
+    def test_sort_search_results_uses_hash_as_final_tiebreaker_and_ignores_talk_and_length(self):
+        entries = [
+            {"hash": 30, "isTalk": True, "translates": {"4": "alpha key omega"}, "voicePaths": [], "_hasKnownPrimarySource": True},
+            {"hash": 10, "isTalk": False, "translates": {"4": "beta key gamma"}, "voicePaths": [], "_hasKnownPrimarySource": True},
+            {"hash": 20, "isTalk": True, "translates": {"4": "delta key epsilon zeta"}, "voicePaths": [], "_hasKnownPrimarySource": True},
+        ]
+
+        controllers._sort_search_results(entries, "key", 4, False, None)
+
+        assert [entry["hash"] for entry in entries] == [10, 20, 30]
+
+    def test_mark_entries_with_known_primary_source_marks_only_missing_sources(self, monkeypatch):
+        calls = []
+
+        def fake_select_text_hashes_with_known_primary_source(text_hashes):
+            calls.append(list(text_hashes))
+            return {222, 333}
+
+        monkeypatch.setattr(
+            controllers.databaseHelper,
+            "selectTextHashesWithKnownPrimarySource",
+            fake_select_text_hashes_with_known_primary_source,
+        )
+
+        entries = [
+            {"hash": 111, "primarySource": {"sourceType": "weapon"}},
+            {"hash": 222, "translates": {"4": "foo"}},
+            {"hash": "333", "primarySource": {"sourceType": "unknown"}},
+            {"hash": "bad", "translates": {"4": "bar"}},
+            {"hash": 222, "translates": {"4": "dup"}},
+        ]
+
+        controllers._mark_entries_with_known_primary_source(entries)
+
+        assert calls == [[222, 333]]
+        assert "_hasKnownPrimarySource" not in entries[0]
+        assert entries[1]["_hasKnownPrimarySource"] is True
+        assert entries[2]["_hasKnownPrimarySource"] is True
+        assert "_hasKnownPrimarySource" not in entries[3]
+        assert entries[4]["_hasKnownPrimarySource"] is True
+
+    def test_ranked_handler_marks_sources_before_pagination(self, monkeypatch):
+        monkeypatch.setattr(controllers, "_count_textmap_from_keyword_cached", lambda *args, **kwargs: 2)
+        monkeypatch.setattr(controllers, "_count_subtitle_from_keyword_cached", lambda *args, **kwargs: 0)
+        monkeypatch.setattr(
+            controllers.databaseHelper,
+            "selectTextMapFromKeywordPaged",
+            lambda *args, **kwargs: [(1, None, None, None), (2, None, None, None)],
+        )
+        monkeypatch.setattr(
+            controllers,
+            "queryTextHashInfo",
+            lambda text_hash, *args, **kwargs: {
+                "hash": text_hash,
+                "translates": {"4": "keyword"},
+                "voicePaths": [],
+            },
+        )
+        monkeypatch.setattr(
+            controllers.databaseHelper,
+            "selectTextHashesWithKnownPrimarySource",
+            lambda text_hashes: {2},
+        )
+
+        result, total = controllers._handle_all_voice_filter_ranked(
+            "keyword",
+            "keyword",
+            4,
+            1,
+            1,
+            None,
+            False,
+            None,
+            False,
+            set(),
+            [4],
+            1,
+            None,
+            [],
+            {},
+            {},
+            None,
+            None,
+            None,
+        )
+
+        assert total == 2
+        assert [entry["hash"] for entry in result] == [2]
+        assert result[0]["_hasKnownPrimarySource"] is True
+
+    def test_enrich_primary_sources_removes_internal_known_source_flag(self):
+        entry = {
+            "hash": 999,
+            "primarySource": {"sourceType": "weapon", "title": "武器"},
+            "_hasKnownPrimarySource": True,
+        }
+
+        controllers._enrich_primary_sources([entry], 1)
+
+        assert "_hasKnownPrimarySource" not in entry
+
+
+# ---------------------------------------------------------------------------
+# database helper known source lookup
+# ---------------------------------------------------------------------------
+
+class TestKnownPrimarySourceLookup:
+    def test_select_text_hashes_with_known_primary_source_merges_source_tables(self, monkeypatch):
+        conn = sqlite3.connect(":memory:")
+        table_cache = dict(controllers.databaseHelper._CACHE["table"])
+        column_cache = dict(controllers.databaseHelper._CACHE["column"])
+        try:
+            conn.executescript(
+                """
+                CREATE TABLE dialogue (textHash INTEGER);
+                CREATE TABLE fetters (
+                    voiceFileTextTextMapHash INTEGER,
+                    avatarId INTEGER,
+                    voiceTitleTextMapHash INTEGER,
+                    voiceFile INTEGER
+                );
+                CREATE TABLE fetterStory (
+                    avatarId INTEGER,
+                    fetterId INTEGER,
+                    storyTitleTextMapHash INTEGER,
+                    storyTitleLockedTextMapHash INTEGER,
+                    storyContextTextMapHash INTEGER,
+                    storyTitle2TextMapHash INTEGER,
+                    storyContext2TextMapHash INTEGER
+                );
+                CREATE TABLE quest_hash_map (
+                    questId INTEGER,
+                    hash INTEGER,
+                    source_type TEXT
+                );
+                CREATE TABLE text_source_entity (
+                    text_hash INTEGER,
+                    source_type_code INTEGER,
+                    entity_id INTEGER,
+                    title_hash INTEGER,
+                    extra INTEGER,
+                    sub_category INTEGER
+                );
+                CREATE TABLE readable (
+                    fileName TEXT,
+                    titleTextMapHash INTEGER,
+                    readableId INTEGER
+                );
+                """
+            )
+            conn.execute("INSERT INTO dialogue(textHash) VALUES (101)")
+            conn.execute(
+                "INSERT INTO fetters(voiceFileTextTextMapHash, avatarId, voiceTitleTextMapHash, voiceFile) VALUES (202, 1, 2, 3)"
+            )
+            conn.execute(
+                "INSERT INTO fetterStory(avatarId, fetterId, storyTitleTextMapHash, storyTitleLockedTextMapHash, storyContextTextMapHash, storyTitle2TextMapHash, storyContext2TextMapHash) "
+                "VALUES (1, 10, 11, 12, 303, 13, NULL)"
+            )
+            conn.execute(
+                "INSERT INTO quest_hash_map(questId, hash, source_type) VALUES (1, 404, 'title')"
+            )
+            conn.execute(
+                "INSERT INTO text_source_entity(text_hash, source_type_code, entity_id, title_hash, extra, sub_category) VALUES (505, 1, 1, 606, 0, 0)"
+            )
+            conn.execute(
+                "INSERT INTO readable(fileName, titleTextMapHash, readableId) VALUES ('book.json', 707, 1)"
+            )
+
+            monkeypatch.setattr(controllers.databaseHelper, "conn", conn)
+            controllers.databaseHelper._CACHE["table"].clear()
+            controllers.databaseHelper._CACHE["column"].clear()
+
+            result = controllers.databaseHelper.selectTextHashesWithKnownPrimarySource(
+                [101, 202, 303, 404, 505, 606, 707, 999]
+            )
+
+            assert result == {101, 202, 303, 404, 505, 606, 707}
+        finally:
+            controllers.databaseHelper._CACHE["table"].clear()
+            controllers.databaseHelper._CACHE["table"].update(table_cache)
+            controllers.databaseHelper._CACHE["column"].clear()
+            controllers.databaseHelper._CACHE["column"].update(column_cache)
+            conn.close()
 
 
 # ---------------------------------------------------------------------------
@@ -539,3 +878,101 @@ class TestEntityTexts:
         assert result["emptyMessage"] == "暂无可用描述文本"
         assert result["createdVersion"] == "1.0"
         assert result["updatedVersion"] == "2.0"
+
+    def test_get_entity_texts_includes_entry_title_and_unisex_subtitle(self, monkeypatch):
+        title_map = {
+            1192942058: "凝脂白",
+        }
+        monkeypatch.setattr(controllers.config, "getResultLanguages", lambda: [1, 4])
+        monkeypatch.setattr(controllers.config, "getSourceLanguage", lambda: 4)
+        monkeypatch.setattr(
+            controllers.databaseHelper,
+            "selectEntityTextHashesByEntity",
+            lambda source_type_code, entity_id: [(1700897759, 1192942058, 769, 29)],
+        )
+        monkeypatch.setattr(
+            controllers.databaseHelper,
+            "getCatalogEntityVersionInfo",
+            lambda source_type_code, entity_id, version_lang_code=None: ("Version 1.0", "Version 2.0"),
+        )
+        monkeypatch.setattr(controllers, "_get_entity_source_meta", lambda code: ("costume", "千星奇域"))
+        monkeypatch.setattr(controllers, "_get_sub_category_label", lambda code: "奇偶装扮")
+        monkeypatch.setattr(
+            controllers,
+            "_get_text_map_content_with_fallback",
+            lambda text_hash, *args, **kwargs: title_map.get(text_hash),
+        )
+        monkeypatch.setattr(
+            controllers,
+            "queryTextHashInfo",
+            lambda *args, **kwargs: {"translates": {"1": "衣装介绍"}},
+        )
+        monkeypatch.setattr(controllers, "_collect_entity_readable_entries", lambda *args, **kwargs: [])
+
+        result = controllers.getEntityTexts(5, 264106, searchLang=1)
+
+        assert result["title"] == "凝脂白"
+        assert result["entries"] == [
+            {
+                "entryTitle": "凝脂白",
+                "fieldLabel": "介绍",
+                "subtitle": "千星奇域 264106 · 通用",
+                "textHash": 1700897759,
+                "titleHash": 1192942058,
+                "text": {"translates": {"1": "衣装介绍"}},
+            }
+        ]
+
+    def test_build_entity_source_payload_marks_unisex_costume(self, monkeypatch):
+        monkeypatch.setattr(controllers, "_get_entity_source_meta", lambda code: ("costume", "千星奇域"))
+        monkeypatch.setattr(controllers.config, "getSourceLanguage", lambda: 1)
+        monkeypatch.setattr(controllers, "_get_text_map_content_with_fallback", lambda *args, **kwargs: "凝脂白")
+
+        primary, origin, source_count = controllers._build_entity_source_payload(
+            [(5, 264106, 1192942058, 769)],
+            1,
+            1700897759,
+        )
+
+        assert primary == {
+            "sourceType": "costume",
+            "title": "凝脂白",
+            "subtitle": "千星奇域 264106 · 通用",
+            "detailQuery": {
+                "kind": "entity",
+                "sourceTypeCode": 5,
+                "entityId": 264106,
+                "textHash": 1700897759,
+            },
+        }
+        assert origin == "千星奇域: 凝脂白"
+        assert source_count == 1
+
+    def test_build_entity_source_payload_recovers_legacy_costume_title_hash(self, monkeypatch):
+        monkeypatch.setattr(controllers, "_get_entity_source_meta", lambda code: ("costume", "千星奇域"))
+        monkeypatch.setattr(controllers.config, "getSourceLanguage", lambda: 1)
+        monkeypatch.setattr(
+            controllers,
+            "_get_text_map_content_with_fallback",
+            lambda text_hash, *args, **kwargs: "尖齿短袖衫·海蓝" if text_hash == 2098177162 else None,
+        )
+
+        primary, origin, source_count = controllers._build_entity_source_payload(
+            [(5, 260001, 2098177674, 513)],
+            1,
+            33590471,
+        )
+
+        assert primary == {
+            "sourceType": "costume",
+            "title": "尖齿短袖衫·海蓝",
+            "subtitle": "千星奇域 260001 · 女",
+            "detailQuery": {
+                "kind": "entity",
+                "sourceTypeCode": 5,
+                "entityId": 260001,
+                "textHash": 33590471,
+            },
+        }
+        assert origin == "千星奇域: 尖齿短袖衫·海蓝"
+        assert source_count == 1

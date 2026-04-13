@@ -706,7 +706,7 @@ onDeactivated(() => {
                     <div v-if="isReadable" class="versionTags tagRow">
                         <el-tag size="small" effect="plain" :title="readableCreatedVersionRaw">{{ UI_TEXT.created }}: {{ formatVersionTag(readableCreatedVersion, readableCreatedVersionRaw) }}</el-tag>
                         <el-tag
-                            v-if="hasVersionTag(readableUpdatedVersion, readableUpdatedVersionRaw)"
+                            v-if="shouldShowUpdatedVersionTag(readableCreatedVersion, readableCreatedVersionRaw, readableUpdatedVersion, readableUpdatedVersionRaw)"
                             size="small"
                             effect="plain"
                             :title="readableUpdatedVersionRaw"
@@ -717,7 +717,7 @@ onDeactivated(() => {
                     <div v-else-if="route.query.questId" class="versionTags tagRow">
                         <el-tag size="small" effect="plain" :title="questCreatedVersionRaw">{{ UI_TEXT.created }}: {{ formatVersionTag(questCreatedVersion, questCreatedVersionRaw) }}</el-tag>
                         <el-tag
-                            v-if="hasVersionTag(questUpdatedVersion, questUpdatedVersionRaw)"
+                            v-if="shouldShowUpdatedVersionTag(questCreatedVersion, questCreatedVersionRaw, questUpdatedVersion, questUpdatedVersionRaw)"
                             size="small"
                             effect="plain"
                             :title="questUpdatedVersionRaw"
@@ -728,7 +728,7 @@ onDeactivated(() => {
                     <div v-else-if="route.query.isSubtitle" class="versionTags tagRow">
                         <el-tag size="small" effect="plain" :title="subtitleCreatedVersionRaw">{{ UI_TEXT.created }}: {{ formatVersionTag(subtitleCreatedVersion, subtitleCreatedVersionRaw) }}</el-tag>
                         <el-tag
-                            v-if="hasVersionTag(subtitleUpdatedVersion, subtitleUpdatedVersionRaw)"
+                            v-if="shouldShowUpdatedVersionTag(subtitleCreatedVersion, subtitleCreatedVersionRaw, subtitleUpdatedVersion, subtitleUpdatedVersionRaw)"
                             size="small"
                             effect="plain"
                             :title="subtitleUpdatedVersionRaw"
@@ -825,6 +825,7 @@ onDeactivated(() => {
                                     <span v-if="shouldShowVoiceButton(scope.row, langCode)">
                                         <PlayVoiceButton v-for="voice in scope.row.voicePaths"
                                                           :voice-path="voice" :lang-code="langCode"
+                                                          size="small"
                                                           :disabled="!isVoiceAvailableForLang(scope.row, langCode)"
                                                           :disabled-tooltip="UI_TEXT.audioUnavailable"
                                                           :unavailable-message="UI_TEXT.audioMissing"

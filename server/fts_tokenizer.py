@@ -2,6 +2,18 @@ import re
 
 CHINESE_LANG_CODES = {1, 2}
 _SUPPORTED_SEGMENTERS = {"auto", "jieba", "char_bigram", "none"}
+_QUOTE_PAIRS = (
+    ('"', '"'),
+    ("'", "'"),
+    ("“", "”"),
+    ("‘", "’"),
+    ("「", "」"),
+    ("『", "』"),
+    ("《", "》"),
+    ("〈", "〉"),
+    ("«", "»"),
+    ("‹", "›"),
+)
 
 _JIEBA_MODULE = None
 _JIEBA_READY = False
@@ -17,6 +29,52 @@ def normalize_segmenter_name(mode: str | None) -> str:
 
 def _compact_spaces(text: str) -> str:
     return "".join(str(text or "").split())
+
+
+def normalize_search_keyword(keyword: str | None) -> str:
+    text = str(keyword or "").strip()
+    if not text:
+        return ""
+
+    while True:
+        previous = text
+
+        for left, right in _QUOTE_PAIRS:
+            if len(text) <= len(left) + len(right):
+                continue
+            if text.startswith(left) and text.endswith(right):
+                inner = text[len(left):len(text) - len(right)].strip()
+                if inner:
+                    text = inner
+                    break
+        else:
+            stripped = False
+            for left, right in _QUOTE_PAIRS:
+                if text.startswith(left):
+                    inner = text[len(left):].strip()
+                    is_unbalanced_left = (
+                        (left == right and text.count(left) == 1)
+                        or (left != right and right not in text[len(left):])
+                    )
+                    if inner and is_unbalanced_left:
+                        text = inner
+                        stripped = True
+                        break
+                if text.endswith(right):
+                    inner = text[:-len(right)].strip()
+                    is_unbalanced_right = (
+                        (left == right and text.count(right) == 1)
+                        or (left != right and left not in text[:-len(right)])
+                    )
+                    if inner and is_unbalanced_right:
+                        text = inner
+                        stripped = True
+                        break
+            if not stripped:
+                return text
+
+        if text == previous:
+            return text
 
 
 def _unique_tokens(tokens: list[str]) -> list[str]:

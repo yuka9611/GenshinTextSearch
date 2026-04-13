@@ -21,6 +21,7 @@ GENERIC_SWITCH_NAMES = {
 
 SOURCE_PATH_KEYS = (
     "sourceFileName",
+    "NKPOOPONEHG",
     "MDOCAGOFPAP",
     "DCIHFJLBLAP",
     "BJDAJEKPCFP",
@@ -28,6 +29,7 @@ SOURCE_PATH_KEYS = (
 
 AVATAR_NAME_KEYS = (
     "avatarName",
+    "FBCCEBGJEDB",
     "GDIJGLOHHFM",
     "IEPAMKPOOII",
     "switchName",
@@ -135,6 +137,15 @@ def _pick_first_value(node: dict, keys: tuple[str, ...]):
 
 
 def _resolve_voice_schema(content: dict):
+    if "JOMDCMBGNMB" in content:
+        return {
+            "entry_id_key": "BKGHEBIGJNC",
+            "source_list_key": "NEJBKIJIBHJ",
+            "trigger_key": "JOMDCMBGNMB",
+            "guid_key": "LNBFOPNLLDB",
+            "voice_path_keys": SOURCE_PATH_KEYS,
+            "avatar_name_keys": AVATAR_NAME_KEYS,
+        }
     if "guid" in content:
         return {
             "entry_id_key": "gameTriggerArgs",

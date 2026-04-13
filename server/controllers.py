@@ -355,6 +355,11 @@ def _build_primary_source(
     return payload
 
 
+def _build_avatar_story_primary_source(origin: str, text_hash: int | None) -> dict[str, object]:
+    detail_query = {"kind": "text", "textHash": text_hash} if text_hash is not None else None
+    return _build_primary_source("story", origin, "角色故事", detail_query)
+
+
 def _normalize_source_type_filter(source_type: str | None) -> str | None:
     normalized = str(source_type or "").strip().lower()
     if not normalized or normalized == "all":
@@ -677,16 +682,11 @@ def _build_entity_source_payload(
     picked = min(source_rows, key=lambda row: (_ENTITY_SOURCE_PRIORITY.get(row[0], 99), row[1]))
     source_type_code, entity_id, title_hash, extra = picked
     source_type, source_label = _get_entity_source_meta(source_type_code)
-    title = _get_text_map_content_with_fallback(title_hash, lang_code, [config.getSourceLanguage()]) or str(entity_id)
-    subtitle = f"{source_label} {entity_id}"
-    gender_code = 0
-    if source_type in ("costume", "suit"):
-        if extra in (1, 2):
-            gender_code = extra
-        else:
-            gender_code = (extra >> 8) & 0xFF
-    if gender_code in (1, 2):
-        subtitle = subtitle + (" · 男" if gender_code == 1 else " · 女")
+    title = _get_entity_title_with_fallback(source_type, title_hash, lang_code, [config.getSourceLanguage()]) or str(entity_id)
+    subtitle = _append_entity_gender_subtitle(
+        f"{source_label} {entity_id}",
+        _extract_entity_gender_code(source_type, extra),
+    )
     origin = f"{source_label}: {title}"
     primary = _build_primary_source(
         source_type,
@@ -751,6 +751,7 @@ def _build_entity_readable_entry(
     field_label: str,
     subtitle: str,
     langs: list[int],
+    preferred_lang_code: int,
     source_lang_code: int,
 ) -> dict | None:
     lang_map = databaseHelper.getLangCodeMap()
@@ -773,7 +774,9 @@ def _build_entity_readable_entry(
 
     created_raw, updated_raw = databaseHelper.getReadableVersionInfo(readable_id, file_name)
     readable_hash = int(title_text_hash or 0)
+    entry_title = _get_text_map_content_with_fallback(title_text_hash, preferred_lang_code, [source_lang_code])
     return {
+        "entryTitle": entry_title,
         "fieldLabel": field_label,
         "subtitle": subtitle,
         "textHash": readable_hash,
@@ -802,6 +805,7 @@ def _collect_entity_readable_entries(
     title_text_hash: int | None,
     subtitle: str,
     langs: list[int],
+    preferred_lang_code: int,
     source_lang_code: int,
     sub_category: int = 0,
 ) -> list[dict]:
@@ -860,6 +864,7 @@ def _collect_entity_readable_entries(
             field_label,
             subtitle,
             langs,
+            preferred_lang_code,
             source_lang_code,
         )
         if entry is not None:
@@ -1148,6 +1153,40 @@ def _get_text_map_content_with_fallback(
     return None
 
 
+def _get_entity_title_with_fallback(
+    source_type: str,
+    title_hash: int | None,
+    preferred_lang: int | None = None,
+    fallback_langs: list[int] | None = None,
+) -> str | None:
+    title = _get_text_map_content_with_fallback(title_hash, preferred_lang, fallback_langs)
+    if title:
+        return title
+    # Backward compatibility: some legacy 千星奇域 rows stored title_hash with an extra 0x200 offset.
+    if source_type in ("costume", "suit") and title_hash and int(title_hash) > 512:
+        return _get_text_map_content_with_fallback(int(title_hash) - 512, preferred_lang, fallback_langs)
+    return None
+
+
+def _extract_entity_gender_code(source_type: str, extra: int) -> int:
+    if source_type not in ("costume", "suit"):
+        return 0
+    if extra in (1, 2, 3):
+        return extra
+    return (int(extra or 0) >> 8) & 0xFF
+
+
+def _append_entity_gender_subtitle(subtitle: str, gender_code: int) -> str:
+    gender_suffix = {
+        1: "男",
+        2: "女",
+        3: "通用",
+    }.get(int(gender_code or 0))
+    if not gender_suffix:
+        return subtitle
+    return subtitle + f" · {gender_suffix}"
+
+
 _INT_PATTERN = re.compile(r"^[+-]?\d+$")
 _HEX_PATTERN = re.compile(r"^[+-]?0x[0-9a-fA-F]+$")
 _VERSION_PATTERN = re.compile(r"(\d+)\.(\d+)(?:\.\d+)?")
@@ -1319,10 +1358,50 @@ def _sort_entries_by_match(
 
 
 def _coerce_sort_int(value, fallback: int = 10**12) -> int:
+    coerced = _coerce_optional_sort_int(value)
+    return coerced if coerced is not None else fallback
+
+
+def _coerce_optional_sort_int(value) -> int | None:
     try:
         return int(value)
     except (TypeError, ValueError):
-        return fallback
+        return None
+
+
+def _entry_has_known_primary_source(entry: dict) -> bool:
+    primary_source = entry.get("primarySource") or {}
+    source_type = str(primary_source.get("sourceType") or "").strip().lower()
+    if source_type and source_type != "unknown":
+        return True
+    return bool(entry.get("_hasKnownPrimarySource"))
+
+
+def _mark_entries_with_known_primary_source(entries: list[dict]):
+    lookup_hashes: list[int] = []
+    seen_hashes: set[int] = set()
+    for entry in entries:
+        if _entry_has_known_primary_source(entry):
+            continue
+        normalized_hash = _coerce_optional_sort_int(entry.get("hash"))
+        if normalized_hash is None or normalized_hash in seen_hashes:
+            continue
+        seen_hashes.add(normalized_hash)
+        lookup_hashes.append(normalized_hash)
+    if not lookup_hashes:
+        return entries
+
+    known_hashes = databaseHelper.selectTextHashesWithKnownPrimarySource(lookup_hashes)
+    if not known_hashes:
+        return entries
+
+    for entry in entries:
+        if _entry_has_known_primary_source(entry):
+            continue
+        normalized_hash = _coerce_optional_sort_int(entry.get("hash"))
+        if normalized_hash is not None and normalized_hash in known_hashes:
+            entry["_hasKnownPrimarySource"] = True
+    return entries
 
 
 def _sort_entries_by_match_with_exact_id(
@@ -1400,6 +1479,7 @@ def _enrich_primary_sources(results: list[dict], source_lang_code: int):
     已有 primarySource 的条目（readable/subtitle）会被跳过。
     """
     for entry in results:
+        entry.pop("_hasKnownPrimarySource", None)
         text_hash = entry.get('hash')
         if text_hash is None:
             continue
@@ -2161,6 +2241,7 @@ def _handle_all_voice_filter_ranked(keyword, keyword_trim, langCode, safe_page, 
             candidates = _filter_entries_by_source_type(candidates, normalized_source_type)
             total = len(candidates)
 
+    _mark_entries_with_known_primary_source(candidates)
     _sort_search_results(candidates, keyword_trim, langCode, is_hash_query, hash_value)
     start = (safe_page - 1) * safe_size
     end = start + safe_size
@@ -2309,6 +2390,7 @@ def _handle_specific_voice_filter_ranked(keyword, keyword_trim, langCode, safe_p
             candidates = _filter_entries_by_source_type(candidates, normalized_source_type)
             total = len(candidates)
 
+    _mark_entries_with_known_primary_source(candidates)
     _sort_search_results(candidates, keyword_trim, langCode, is_hash_query, hash_value)
     start = (safe_page - 1) * safe_size
     end = start + safe_size
@@ -2433,19 +2515,20 @@ def _sort_search_results(ans: list[dict], keyword: str, langCode: int, is_hash_q
     """
     排序搜索结果
     """
-    def sort_key(entry: dict) -> tuple[int, int, int, int, int]:
+    def sort_key(entry: dict) -> tuple[int, int, int, int]:
         target_text = entry.get('translates', {}).get(str(langCode))
-        hash_rank = 0 if (is_hash_query and entry.get('hash') == hash_value) else 1
         match_rank = _match_rank(target_text, keyword, langCode)
+        normalized_hash = _coerce_optional_sort_int(entry.get('hash'))
+        exact_hash_hit = bool(is_hash_query and hash_value is not None and normalized_hash == hash_value)
+        primary_rank = min(match_rank, 0 if exact_hash_hit else 3)
         voice_rank = 0 if entry.get('voicePaths') else 1
-        talk_rank = 0 if entry.get('isTalk') else 1
-        target_len = len(_normalize_match_text(target_text, langCode))
+        source_rank = 0 if _entry_has_known_primary_source(entry) else 1
+        hash_numeric_rank = normalized_hash if normalized_hash is not None else 10**12
         return (
-            hash_rank,
-            match_rank,
+            primary_rank,
             voice_rank,
-            talk_rank,
-            target_len,
+            source_rank,
+            hash_numeric_rank,
         )
 
     ans.sort(key=sort_key)
@@ -3271,12 +3354,14 @@ def getAvatarStories(avatarId: int, searchLang: int | None = None):
                     "isTalk": False,
                     "viewAsTextHash": True,
                     "disableDetail": True,
-                "origin": origin,
-                "storyTitle": title or "",
-                "fetterId": fetterId,
-                "avatarName": avatarName or "",
-                **_build_version_fields(created_raw, updated_raw),
-            })
+                    "origin": origin,
+                    "primarySource": _build_avatar_story_primary_source(origin, context_hash),
+                    "sourceCount": 1,
+                    "storyTitle": title or "",
+                    "fetterId": fetterId,
+                    "avatarName": avatarName or "",
+                    **_build_version_fields(created_raw, updated_raw),
+                })
 
     return {
         "avatarId": avatarId,
@@ -3457,6 +3542,8 @@ def searchAvatarStoriesByFilters(
             "viewAsTextHash": True,
             "disableDetail": True,
             "origin": origin,
+            "primarySource": _build_avatar_story_primary_source(origin, contextHash),
+            "sourceCount": 1,
             "storyTitle": title or "",
             "fetterId": fetterId,
             "avatarId": avatarId,
@@ -3857,7 +3944,7 @@ def getEntityTexts(sourceTypeCode: int, entityId: int, searchLang: int | None = 
     _first_sub_category = rows[0][3] if len(rows[0]) > 3 else 0
     sub_category_label = _get_sub_category_label(_first_sub_category)
     title_lang = searchLang or sourceLangCode
-    title = _get_text_map_content_with_fallback(_first_title_hash, title_lang, [sourceLangCode])
+    title = _get_entity_title_with_fallback(source_type, _first_title_hash, title_lang, [sourceLangCode])
     if not title:
         title = str(entity_id)
 
@@ -3866,9 +3953,8 @@ def getEntityTexts(sourceTypeCode: int, entityId: int, searchLang: int | None = 
     for row in rows:
         text_hash, title_hash, extra = row[0], row[1], row[2]
         field_code = extra & 0xFF
-        gender_code = (extra >> 8) & 0xFF
-        if source_type in ("costume", "suit") and extra in (1, 2):
-            gender_code = extra
+        gender_code = _extract_entity_gender_code(source_type, extra)
+        if source_type in ("costume", "suit") and extra in (1, 2, 3):
             field_code = 1
 
         if source_type in ("costume", "suit", "dressing"):
@@ -3884,14 +3970,14 @@ def getEntityTexts(sourceTypeCode: int, entityId: int, searchLang: int | None = 
             }
             field_label = field_label_map.get(field_code, "描述")
 
-        subtitle = f"{source_label} {entity_id}"
-        if gender_code in (1, 2):
-            subtitle = subtitle + (" · 男" if gender_code == 1 else " · 女")
+        subtitle = _append_entity_gender_subtitle(f"{source_label} {entity_id}", gender_code)
+        entry_title = _get_entity_title_with_fallback(source_type, title_hash, title_lang, [sourceLangCode])
 
         text_obj = queryTextHashInfo(int(text_hash), langs, sourceLangCode, queryOrigin=True)
         if not text_obj or not text_obj.get("translates"):
             continue
         entries.append({
+            "entryTitle": entry_title,
             "fieldLabel": field_label,
             "subtitle": subtitle,
             "textHash": int(text_hash),
@@ -3900,7 +3986,18 @@ def getEntityTexts(sourceTypeCode: int, entityId: int, searchLang: int | None = 
         })
 
     has_direct_text_entries = len(entries) > 0
-    entries.extend(_collect_entity_readable_entries(source_type, entity_id, _first_title_hash, f"{source_label} {entity_id}", langs, sourceLangCode, _first_sub_category))
+    entries.extend(
+        _collect_entity_readable_entries(
+            source_type,
+            entity_id,
+            _first_title_hash,
+            f"{source_label} {entity_id}",
+            langs,
+            title_lang,
+            sourceLangCode,
+            _first_sub_category,
+        )
+    )
     missing_body = not has_direct_text_entries and len(entries) == 0
 
     return {

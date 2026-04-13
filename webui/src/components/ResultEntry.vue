@@ -11,6 +11,7 @@ const UI_TEXT = Object.freeze({
     copied: "已复制",
     copyFailed: "复制失败",
     unknown: "未知",
+    textHash: "Text Hash",
     created: "✦ 创建",
     updated: "↻ 更新",
     source: "来源",
@@ -30,6 +31,8 @@ const onVoicePlay = (voiceUrl) => {
 
 const canOpenDetail = () => {
     if (props.translateObj.disableDetail) return false;
+    const sourceType = String(primarySource.value?.sourceType || "").trim();
+    if (sourceType === "voice" || sourceType === "story") return false;
     return Boolean(
         props.translateObj.isTalk ||
         props.translateObj.isSubtitle ||
@@ -190,11 +193,27 @@ const sourceSubtitle = computed(() => {
     return String(subtitle).trim();
 });
 
+const resolveDisplayHash = (value) => {
+    if (typeof value === "bigint") {
+        return value > 0n ? value.toString() : "";
+    }
+    if (typeof value === "number") {
+        if (!Number.isInteger(value) || value <= 0) return "";
+        return String(value);
+    }
+    if (typeof value === "string") {
+        const normalized = value.trim();
+        return /^[1-9]\d*$/.test(normalized) ? normalized : "";
+    }
+    return "";
+};
+
 const showSourceCount = computed(() => sourceCount.value > 1);
 const showSourcePanel = computed(() => {
     const sourceType = String(primarySource.value?.sourceType || "").trim();
     return Boolean(primarySource.value) && sourceType !== "unknown";
 });
+const displayTextHash = computed(() => resolveDisplayHash(props.translateObj?.hash));
 
 const openSourceDetail = () => {
     const detail = primarySource.value?.detailQuery;
@@ -308,6 +327,10 @@ const showUpdatedVersionTag = () => {
                 </button>
                 <span v-if="showSourceCount" class="sourceCount">{{ sourceCount }} 个来源</span>
             </div>
+        </div>
+
+        <div v-if="displayTextHash" class="entryMetaRow">
+            <span class="hashTag">{{ UI_TEXT.textHash }}: {{ displayTextHash }}</span>
         </div>
 
         <div class="translate" v-for="(translate, translateKey) in props.translateObj.translates" :key="translateKey">
@@ -614,6 +637,28 @@ const showUpdatedVersionTag = () => {
     background: rgba(47, 105, 101, 0.06);
 }
 
+.entryMetaRow {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    margin: 0 0 8px 8px;
+}
+
+.hashTag {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    min-height: 28px;
+    padding: 0 11px;
+    border-radius: 999px;
+    font-size: 12px;
+    font-weight: 500;
+    line-height: 1.2;
+    border: 1px solid rgba(183, 140, 79, 0.28);
+    color: var(--theme-accent);
+    background: rgba(183, 140, 79, 0.08);
+}
+
 .versionTags {
     display: flex;
     gap: 8px;
@@ -703,6 +748,11 @@ const showUpdatedVersionTag = () => {
 }
 [data-theme="dark"] .sourceCount {
     background: rgba(74, 154, 149, 0.08);
+}
+[data-theme="dark"] .hashTag {
+    border-color: rgba(212, 168, 98, 0.26);
+    background: rgba(212, 168, 98, 0.1);
+    color: #d2b07d;
 }
 [data-theme="dark"] .sourceType {
     background: rgba(183, 140, 79, 0.18);

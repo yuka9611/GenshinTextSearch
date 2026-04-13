@@ -10,6 +10,7 @@ const uiText = {
   pageTitle: '来源详情',
   back: '返回',
   entityId: 'ID',
+  textHash: 'Text Hash',
   language: '显示语言',
   empty: '未找到条目来源数据（可能需要更新数据库）',
 }
@@ -65,6 +66,33 @@ const resolveDisplayText = (textObj) => {
   const keys = Object.keys(textObj.translates)
   if (keys.length === 0) return ''
   return textObj.translates[keys[0]] || ''
+}
+
+const normalizeDisplayHash = (value) => {
+  if (typeof value === 'bigint') {
+    return value > 0n ? value.toString() : ''
+  }
+  if (typeof value === 'number') {
+    if (!Number.isInteger(value) || value <= 0) return ''
+    return String(value)
+  }
+  if (typeof value === 'string') {
+    const normalized = value.trim()
+    return /^[1-9]\d*$/.test(normalized) ? normalized : ''
+  }
+  return ''
+}
+
+const resolveEntryTextHash = (entry) => {
+  if (!entry || typeof entry !== 'object') return ''
+  return normalizeDisplayHash(entry.textHash) || normalizeDisplayHash(entry.text?.hash)
+}
+
+const resolveEntryTitle = (entry) => {
+  if (!entry || typeof entry !== 'object') return ''
+  const value = entry.entryTitle
+  if (value === undefined || value === null) return ''
+  return String(value).trim()
 }
 
 const loadEntity = async () => {
@@ -145,6 +173,10 @@ watch(selectedInputLanguage, async () => {
         <div class="entityCardHeader">
           <div class="entityCardTitle">
             <el-tag size="small" effect="plain">{{ entry.fieldLabel }}</el-tag>
+            <el-tag v-if="resolveEntryTextHash(entry)" size="small" effect="plain" type="info">
+              {{ uiText.textHash }}: {{ resolveEntryTextHash(entry) }}
+            </el-tag>
+            <span v-if="resolveEntryTitle(entry)" class="entityCardName">{{ resolveEntryTitle(entry) }}</span>
             <span class="entityCardSubtitle">{{ entry.subtitle }}</span>
           </div>
         </div>
@@ -242,6 +274,12 @@ watch(selectedInputLanguage, async () => {
 .entityCardSubtitle {
   color: var(--theme-text-muted);
   font-size: 13px;
+}
+
+.entityCardName {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--theme-text);
 }
 
 .entityCardBody :deep(p) {

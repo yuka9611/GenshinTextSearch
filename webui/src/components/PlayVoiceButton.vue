@@ -25,6 +25,11 @@ const props = defineProps({
         type: String,
         default: "未找到语音文件",
     },
+    size: {
+        type: String,
+        default: "default",
+        validator: (value) => ["default", "small"].includes(value),
+    },
 });
 const emit = defineEmits(["onVoicePlay"]);
 
@@ -89,7 +94,7 @@ defineExpose({ getAudioUrl, scrollTo });
         <span
             ref="icon"
             class="voiceButtonWrapper"
-            :class="{ isDisabled: disabled }"
+            :class="{ isDisabled: disabled, isSmall: size === 'small' }"
             role="button"
             @click="playVoice"
         >
@@ -106,12 +111,13 @@ defineExpose({ getAudioUrl, scrollTo });
     width: 32px;
     height: 32px;
     border-radius: 50%;
-    background: transparent;
-    border: 1px solid rgba(190, 164, 124, 0.32);
-    color: var(--theme-primary);
+    background: var(--voice-button-bg);
+    border: 1px solid var(--voice-button-border);
+    color: var(--voice-button-color);
     cursor: pointer;
     position: relative;
     overflow: hidden;
+    box-shadow: var(--voice-button-shadow);
     transition: transform 0.15s ease, background-color 0.15s ease, border-color 0.15s ease, color 0.15s ease, box-shadow 0.15s ease;
 }
 
@@ -130,7 +136,7 @@ defineExpose({ getAudioUrl, scrollTo });
     position: absolute;
     inset: 0;
     border-radius: 50%;
-    background: rgba(255, 255, 255, 0.3);
+    background: var(--voice-button-ripple);
     transform: scale(0);
     transition: transform 0.4s ease;
 }
@@ -141,15 +147,25 @@ defineExpose({ getAudioUrl, scrollTo });
 }
 
 .voiceButtonWrapper:not(.isDisabled):hover {
-    background: var(--theme-primary);
-    border-color: var(--theme-primary);
-    color: #fff;
-    box-shadow: 0 4px 14px rgba(47, 105, 101, 0.25);
-    transform: translateY(-1px);
+    background: var(--voice-button-hover-bg);
+    border-color: var(--voice-button-hover-border);
+    color: var(--voice-button-hover-color);
+    box-shadow: var(--voice-button-hover-shadow);
+    transform: scale(1.08);
+}
+
+.voiceButtonWrapper.isSmall {
+    width: 28px;
+    height: 28px;
+}
+
+.voiceButtonWrapper.isSmall .fi {
+    font-size: 11px;
 }
 
 .voiceButtonWrapper.isDisabled {
-    opacity: 0.35;
+    opacity: 0.45;
     cursor: not-allowed;
+    box-shadow: none;
 }
 </style>

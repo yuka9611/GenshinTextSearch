@@ -524,13 +524,27 @@ def _iter_furniture_mappings(rows: list[dict[str, Any]]):
 
 
 def _gender_code(body_types: Any) -> int:
-    if not isinstance(body_types, list):
+    if isinstance(body_types, str):
+        body_types = [body_types]
+    if not isinstance(body_types, (list, tuple, set)):
         return 0
-    if "BODY_BOY" in body_types:
+    body_type_set = {str(body_type).strip() for body_type in body_types if body_type}
+    has_boy = "BODY_BOY" in body_type_set
+    has_girl = "BODY_GIRL" in body_type_set
+    if has_boy and has_girl:
+        return 3
+    if has_boy:
         return 1
-    if "BODY_GIRL" in body_types:
+    if has_girl:
         return 2
     return 0
+
+
+def _get_body_types(row: dict[str, Any]) -> Any:
+    for key in ("BKBPADANEOC", "IAHOEKGIPPJ"):
+        if key in row:
+            return row.get(key)
+    return None
 
 
 def _pack_extra(field_code: int, gender_code: int = 0) -> int:
@@ -548,7 +562,7 @@ def _iter_costume_mappings(rows: list[dict[str, Any]]):
         text_hash = _as_nonzero_int(row.get("descriptionTextMapHash"))
         if costume_id is None or title_hash is None or text_hash is None:
             continue
-        gender = _gender_code(row.get("BKBPADANEOC"))
+        gender = _gender_code(_get_body_types(row))
         yield (
             text_hash,
             SOURCE_TYPE_COSTUME,
@@ -566,7 +580,7 @@ def _iter_suit_mappings(rows: list[dict[str, Any]]):
         text_hash = _as_nonzero_int(row.get("descriptionTextMapHash"))
         if suit_id is None or title_hash is None or text_hash is None:
             continue
-        gender = _gender_code(row.get("BKBPADANEOC"))
+        gender = _gender_code(_get_body_types(row))
         yield (
             text_hash,
             SOURCE_TYPE_COSTUME,
