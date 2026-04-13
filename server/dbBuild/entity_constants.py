@@ -31,6 +31,10 @@ SOURCE_TYPE_ACHIEVEMENT = 23    # 成就
 SOURCE_TYPE_VIEWPOINT = 24      # 观景点
 SOURCE_TYPE_DUNGEON = 25        # 秘境
 SOURCE_TYPE_LOADING_TIP = 26    # 过场提示
+SOURCE_TYPE_QIANXING_EMOJI = 27  # 千星奇域表情
+SOURCE_TYPE_QIANXING_POSE = 28   # 千星奇域动作
+SOURCE_TYPE_QIANXING_EFFECT = 29 # 千星奇域特效
+SOURCE_TYPE_QIANXING_HALL = 30  # 千星奇域大厅设施
 
 # ── 字段编码 ──────────────────────────────────────────────────────
 FIELD_DESC = 1
@@ -72,6 +76,10 @@ SUB_BGM = 27                # 旋曜玉帛
 SUB_BREAKTHROUGH = 28       # 角色突破素材
 SUB_QIANXING_PARADOX = 29   # 奇偶装扮
 SUB_QIANXING_SUIT = 30      # 装扮套装
+SUB_QIANXING_EMOJI = 31     # 表情
+SUB_QIANXING_POSE = 32      # 动作
+SUB_QIANXING_EFFECT = 33    # 特效
+SUB_QIANXING_HALL = 34      # 大厅设施
 
 # ── materialType → (source_type_code, sub_category_code) ─────────
 MATERIAL_TYPE_TO_CATEGORY: dict[str, tuple[int, int]] = {
@@ -190,6 +198,10 @@ SUB_CATEGORY_LABELS: dict[int, str] = {
     SUB_BREAKTHROUGH: "角色突破素材",
     SUB_QIANXING_PARADOX: "奇偶装扮",
     SUB_QIANXING_SUIT: "装扮套装",
+    SUB_QIANXING_EMOJI: "表情",
+    SUB_QIANXING_POSE: "动作",
+    SUB_QIANXING_EFFECT: "特效",
+    SUB_QIANXING_HALL: "大厅设施",
 }
 
 # ── 内置大分类标签 ─────────────────────────────────────────────────
@@ -218,6 +230,10 @@ SOURCE_TYPE_LABELS: dict[int, str] = {
     SOURCE_TYPE_VIEWPOINT: "观景点",
     SOURCE_TYPE_DUNGEON: "秘境",
     SOURCE_TYPE_LOADING_TIP: "过场提示",
+    SOURCE_TYPE_QIANXING_EMOJI: "千星奇域",
+    SOURCE_TYPE_QIANXING_POSE: "千星奇域",
+    SOURCE_TYPE_QIANXING_EFFECT: "千星奇域",
+    SOURCE_TYPE_QIANXING_HALL: "千星奇域",
 }
 
 

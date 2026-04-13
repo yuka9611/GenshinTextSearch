@@ -13,6 +13,10 @@ const uiText = {
   textHash: 'Text Hash',
   language: '显示语言',
   empty: '未找到条目来源数据（可能需要更新数据库）',
+  copy: '复制',
+  copied: '已复制',
+  noTextToCopy: '没有可复制的文本',
+  copyFailed: '复制失败，请手动选择文本',
 }
 
 const route = useRoute()
@@ -68,6 +72,46 @@ const resolveDisplayText = (textObj) => {
   return textObj.translates[keys[0]] || ''
 }
 
+const normalizeCopyText = (text) => {
+  if (!text) return ''
+  const normalized = text.replace(/\\n/g, '\n')
+  return normalized.replace(/\r\n/g, '\n').replace(/\r/g, '\n').trim()
+}
+
+const isCopyableText = (text) => {
+  return Boolean(normalizeCopyText(text))
+}
+
+const copyToClipboard = async (text) => {
+  const normalized = normalizeCopyText(text)
+  if (!normalized) {
+    ElMessage.warning(uiText.noTextToCopy)
+    return
+  }
+
+  try {
+    if (navigator.clipboard?.writeText) {
+      await navigator.clipboard.writeText(normalized)
+      ElMessage.success(uiText.copied)
+      return
+    }
+
+    const textarea = document.createElement('textarea')
+    textarea.value = normalized
+    textarea.setAttribute('readonly', '')
+    textarea.style.position = 'absolute'
+    textarea.style.left = '-9999px'
+    document.body.appendChild(textarea)
+    textarea.select()
+    document.execCommand('copy')
+    document.body.removeChild(textarea)
+    ElMessage.success(uiText.copied)
+  } catch (error) {
+    console.error(error)
+    ElMessage.error(uiText.copyFailed)
+  }
+}
+
 const normalizeDisplayHash = (value) => {
   if (typeof value === 'bigint') {
     return value > 0n ? value.toString() : ''
@@ -86,13 +130,6 @@ const normalizeDisplayHash = (value) => {
 const resolveEntryTextHash = (entry) => {
   if (!entry || typeof entry !== 'object') return ''
   return normalizeDisplayHash(entry.textHash) || normalizeDisplayHash(entry.text?.hash)
-}
-
-const resolveEntryTitle = (entry) => {
-  if (!entry || typeof entry !== 'object') return ''
-  const value = entry.entryTitle
-  if (value === undefined || value === null) return ''
-  return String(value).trim()
 }
 
 const loadEntity = async () => {
@@ -176,9 +213,16 @@ watch(selectedInputLanguage, async () => {
             <el-tag v-if="resolveEntryTextHash(entry)" size="small" effect="plain" type="info">
               {{ uiText.textHash }}: {{ resolveEntryTextHash(entry) }}
             </el-tag>
-            <span v-if="resolveEntryTitle(entry)" class="entityCardName">{{ resolveEntryTitle(entry) }}</span>
-            <span class="entityCardSubtitle">{{ entry.subtitle }}</span>
           </div>
+          <button
+            v-if="isCopyableText(resolveDisplayText(entry.text))"
+            type="button"
+            class="copyButton"
+            :title="uiText.copy"
+            @click="copyToClipboard(resolveDisplayText(entry.text))"
+          >
+            <i class="fi fi-rr-copy"></i>
+          </button>
         </div>
         <div class="entityCardBody">
           <StylizedText :text="resolveDisplayText(entry.text)" :keyword="keyword" />
@@ -271,15 +315,47 @@ watch(selectedInputLanguage, async () => {
   min-width: 0;
 }
 
-.entityCardSubtitle {
+.copyButton {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  padding: 0;
+  border-radius: 50%;
+  border: 1px solid var(--theme-border);
+  background: var(--theme-input);
   color: var(--theme-text-muted);
   font-size: 13px;
+  cursor: pointer;
+  transition: all 0.18s ease;
+  line-height: 1;
+  box-shadow: 0 4px 12px rgba(44, 57, 54, 0.06);
 }
 
-.entityCardName {
-  font-size: 14px;
-  font-weight: 600;
-  color: var(--theme-text);
+.copyButton i {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 14px;
+  height: 14px;
+  line-height: 1;
+}
+
+.copyButton:hover {
+  color: var(--theme-accent);
+  border-color: var(--theme-accent);
+  background: var(--theme-accent-soft);
+  transform: scale(1.08);
+}
+
+.copyButton:focus-visible {
+  outline: none;
+  color: var(--theme-accent);
+  border-color: var(--theme-accent);
+  background: var(--theme-accent-soft);
+  box-shadow: 0 0 0 3px rgba(var(--theme-primary-rgb), 0.18);
 }
 
 .entityCardBody :deep(p) {

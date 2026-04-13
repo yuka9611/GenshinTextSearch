@@ -100,6 +100,14 @@ class TestSourceTypeFilter:
         assert controllers._matches_source_type_filter(entry1, "costume") is True
         assert controllers._matches_source_type_filter(entry2, "costume") is True
 
+    @pytest.mark.parametrize(
+        "source_type",
+        ["qianxing_emoji", "qianxing_pose", "qianxing_effect", "qianxing_hall"],
+    )
+    def test_matches_source_type_filter_costume_supports_qianxing_internal_types(self, source_type):
+        entry = {"primarySource": {"sourceType": source_type}}
+        assert controllers._matches_source_type_filter(entry, "costume") is True
+
     def test_filter_entries_by_source_type(self):
         entries = [
             {"id": 1, "primarySource": {"sourceType": "weapon"}},
@@ -824,6 +832,109 @@ class TestCatalogEntityVersionInfo:
 
 
 class TestCatalogMeta:
+    def test_database_helper_build_source_type_join_costume_includes_qianxing_codes(self):
+        join_clause, params = controllers.databaseHelper._build_source_type_join("costume")
+
+        assert "text_source_entity" in join_clause
+        assert "IN" in join_clause
+        assert params == [5, 6, 27, 28, 29, 30]
+
+    def test_database_helper_select_catalog_category_pairs_merges_qianxing_codes(self, monkeypatch):
+        conn = sqlite3.connect(":memory:")
+        try:
+            conn.executescript(
+                """
+                CREATE TABLE text_source_entity (
+                    text_hash INTEGER NOT NULL,
+                    source_type_code INTEGER NOT NULL,
+                    entity_id INTEGER NOT NULL,
+                    title_hash INTEGER NOT NULL,
+                    extra INTEGER NOT NULL DEFAULT 0,
+                    sub_category INTEGER NOT NULL DEFAULT 0
+                );
+                """
+            )
+            conn.executemany(
+                "INSERT INTO text_source_entity(text_hash, source_type_code, entity_id, title_hash, extra, sub_category) VALUES (?, ?, ?, ?, ?, ?)",
+                [
+                    (101, 5, 260001, 201, 1, 29),
+                    (102, 6, 265001, 202, 1, 30),
+                    (103, 27, 1001, 203, 1, 31),
+                    (104, 28, 611000, 204, 1, 32),
+                    (105, 29, 2001, 205, 1, 33),
+                    (106, 30, 351101, 206, 1, 34),
+                ],
+            )
+
+            monkeypatch.setattr(controllers.databaseHelper, "conn", conn)
+
+            assert controllers.databaseHelper.selectCatalogCategoryPairs() == [
+                (5, 29),
+                (5, 30),
+                (5, 31),
+                (5, 32),
+                (5, 33),
+                (5, 34),
+            ]
+        finally:
+            conn.close()
+
+    def test_database_helper_select_catalog_entities_aggregates_qianxing_filter(self, monkeypatch):
+        conn = sqlite3.connect(":memory:")
+        try:
+            conn.executescript(
+                """
+                CREATE TABLE text_source_entity (
+                    text_hash INTEGER NOT NULL,
+                    source_type_code INTEGER NOT NULL,
+                    entity_id INTEGER NOT NULL,
+                    title_hash INTEGER NOT NULL,
+                    extra INTEGER NOT NULL DEFAULT 0,
+                    sub_category INTEGER NOT NULL DEFAULT 0
+                );
+                CREATE TABLE textMap (
+                    hash INTEGER,
+                    lang INTEGER,
+                    content TEXT
+                );
+                """
+            )
+            conn.executemany(
+                "INSERT INTO text_source_entity(text_hash, source_type_code, entity_id, title_hash, extra, sub_category) VALUES (?, ?, ?, ?, ?, ?)",
+                [
+                    (101, 5, 260001, 201, 1, 29),
+                    (102, 6, 265001, 202, 1, 30),
+                    (103, 27, 1001, 203, 1, 31),
+                    (104, 30, 351101, 204, 1, 34),
+                ],
+            )
+            conn.executemany(
+                "INSERT INTO textMap(hash, lang, content) VALUES (?, ?, ?)",
+                [
+                    (201, 1, "凝脂白"),
+                    (202, 1, "套装展示"),
+                    (203, 1, "微笑"),
+                    (204, 1, "童话剧场猫猫小屋"),
+                ],
+            )
+
+            monkeypatch.setattr(controllers.databaseHelper, "conn", conn)
+            monkeypatch.setattr(controllers.databaseHelper, "_has_version_dim", lambda: False)
+            monkeypatch.setattr(controllers.databaseHelper, "_has_version_id_columns", lambda _table_name: False)
+
+            rows = controllers.databaseHelper.selectCatalogEntities("", 1, source_type_code=5, limit=10, offset=0)
+            total = controllers.databaseHelper.countCatalogEntities("", 1, source_type_code=5)
+
+            assert total == 4
+            assert {(row[0], row[1], row[3], row[4]) for row in rows} == {
+                (260001, 5, 29, "凝脂白"),
+                (265001, 6, 30, "套装展示"),
+                (1001, 27, 31, "微笑"),
+                (351101, 30, 34, "童话剧场猫猫小屋"),
+            }
+        finally:
+            conn.close()
+
     def test_get_catalog_sub_category_groups_keeps_known_subcategories_and_other(self, monkeypatch):
         monkeypatch.setattr(
             controllers.databaseHelper,
@@ -975,4 +1086,29 @@ class TestEntityTexts:
             },
         }
         assert origin == "千星奇域: 尖齿短袖衫·海蓝"
+        assert source_count == 1
+
+    def test_build_entity_source_payload_keeps_internal_qianxing_code_for_detail_query(self, monkeypatch):
+        monkeypatch.setattr(controllers, "_get_entity_source_meta", lambda code: ("qianxing_pose", "千星奇域"))
+        monkeypatch.setattr(controllers.config, "getSourceLanguage", lambda: 1)
+        monkeypatch.setattr(controllers, "_get_text_map_content_with_fallback", lambda *args, **kwargs: "升炼姿态")
+
+        primary, origin, source_count = controllers._build_entity_source_payload(
+            [(28, 611000, 1491722704, 513)],
+            1,
+            4282661314,
+        )
+
+        assert primary == {
+            "sourceType": "qianxing_pose",
+            "title": "升炼姿态",
+            "subtitle": "千星奇域 611000 · 女",
+            "detailQuery": {
+                "kind": "entity",
+                "sourceTypeCode": 28,
+                "entityId": 611000,
+                "textHash": 4282661314,
+            },
+        }
+        assert origin == "千星奇域: 升炼姿态"
         assert source_count == 1

@@ -15,11 +15,14 @@ from entity_constants import (
     SOURCE_TYPE_MONSTER, SOURCE_TYPE_CREATURE,
     SOURCE_TYPE_DRESSING,
     SOURCE_TYPE_ACHIEVEMENT, SOURCE_TYPE_VIEWPOINT, SOURCE_TYPE_DUNGEON, SOURCE_TYPE_LOADING_TIP,
+    SOURCE_TYPE_QIANXING_EMOJI, SOURCE_TYPE_QIANXING_POSE, SOURCE_TYPE_QIANXING_EFFECT,
+    SOURCE_TYPE_QIANXING_HALL,
     # 字段
     FIELD_DESC, FIELD_EFFECT_DESC, FIELD_SPECIAL_DESC, FIELD_TYPE_DESC, FIELD_TITLE, FIELD_CODEX_DESC,
     # 二级分类
     SUB_NONE,
     SUB_COSTUME_DRESS, SUB_QIANXING_PARADOX, SUB_QIANXING_SUIT,
+    SUB_QIANXING_EMOJI, SUB_QIANXING_POSE, SUB_QIANXING_EFFECT, SUB_QIANXING_HALL,
     # 映射与标签
     MATERIAL_TYPE_TO_CATEGORY, SUB_CATEGORY_LABELS, SOURCE_TYPE_LABELS,
     # 工具函数
@@ -337,6 +340,11 @@ _ENTITY_EXCEL_FILES = [
     "HomeWorldFurnitureExcelConfigData.json",
     "BeyondCostumeExcelConfigData.json",
     "BeyondCostumeSuitExcelConfigData.json",
+    "BeyondEmojiExcelConfigData.json",
+    "BeyondPoseExcelConfigData.json",
+    "BeyondTransferEffectExcelConfigData.json",
+    "BeyondHallExcelConfigData.json",
+    "BeyondHallFacilityExcelConfigData.json",
     "AvatarCostumeExcelConfigData.json",
     "WeaponExcelConfigData.json",
     "ReliquaryExcelConfigData.json",
@@ -357,6 +365,11 @@ def _load_all_entity_data(excel_root: str) -> dict[str, Any]:
     furnitures = _load_rows(os.path.join(excel_root, "HomeWorldFurnitureExcelConfigData.json"))
     costumes = _load_rows(os.path.join(excel_root, "BeyondCostumeExcelConfigData.json"))
     suits = _load_rows(os.path.join(excel_root, "BeyondCostumeSuitExcelConfigData.json"))
+    emojis = _load_rows(os.path.join(excel_root, "BeyondEmojiExcelConfigData.json"))
+    poses = _load_rows(os.path.join(excel_root, "BeyondPoseExcelConfigData.json"))
+    effects = _load_rows(os.path.join(excel_root, "BeyondTransferEffectExcelConfigData.json"))
+    halls = _load_rows(os.path.join(excel_root, "BeyondHallExcelConfigData.json"))
+    hall_facilities = _load_rows(os.path.join(excel_root, "BeyondHallFacilityExcelConfigData.json"))
     avatar_costumes = _load_rows(os.path.join(excel_root, "AvatarCostumeExcelConfigData.json"))
     weapons = _load_rows(os.path.join(excel_root, "WeaponExcelConfigData.json"))
     reliquaries = _load_rows(os.path.join(excel_root, "ReliquaryExcelConfigData.json"))
@@ -377,6 +390,11 @@ def _load_all_entity_data(excel_root: str) -> dict[str, Any]:
         "furnitures": furnitures,
         "costumes": costumes,
         "suits": suits,
+        "emojis": emojis,
+        "poses": poses,
+        "effects": effects,
+        "halls": halls,
+        "hall_facilities": hall_facilities,
         "avatar_costumes": avatar_costumes,
         "weapons": weapons,
         "reliquaries": reliquaries,
@@ -394,7 +412,9 @@ def _print_entity_source_summary(data: dict[str, Any]):
     """Print a summary table of entity source record counts."""
     names = [
         ("materials", "材料"), ("furnitures", "家具"), ("costumes", "装扮"),
-        ("suits", "套装"), ("avatar_costumes", "角色装扮"),
+        ("suits", "套装"), ("emojis", "表情"), ("poses", "动作"),
+        ("effects", "特效"), ("halls", "大厅模板"), ("hall_facilities", "大厅设施"),
+        ("avatar_costumes", "角色装扮"),
         ("weapons", "武器"), ("reliquaries", "圣遗物"), ("codex", "图鉴"),
         ("achievements", "成就"), ("viewpoints", "观景点"), ("dungeons", "秘境"),
         ("loading_tips", "过场提示"),
@@ -415,6 +435,11 @@ def _build_rows_iter(data: dict[str, Any], overrides: dict[str, tuple[int, int]]
         _pad_sub_category(_iter_furniture_mappings(data["furnitures"])),
         _iter_costume_mappings(data["costumes"]),
         _iter_suit_mappings(data["suits"]),
+        _iter_emoji_mappings(data["emojis"]),
+        _iter_pose_mappings(data["poses"]),
+        _iter_effect_mappings(data["effects"]),
+        _iter_hall_template_mappings(data["halls"]),
+        _iter_hall_facility_mappings(data["hall_facilities"]),
         _iter_avatar_costume_mappings(data["avatar_costumes"]),
         _pad_sub_category(_iter_weapon_mappings(data["weapons"])),
         _pad_sub_category(_iter_reliquary_mappings(data["reliquaries"])),
@@ -547,6 +572,22 @@ def _get_body_types(row: dict[str, Any]) -> Any:
     return None
 
 
+def _extract_first_int(row: dict[str, Any], *keys: str) -> int | None:
+    for key in keys:
+        value = _as_nonzero_int(row.get(key))
+        if value is not None:
+            return value
+    return None
+
+
+def _extract_first_str(row: dict[str, Any], *keys: str) -> str:
+    for key in keys:
+        value = row.get(key)
+        if isinstance(value, str):
+            return value
+    return ""
+
+
 def _pack_extra(field_code: int, gender_code: int = 0) -> int:
     if field_code < 0:
         field_code = 0
@@ -588,6 +629,119 @@ def _iter_suit_mappings(rows: list[dict[str, Any]]):
             title_hash,
             _pack_extra(FIELD_DESC, gender),
             SUB_QIANXING_SUIT,
+        )
+
+
+def _iter_emoji_mappings(rows: list[dict[str, Any]]):
+    for row in rows:
+        emoji_id = _as_nonzero_int(row.get("id"))
+        title_hash = _as_nonzero_int(row.get("nameTextMapHash"))
+        text_hash = _as_nonzero_int(row.get("descriptionTextMapHash"))
+        if emoji_id is None or title_hash is None or text_hash is None:
+            continue
+        yield (
+            text_hash,
+            SOURCE_TYPE_QIANXING_EMOJI,
+            emoji_id,
+            title_hash,
+            _pack_extra(FIELD_DESC),
+            SUB_QIANXING_EMOJI,
+        )
+
+
+def _iter_pose_mappings(rows: list[dict[str, Any]]):
+    for row in rows:
+        pose_id = _as_nonzero_int(row.get("id"))
+        title_hash = _as_nonzero_int(row.get("nameTextMapHash"))
+        text_hash = _as_nonzero_int(row.get("descriptionTextMapHash"))
+        if pose_id is None or title_hash is None or text_hash is None:
+            continue
+        yield (
+            text_hash,
+            SOURCE_TYPE_QIANXING_POSE,
+            pose_id,
+            title_hash,
+            _pack_extra(FIELD_DESC, _gender_code(row.get("bodyType"))),
+            SUB_QIANXING_POSE,
+        )
+
+
+def _iter_effect_mappings(rows: list[dict[str, Any]]):
+    for row in rows:
+        effect_id = _as_nonzero_int(row.get("id"))
+        title_hash = _as_nonzero_int(row.get("nameTextMapHash"))
+        text_hash = _as_nonzero_int(row.get("descriptionTextMapHash"))
+        if effect_id is None or title_hash is None or text_hash is None:
+            continue
+        yield (
+            text_hash,
+            SOURCE_TYPE_QIANXING_EFFECT,
+            effect_id,
+            title_hash,
+            _pack_extra(FIELD_DESC),
+            SUB_QIANXING_EFFECT,
+        )
+
+
+def _get_hall_style_id(row: dict[str, Any]) -> int | None:
+    return _extract_first_int(row, "COGKFPLDLLL", "DCOBMNILGJL")
+
+
+def _get_hall_name_text_hash(row: dict[str, Any]) -> int | None:
+    return _extract_first_int(row, "LDCAAIEKMOE", "KMMKMJLOFGC")
+
+
+def _get_hall_desc_text_hash(row: dict[str, Any]) -> int | None:
+    return _extract_first_int(row, "BPKNEMEJEPF", "DKBHBHOOGAP")
+
+
+def _is_public_hall(row: dict[str, Any]) -> bool:
+    hall_type = _extract_first_str(row, "PEMNJBEBBOG", "BMIILBDKBIO")
+    return hall_type == "BEYOND_HALL_PUBLIC"
+
+
+def _get_hall_facility_style_id(row: dict[str, Any]) -> int | None:
+    return _extract_first_int(
+        row,
+        "OJGEAGGJALA", "DGBOKBNOJKE", "LGGBFCPPBBJ",
+        "OEFKFFGKKKP", "DOPFMOKHIIC", "JPGMJHBCOGK",
+    )
+
+
+def _iter_hall_template_mappings(rows: list[dict[str, Any]]):
+    for row in rows:
+        if _is_public_hall(row):
+            continue
+        hall_style_id = _get_hall_style_id(row)
+        title_hash = _get_hall_name_text_hash(row)
+        text_hash = _get_hall_desc_text_hash(row)
+        if hall_style_id is None or title_hash is None or text_hash is None:
+            continue
+        yield (
+            text_hash,
+            SOURCE_TYPE_QIANXING_HALL,
+            hall_style_id,
+            title_hash,
+            _pack_extra(FIELD_DESC),
+            SUB_QIANXING_HALL,
+        )
+
+
+def _iter_hall_facility_mappings(rows: list[dict[str, Any]]):
+    for row in rows:
+        facility_id = _as_nonzero_int(row.get("id"))
+        title_hash = _as_nonzero_int(row.get("nameTextMapHash"))
+        text_hash = _as_nonzero_int(row.get("descTextMapHash"))
+        style_id = _get_hall_facility_style_id(row)
+        if facility_id is None or title_hash is None or text_hash is None or style_id is None:
+            continue
+        yield (
+            text_hash,
+            SOURCE_TYPE_QIANXING_HALL,
+            facility_id,
+            title_hash,
+            _pack_extra(FIELD_DESC),
+            SUB_QIANXING_HALL,
         )
 
 

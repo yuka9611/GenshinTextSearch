@@ -406,7 +406,7 @@ def _matches_source_type_filter(entry: dict, source_type_filter: str | None) -> 
     primary_source = entry.get("primarySource") or {}
     source_type = str(primary_source.get("sourceType") or "").strip().lower()
     if normalized_filter == "costume":
-        return source_type in {"costume", "suit"}
+        return source_type in _QIANXING_SOURCE_TYPES
     return source_type == normalized_filter
 
 
@@ -481,7 +481,20 @@ _ENTITY_SOURCE_META = {
     24: ("viewpoint", "观景点"),
     25: ("dungeon", "秘境"),
     26: ("loading_tip", "过场提示"),
+    27: ("qianxing_emoji", "千星奇域"),
+    28: ("qianxing_pose", "千星奇域"),
+    29: ("qianxing_effect", "千星奇域"),
+    30: ("qianxing_hall", "千星奇域"),
 }
+
+_QIANXING_SOURCE_TYPES = frozenset({
+    "costume",
+    "suit",
+    "qianxing_emoji",
+    "qianxing_pose",
+    "qianxing_effect",
+    "qianxing_hall",
+})
 
 _ENTITY_SOURCE_PRIORITY = {
     2: 1,
@@ -496,18 +509,22 @@ _ENTITY_SOURCE_PRIORITY = {
     20: 10,
     3: 11,
     5: 12,
-    6: 15,
-    9: 16,
-    10: 17,
-    11: 18,
-    12: 19,
-    23: 20,
-    24: 21,
-    25: 22,
-    26: 23,
-    21: 24,
-    4: 25,
-    1: 26,
+    27: 13,
+    28: 14,
+    29: 15,
+    30: 16,
+    6: 17,
+    9: 18,
+    10: 19,
+    11: 20,
+    12: 21,
+    23: 22,
+    24: 23,
+    25: 24,
+    26: 25,
+    21: 26,
+    4: 27,
+    1: 28,
 }
 
 
@@ -568,6 +585,10 @@ _SUB_CATEGORY_LABELS: dict[int, str] = {
     28: "角色突破素材",
     29: "奇偶装扮",
     30: "装扮套装",
+    31: "表情",
+    32: "动作",
+    33: "特效",
+    34: "大厅设施",
 }
 
 _CATALOG_OTHER_SUB_CATEGORY_CODE = "0"
@@ -1168,8 +1189,12 @@ def _get_entity_title_with_fallback(
     return None
 
 
+def _is_qianxing_source_type(source_type: str) -> bool:
+    return source_type in _QIANXING_SOURCE_TYPES
+
+
 def _extract_entity_gender_code(source_type: str, extra: int) -> int:
-    if source_type not in ("costume", "suit"):
+    if source_type not in ("costume", "suit", "qianxing_pose"):
         return 0
     if extra in (1, 2, 3):
         return extra
@@ -3957,7 +3982,7 @@ def getEntityTexts(sourceTypeCode: int, entityId: int, searchLang: int | None = 
         if source_type in ("costume", "suit") and extra in (1, 2, 3):
             field_code = 1
 
-        if source_type in ("costume", "suit", "dressing"):
+        if _is_qianxing_source_type(source_type) or source_type == "dressing":
             field_label = "介绍"
         else:
             field_label_map = {

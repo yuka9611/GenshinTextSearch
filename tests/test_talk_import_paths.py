@@ -145,6 +145,20 @@ def test_diff_update_analyze_diff_tracks_talk_paths_with_forward_slashes():
     assert plan["talk_changed"] == {"Quest/foo.json"}
 
 
+def test_diff_update_analyze_diff_marks_new_qianxing_entity_excels():
+    plan = diffUpdate._analyze_diff(
+        [
+            {"action": "M", "old_path": None, "new_path": "ExcelBinOutput/BeyondEmojiExcelConfigData.json"},
+            {"action": "M", "old_path": None, "new_path": "ExcelBinOutput/BeyondPoseExcelConfigData.json"},
+            {"action": "M", "old_path": None, "new_path": "ExcelBinOutput/BeyondTransferEffectExcelConfigData.json"},
+            {"action": "M", "old_path": None, "new_path": "ExcelBinOutput/BeyondHallExcelConfigData.json"},
+            {"action": "M", "old_path": None, "new_path": "ExcelBinOutput/BeyondHallFacilityExcelConfigData.json"},
+        ]
+    )
+
+    assert plan["entity_sources"] is True
+
+
 def test_diff_update_resolve_talk_keys_supports_aadkdkpmgno_schema():
     obj = {
         "AADKDKPMGNO": 7008901,

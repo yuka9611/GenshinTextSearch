@@ -2187,6 +2187,7 @@ def countTextMapFromKeyword(
 _SOURCE_TYPE_TO_ENTITY_CODE = {
     "item": 1, "food": 2, "furnishing": 3, "gadget": 4,
     "costume": 5, "suit": 6,
+    "qianxing_emoji": 27, "qianxing_pose": 28, "qianxing_effect": 29, "qianxing_hall": 30,
     "weapon": 9, "reliquary": 10, "monster": 11, "creature": 12,
     "material": 13,
     "blueprint": 14, "gcg": 15, "namecard": 16, "performance": 17,
@@ -2194,6 +2195,35 @@ _SOURCE_TYPE_TO_ENTITY_CODE = {
     "avatar_mat": 22, "achievement": 23, "viewpoint": 24, "dungeon": 25,
     "loading_tip": 26,
 }
+
+_QIANXING_SOURCE_TYPE_CODES: tuple[int, ...] = (5, 6, 27, 28, 29, 30)
+_QIANXING_DISPLAY_SOURCE_TYPE_CODE = 5
+
+
+def _expand_qianxing_source_type_codes(source_type_code: int | None) -> tuple[int, ...] | None:
+    if source_type_code is None:
+        return None
+    try:
+        normalized = int(source_type_code)
+    except (TypeError, ValueError):
+        return None
+    if normalized == _QIANXING_DISPLAY_SOURCE_TYPE_CODE:
+        return _QIANXING_SOURCE_TYPE_CODES
+    return (normalized,)
+
+
+def _display_catalog_source_type_code(source_type_code: int) -> int:
+    if int(source_type_code) in _QIANXING_SOURCE_TYPE_CODES:
+        return _QIANXING_DISPLAY_SOURCE_TYPE_CODE
+    return int(source_type_code)
+
+
+def _build_entity_source_join_clause(source_codes: tuple[int, ...]) -> tuple[str, list]:
+    placeholders = ",".join("?" for _ in source_codes)
+    return (
+        f"JOIN text_source_entity _sj ON _sj.text_hash = tm.hash AND _sj.source_type_code IN ({placeholders}) ",
+        list(source_codes),
+    )
 
 
 def _build_source_type_join(source_type: str) -> tuple[str, list]:
@@ -2218,13 +2248,15 @@ def _build_source_type_join(source_type: str) -> tuple[str, list]:
         )
     elif source_type == "quest":
         return "JOIN quest_hash_map _sj ON _sj.hash = tm.hash ", []
+    elif source_type == "costume":
+        return _build_entity_source_join_clause(_QIANXING_SOURCE_TYPE_CODES)
     elif source_type in _SOURCE_TYPE_TO_ENTITY_CODE:
         code = _SOURCE_TYPE_TO_ENTITY_CODE[source_type]
-        return "JOIN text_source_entity _sj ON _sj.text_hash = tm.hash AND _sj.source_type_code = ? ", [code]
+        return _build_entity_source_join_clause((code,))
     elif source_type.startswith("custom_"):
         try:
             code = int(source_type[len("custom_"):])
-            return "JOIN text_source_entity _sj ON _sj.text_hash = tm.hash AND _sj.source_type_code = ? ", [code]
+            return _build_entity_source_join_clause((code,))
         except ValueError:
             pass
     return "", []
@@ -2801,9 +2833,11 @@ def _build_catalog_entity_base_query(
         sql += "AND (tm_title.content LIKE ? ESCAPE '\\' OR tm_title.content LIKE ? ESCAPE '\\') "
         params.extend([exact, fuzzy])
 
-    if source_type_code is not None:
-        sql += "AND e.source_type_code = ? "
-        params.append(int(source_type_code))
+    source_type_codes = _expand_qianxing_source_type_codes(source_type_code)
+    if source_type_codes:
+        placeholders = ",".join("?" for _ in source_type_codes)
+        sql += f"AND e.source_type_code IN ({placeholders}) "
+        params.extend(source_type_codes)
     if sub_category is not None:
         sql += "AND e.sub_category = ? "
         params.append(int(sub_category))
@@ -2971,10 +3005,15 @@ def selectCatalogCategoryPairs() -> list[tuple[int, int]]:
         except Exception:
             return []
     result: list[tuple[int, int]] = []
+    seen_pairs: set[tuple[int, int]] = set()
     for row in rows:
         if not row or row[0] is None:
             continue
-        result.append((int(row[0]), int(row[1] or 0)))
+        pair = (_display_catalog_source_type_code(int(row[0])), int(row[1] or 0))
+        if pair in seen_pairs:
+            continue
+        seen_pairs.add(pair)
+        result.append(pair)
     return result
 
 
