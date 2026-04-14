@@ -608,6 +608,9 @@ class _EntityReadableLookup(TypedDict):
     reliquary_set_to_id: dict[int, int]
     reliquary_set_piece_to_id: dict[tuple[int, int], int]
     book_material_ids: set[int]
+    item_readable_ids_by_item_id: dict[int, list[int]]
+    item_ids_by_readable_id: dict[int, int]
+    item_ids_by_title_hash: dict[int, int]
 
 
 @lru_cache(maxsize=1)
@@ -636,6 +639,9 @@ def _load_entity_readable_lookup() -> _EntityReadableLookup:
             "reliquary_set_to_id": {},
             "reliquary_set_piece_to_id": {},
             "book_material_ids": set(),
+            "item_readable_ids_by_item_id": {},
+            "item_ids_by_readable_id": {},
+            "item_ids_by_title_hash": {},
         }
 
     excel_root = os.path.join(data_root, "ExcelBinOutput")
@@ -678,11 +684,50 @@ def _load_entity_readable_lookup() -> _EntityReadableLookup:
         if piece_no:
             reliquary_set_piece_to_id.setdefault((set_id, piece_no), reliquary_id)
 
+    material_ids = {
+        int(row["id"])
+        for row in _load_rows("MaterialExcelConfigData.json")
+        if isinstance(row.get("id"), int) and row.get("id")
+    }
+    readable_localization_ids: set[int] = set()
+    for row in _load_rows("LocalizationExcelConfigData.json"):
+        loc_id = row.get("id")
+        if not isinstance(loc_id, int) or not loc_id:
+            continue
+        if any(isinstance(value, str) and "Readable" in value for value in row.values()):
+            readable_localization_ids.add(loc_id)
+
+    item_readable_ids_by_item_id: dict[int, list[int]] = {}
+    item_ids_by_readable_id: dict[int, int] = {}
+    item_ids_by_title_hash: dict[int, int] = {}
+    for row in _load_rows("DocumentExcelConfigData.json"):
+        if str(row.get("documentType") or "").strip() != "Book":
+            continue
+        item_id = row.get("id")
+        if not isinstance(item_id, int) or not item_id or item_id not in material_ids:
+            continue
+        title_hash = row.get("titleTextMapHash")
+        readable_ids: list[int] = []
+        for loc_id in row.get("questIDList", []):
+            if not isinstance(loc_id, int) or loc_id not in readable_localization_ids:
+                continue
+            readable_ids.append(loc_id)
+            item_ids_by_readable_id.setdefault(loc_id, item_id)
+        if not readable_ids:
+            continue
+        deduped_readable_ids = sorted(set(readable_ids))
+        item_readable_ids_by_item_id[item_id] = deduped_readable_ids
+        if isinstance(title_hash, int) and title_hash:
+            item_ids_by_title_hash.setdefault(title_hash, item_id)
+
     return {
         "outfit_item_to_skin": outfit_item_to_skin,
         "reliquary_set_to_id": reliquary_set_to_id,
         "reliquary_set_piece_to_id": reliquary_set_piece_to_id,
         "book_material_ids": _build_book_material_ids(_load_rows("BooksCodexExcelConfigData.json")),
+        "item_readable_ids_by_item_id": item_readable_ids_by_item_id,
+        "item_ids_by_readable_id": item_ids_by_readable_id,
+        "item_ids_by_title_hash": item_ids_by_title_hash,
     }
 
 
@@ -765,6 +810,33 @@ def _get_entity_readable_category_filters(source_type: str) -> list[str]:
     return mapping.get(source_type, [])
 
 
+def _is_item_linked_readable(readable_id: int | None = None, title_text_hash: int | None = None) -> bool:
+    lookup = _load_entity_readable_lookup()
+    if readable_id is not None and int(readable_id) in lookup.get("item_ids_by_readable_id", {}):
+        return True
+    if title_text_hash is not None and int(title_text_hash) in lookup.get("item_ids_by_title_hash", {}):
+        return True
+    return False
+
+
+def _resolve_item_readable_refs(item_id: int) -> list[tuple[str, int | None, int | None]]:
+    lookup = _load_entity_readable_lookup()
+    refs: list[tuple[str, int | None, int | None]] = []
+    for readable_id in lookup.get("item_readable_ids_by_item_id", {}).get(int(item_id), []):
+        readable_info = databaseHelper.getReadableInfo(int(readable_id), None)
+        if not readable_info:
+            continue
+        file_name, title_text_hash, resolved_readable_id = readable_info
+        refs.append(
+            (
+                str(file_name),
+                int(title_text_hash) if title_text_hash is not None else None,
+                int(resolved_readable_id) if resolved_readable_id is not None else int(readable_id),
+            )
+        )
+    return refs
+
+
 def _build_entity_readable_entry(
     file_name: str,
     title_text_hash: int | None,
@@ -796,6 +868,7 @@ def _build_entity_readable_entry(
     created_raw, updated_raw = databaseHelper.getReadableVersionInfo(readable_id, file_name)
     readable_hash = int(title_text_hash or 0)
     entry_title = _get_text_map_content_with_fallback(title_text_hash, preferred_lang_code, [source_lang_code])
+    readable_category_fields = _build_readable_category_fields(file_name, title_text_hash, readable_id)
     return {
         "entryTitle": entry_title,
         "fieldLabel": field_label,
@@ -804,6 +877,7 @@ def _build_entity_readable_entry(
         "titleHash": readable_hash,
         "readableId": readable_id,
         "fileName": file_name,
+        **readable_category_fields,
         "detailQuery": {
             "kind": "readable",
             "readableId": readable_id,
@@ -854,6 +928,9 @@ def _collect_entity_readable_entries(
     for prefix in prefix_map.get(source_type, []):
         refs.extend(databaseHelper.selectReadableRefsByFileNamePrefix(prefix))
 
+    if source_type == "item":
+        refs.extend(_resolve_item_readable_refs(entity_id))
+
     category_filters = _get_entity_readable_category_filters(source_type)
     if title_text_hash:
         for category in category_filters:
@@ -863,10 +940,7 @@ def _collect_entity_readable_entries(
 
     seen_keys: set[int | str] = set()
     entries: list[dict] = []
-    if source_type in {"costume", "suit", "dressing", "weapon", "reliquary"}:
-        field_label = "故事"
-    else:
-        field_label = _classify_readable_label(None, title_text_hash)
+    fixed_field_label = "故事" if source_type in {"costume", "suit", "dressing", "weapon", "reliquary"} else None
 
     for file_name, readable_title_hash, readable_id in refs:
         dedupe_key: int | str
@@ -878,6 +952,7 @@ def _collect_entity_readable_entries(
             continue
         seen_keys.add(dedupe_key)
         resolved_title_hash = int(readable_title_hash or title_text_hash or 0)
+        field_label = fixed_field_label or _classify_readable_label(str(file_name), resolved_title_hash, int(readable_id) if readable_id is not None else None)
         entry = _build_entity_readable_entry(
             str(file_name),
             resolved_title_hash,
@@ -891,6 +966,178 @@ def _collect_entity_readable_entries(
         if entry is not None:
             entries.append(entry)
     return entries
+
+
+def _resolve_entity_query_langs(search_lang: int | None = None) -> tuple[list[int], int, int]:
+    langs = config.getResultLanguages().copy()
+    if search_lang and search_lang not in langs:
+        langs.append(search_lang)
+    source_lang_code = config.getSourceLanguage()
+    title_lang = search_lang if search_lang else source_lang_code
+    return langs, source_lang_code, title_lang
+
+
+def _resolve_entity_source_rows(text_hash: int) -> list[tuple[int, int, int, int]]:
+    rows = databaseHelper.selectEntitySourcesByTextHash(text_hash)
+    if rows:
+        return rows
+    return databaseHelper.selectEntitySourcesByTitleHash(text_hash)
+
+
+def _dedupe_entity_source_rows(source_rows: list[tuple[int, int, int, int]]) -> list[tuple[int, int, int, int]]:
+    deduped: list[tuple[int, int, int, int]] = []
+    seen: set[tuple[int, int]] = set()
+    for row in sorted(source_rows, key=lambda item: (_ENTITY_SOURCE_PRIORITY.get(item[0], 99), item[1], item[2], item[3])):
+        key = (int(row[0]), int(row[1]))
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append((int(row[0]), int(row[1]), int(row[2]), int(row[3] or 0)))
+    return deduped
+
+
+def _text_hash_has_displayable_text(text_hash: int, langs: list[int]) -> bool:
+    translates = databaseHelper.selectTextMapFromTextHash(int(text_hash), langs)
+    if not translates:
+        translates = databaseHelper.selectTextMapFromTextHash(int(text_hash), None)
+    return bool(translates)
+
+
+def _entity_has_displayable_entries(
+    source_type_code: int,
+    entity_id: int,
+    rows: list[tuple[int, int, int, int]] | None = None,
+    search_lang: int | None = None,
+) -> bool:
+    entity_rows = rows if rows is not None else databaseHelper.selectEntityTextHashesByEntity(source_type_code, entity_id)
+    if not entity_rows:
+        return False
+
+    langs, source_lang_code, title_lang = _resolve_entity_query_langs(search_lang)
+    for text_hash, _title_hash, _extra, _sub_category in entity_rows:
+        if _text_hash_has_displayable_text(int(text_hash), langs):
+            return True
+
+    source_type, source_label = _get_entity_source_meta(int(source_type_code))
+    first_title_hash = entity_rows[0][1]
+    first_sub_category = entity_rows[0][3] if len(entity_rows[0]) > 3 else 0
+    readable_entries = _collect_entity_readable_entries(
+        source_type,
+        int(entity_id),
+        first_title_hash,
+        f"{source_label} {entity_id}",
+        langs,
+        title_lang,
+        source_lang_code,
+        first_sub_category,
+    )
+    return bool(readable_entries)
+
+
+def _get_valid_entity_source_candidates(
+    text_hash: int,
+    search_lang: int | None = None,
+) -> list[tuple[tuple[int, int, int, int], list[tuple[int, int, int, int]]]]:
+    candidates: list[tuple[tuple[int, int, int, int], list[tuple[int, int, int, int]]]] = []
+    for source_row in _dedupe_entity_source_rows(_resolve_entity_source_rows(int(text_hash))):
+        source_type_code, entity_id, _title_hash, _extra = source_row
+        entity_rows = databaseHelper.selectEntityTextHashesByEntity(source_type_code, entity_id)
+        if not _entity_has_displayable_entries(source_type_code, entity_id, entity_rows, search_lang):
+            continue
+        candidates.append((source_row, entity_rows))
+    return candidates
+
+
+def _build_entity_detail_payload(
+    source_type_code: int,
+    entity_id: int,
+    search_lang: int | None = None,
+    rows: list[tuple[int, int, int, int]] | None = None,
+) -> dict:
+    langs, source_lang_code, title_lang = _resolve_entity_query_langs(search_lang)
+
+    entity_rows = rows if rows is not None else databaseHelper.selectEntityTextHashesByEntity(int(source_type_code), int(entity_id))
+    if not entity_rows:
+        return {
+            "sourceTypeCode": int(source_type_code),
+            "entityId": int(entity_id),
+            "title": None,
+            "entries": [],
+            "missingBody": False,
+            "emptyMessage": "",
+            **_build_version_fields(None, None),
+        }
+
+    source_type, source_label = _get_entity_source_meta(int(source_type_code))
+    first_title_hash = entity_rows[0][1]
+    first_sub_category = entity_rows[0][3] if len(entity_rows[0]) > 3 else 0
+    sub_category_label = _get_sub_category_label(first_sub_category)
+    title = _get_entity_title_with_fallback(source_type, first_title_hash, title_lang, [source_lang_code])
+    if not title:
+        title = str(entity_id)
+
+    created_raw, updated_raw = databaseHelper.getCatalogEntityVersionInfo(int(source_type_code), int(entity_id), source_lang_code)
+    entries = []
+    for text_hash, title_hash, extra, _sub_category in entity_rows:
+        field_code = extra & 0xFF
+        gender_code = _extract_entity_gender_code(source_type, extra)
+        if source_type in ("costume", "suit") and extra in (1, 2, 3):
+            field_code = 1
+
+        if _is_qianxing_source_type(source_type) or source_type == "dressing":
+            field_label = "介绍"
+        else:
+            field_label_map = {
+                1: "描述",
+                2: "效果",
+                3: "特殊",
+                4: "类型",
+                5: "标题",
+                6: "图鉴描述",
+            }
+            field_label = field_label_map.get(field_code, "描述")
+
+        subtitle = _append_entity_gender_subtitle(f"{source_label} {entity_id}", gender_code)
+        entry_title = _get_entity_title_with_fallback(source_type, title_hash, title_lang, [source_lang_code])
+        text_obj = queryTextHashInfo(int(text_hash), langs, source_lang_code, queryOrigin=False)
+        if not text_obj or not text_obj.get("translates"):
+            continue
+        entries.append({
+            "entryTitle": entry_title,
+            "fieldLabel": field_label,
+            "subtitle": subtitle,
+            "textHash": int(text_hash),
+            "titleHash": int(title_hash),
+            "text": text_obj,
+        })
+
+    has_direct_text_entries = len(entries) > 0
+    entries.extend(
+        _collect_entity_readable_entries(
+            source_type,
+            int(entity_id),
+            first_title_hash,
+            f"{source_label} {entity_id}",
+            langs,
+            title_lang,
+            source_lang_code,
+            first_sub_category,
+        )
+    )
+    missing_body = not has_direct_text_entries and len(entries) == 0
+
+    return {
+        "sourceType": source_type,
+        "sourceTypeLabel": source_label,
+        "subCategoryLabel": sub_category_label,
+        "sourceTypeCode": int(source_type_code),
+        "entityId": int(entity_id),
+        "title": title,
+        "entries": entries,
+        "missingBody": missing_body,
+        "emptyMessage": _ENTITY_EMPTY_BODY_MESSAGE if missing_body else "",
+        **_build_version_fields(created_raw, updated_raw),
+    }
 
 
 def _select_primary_source_from_text_hash(text_hash: int, lang_code: int) -> tuple[dict, str, bool, int]:
@@ -951,14 +1198,10 @@ def _select_primary_source_from_text_hash(text_hash: int, lang_code: int) -> tup
         )
         return primary, origin, False, len(quest_ids)
 
-    entity_sources = databaseHelper.selectEntitySourcesByTextHash(text_hash)
+    entity_sources = _get_valid_entity_source_candidates(text_hash, lang_code)
     if entity_sources:
-        primary, origin, source_count = _build_entity_source_payload(entity_sources, lang_code, text_hash)
-        return primary, origin, False, source_count
-
-    entity_title_sources = databaseHelper.selectEntitySourcesByTitleHash(text_hash)
-    if entity_title_sources:
-        primary, origin, source_count = _build_entity_source_payload(entity_title_sources, lang_code, text_hash)
+        primary, origin, _ = _build_entity_source_payload([entity_sources[0][0]], lang_code, text_hash)
+        source_count = len(entity_sources)
         return primary, origin, False, source_count
 
     readable_info = databaseHelper.getReadableInfoByTitleHash(text_hash)
@@ -1070,8 +1313,14 @@ def _build_quest_source_type_fields(source_type: str | None) -> dict:
     }
 
 
-def _classify_readable_label(file_name: str | None, title_text_hash: int | None = None) -> str:
+def _classify_readable_label(
+    file_name: str | None,
+    title_text_hash: int | None = None,
+    readable_id: int | None = None,
+) -> str:
     """统一阅读物分类：先按 codex（书籍/任务道具），再按文件名前缀。"""
+    if _is_item_linked_readable(readable_id, title_text_hash):
+        return "道具"
     if title_text_hash:
         lookup = _load_entity_readable_lookup()
         book_ids = lookup.get("book_material_ids", set())
@@ -1085,15 +1334,20 @@ def _classify_readable_label(file_name: str | None, title_text_hash: int | None 
                 sub_cat = sub_row[3] if len(sub_row) > 3 else 0
                 if sub_cat == 1:  # SUB_QUEST_ITEM
                     return "任务道具"
-    # 按文件名前缀分类（Book* 前缀不授予书籍标签，仅 codex 才能）
     category = databaseHelper.getReadableCategoryCode(file_name)
     label = databaseHelper.READABLE_CATEGORY_LABELS.get(category, "")
-    return label if label and label not in {"其他", "书籍"} else "阅读物"
+    if label == "书籍":
+        return "书籍"
+    return label if label and label != "其他" else "阅读物"
 
 
-def _build_readable_category_fields(file_name: str | None, title_text_hash: int | None = None) -> dict:
+def _build_readable_category_fields(
+    file_name: str | None,
+    title_text_hash: int | None = None,
+    readable_id: int | None = None,
+) -> dict:
     category = databaseHelper.getReadableCategoryCode(file_name)
-    label = _classify_readable_label(file_name, title_text_hash)
+    label = _classify_readable_label(file_name, title_text_hash, readable_id)
     return {
         "readableCategory": category,
         "readableCategoryLabel": label,
@@ -2428,7 +2682,7 @@ def _build_readable_obj(fileName, content, titleTextMapHash, readableId, created
     isSearchPhase=True 时仅返回基本信息以提高搜索性能
     """
     fileHash = zlib.crc32(fileName.encode('utf-8'))
-    readable_category_fields = _build_readable_category_fields(fileName, titleTextMapHash)
+    readable_category_fields = _build_readable_category_fields(fileName, titleTextMapHash, readableId)
     origin_label = readable_category_fields["readableCategoryLabel"]
 
     # 搜索阶段：返回最小化信息
@@ -2853,7 +3107,7 @@ def searchNameEntries(
                     "readableId": readableId,
                     "title": resolved_title or fileName,
                     "titleTextMapHash": resolved_hash,
-                    **_build_readable_category_fields(fileName),
+                    **_build_readable_category_fields(fileName, resolved_hash, readableId),
                     **_build_version_fields(created_raw, updated_raw),
                 }
                 readables.append(entry)
@@ -2885,7 +3139,7 @@ def searchNameEntries(
                     "readableId": readableId,
                     "title": resolved_title or fileName,
                     "titleTextMapHash": resolved_hash,
-                    **_build_readable_category_fields(fileName),
+                    **_build_readable_category_fields(fileName, resolved_hash, readableId),
                     **_build_version_fields(created_raw, updated_raw),
                 }
                 readables.append(entry)
@@ -2922,7 +3176,7 @@ def searchNameEntries(
                     "title": title or fileName,
                     "titleTextMapHash": resolved_hash,
                     "contentPreview": preview,
-                    **_build_readable_category_fields(fileName),
+                    **_build_readable_category_fields(fileName, resolved_hash, readableId),
                     **_build_version_fields(created_raw, updated_raw),
                 }
                 readables.append(entry)
@@ -2949,7 +3203,7 @@ def searchNameEntries(
                     "readableId": readableId,
                     "title": resolved_title or fileName,
                     "titleTextMapHash": resolved_hash,
-                    **_build_readable_category_fields(fileName),
+                    **_build_readable_category_fields(fileName, resolved_hash, readableId),
                     **_build_version_fields(created_raw, updated_raw),
                 }
                 readables.append(entry)
@@ -3943,100 +4197,27 @@ def getCatalogMainCategories():
     return result
 
 
-def getEntityTexts(sourceTypeCode: int, entityId: int, searchLang: int | None = None):
-    langs = config.getResultLanguages().copy()
-    if searchLang and searchLang not in langs:
-        langs.append(searchLang)
-    sourceLangCode = config.getSourceLanguage()
-
-    source_type_code = int(sourceTypeCode)
-    entity_id = int(entityId)
-    rows = databaseHelper.selectEntityTextHashesByEntity(source_type_code, entity_id)
-    if not rows:
-        return {
-            "sourceTypeCode": source_type_code,
-            "entityId": entity_id,
-            "title": None,
-            "entries": [],
-            "missingBody": False,
-            "emptyMessage": "",
-            **_build_version_fields(None, None),
-        }
-
-    source_type, source_label = _get_entity_source_meta(source_type_code)
-
-    _first_title_hash = rows[0][1]
-    _first_sub_category = rows[0][3] if len(rows[0]) > 3 else 0
-    sub_category_label = _get_sub_category_label(_first_sub_category)
-    title_lang = searchLang or sourceLangCode
-    title = _get_entity_title_with_fallback(source_type, _first_title_hash, title_lang, [sourceLangCode])
-    if not title:
-        title = str(entity_id)
-
-    created_raw, updated_raw = databaseHelper.getCatalogEntityVersionInfo(source_type_code, entity_id, sourceLangCode)
-    entries = []
-    for row in rows:
-        text_hash, title_hash, extra = row[0], row[1], row[2]
-        field_code = extra & 0xFF
-        gender_code = _extract_entity_gender_code(source_type, extra)
-        if source_type in ("costume", "suit") and extra in (1, 2, 3):
-            field_code = 1
-
-        if _is_qianxing_source_type(source_type) or source_type == "dressing":
-            field_label = "介绍"
-        else:
-            field_label_map = {
-                1: "描述",
-                2: "效果",
-                3: "特殊",
-                4: "类型",
-                5: "标题",
-                6: "图鉴描述",
-            }
-            field_label = field_label_map.get(field_code, "描述")
-
-        subtitle = _append_entity_gender_subtitle(f"{source_label} {entity_id}", gender_code)
-        entry_title = _get_entity_title_with_fallback(source_type, title_hash, title_lang, [sourceLangCode])
-
-        text_obj = queryTextHashInfo(int(text_hash), langs, sourceLangCode, queryOrigin=True)
-        if not text_obj or not text_obj.get("translates"):
-            continue
-        entries.append({
-            "entryTitle": entry_title,
-            "fieldLabel": field_label,
-            "subtitle": subtitle,
-            "textHash": int(text_hash),
-            "titleHash": int(title_hash),
-            "text": text_obj,
-        })
-
-    has_direct_text_entries = len(entries) > 0
-    entries.extend(
-        _collect_entity_readable_entries(
-            source_type,
-            entity_id,
-            _first_title_hash,
-            f"{source_label} {entity_id}",
-            langs,
-            title_lang,
-            sourceLangCode,
-            _first_sub_category,
-        )
-    )
-    missing_body = not has_direct_text_entries and len(entries) == 0
+def getTextEntitySources(textHash: int, searchLang: int | None = None):
+    text_hash = int(textHash)
+    title_lang = searchLang or config.getSourceLanguage()
+    groups = []
+    for source_row, entity_rows in _get_valid_entity_source_candidates(text_hash, searchLang):
+        source_type_code, entity_id, _title_hash, _extra = source_row
+        group = _build_entity_detail_payload(source_type_code, entity_id, searchLang, entity_rows)
+        primary, origin, _source_count = _build_entity_source_payload([source_row], title_lang, text_hash)
+        group["primarySource"] = primary
+        group["origin"] = origin
+        groups.append(group)
 
     return {
-        "sourceType": source_type,
-        "sourceTypeLabel": source_label,
-        "subCategoryLabel": sub_category_label,
-        "sourceTypeCode": source_type_code,
-        "entityId": entity_id,
-        "title": title,
-        "entries": entries,
-        "missingBody": missing_body,
-        "emptyMessage": _ENTITY_EMPTY_BODY_MESSAGE if missing_body else "",
-        **_build_version_fields(created_raw, updated_raw),
+        "textHash": text_hash,
+        "sourceCount": len(groups),
+        "groups": groups,
     }
+
+
+def getEntityTexts(sourceTypeCode: int, entityId: int, searchLang: int | None = None):
+    return _build_entity_detail_payload(int(sourceTypeCode), int(entityId), searchLang)
 
 
 def getVoiceBinStream(voicePath, langCode):

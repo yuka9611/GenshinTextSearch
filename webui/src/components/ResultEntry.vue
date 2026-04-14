@@ -268,6 +268,7 @@ const openSourceDetail = () => {
             query: {
                 sourceTypeCode: detail.sourceTypeCode,
                 entityId: detail.entityId,
+                textHash: detail.textHash ?? props.translateObj.hash,
                 keyword: props.keyword,
                 searchLang: props.searchLang,
             },

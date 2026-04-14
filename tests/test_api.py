@@ -465,6 +465,38 @@ class TestImportedEndpoints:
         assert data["data"]["contents"]["createdVersion"] == "4.4"
         assert data["data"]["contents"]["updatedVersion"] == "4.7"
 
+    def test_get_text_entity_sources_requires_text_hash(self):
+        app = _app()
+        with _request_context(app, "/api/getTextEntitySources", method="POST", json_body={}):
+            resp = api.getTextEntitySources()
+
+        data = resp.get_json()
+        assert resp.status_code == 200
+        assert data["code"] == 400
+        assert data["msg"] == "textHash is required"
+
+    def test_get_text_entity_sources_returns_filtered_groups(self, monkeypatch):
+        monkeypatch.setattr(
+            api.controllers_module,
+            "getTextEntitySources",
+            lambda text_hash, search_lang: {
+                "textHash": text_hash,
+                "sourceCount": 1,
+                "groups": [{"entityId": 200, "entries": [{"textHash": 91002}]}],
+            },
+        )
+
+        app = _app()
+        payload = {"textHash": 778899, "searchLang": 1}
+        with _request_context(app, "/api/getTextEntitySources", method="POST", json_body=payload):
+            resp = api.getTextEntitySources()
+
+        data = resp.get_json()
+        assert resp.status_code == 200
+        assert data["code"] == 200
+        assert data["data"]["contents"]["sourceCount"] == 1
+        assert data["data"]["contents"]["groups"][0]["entityId"] == 200
+
     def test_available_versions(self, monkeypatch):
         monkeypatch.setattr(api.controllers_module, "getAvailableVersions", lambda: ["4.0", "4.1", "4.2"])
 

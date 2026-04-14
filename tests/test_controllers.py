@@ -1112,3 +1112,241 @@ class TestEntityTexts:
         }
         assert origin == "千星奇域: 升炼姿态"
         assert source_count == 1
+
+    def test_get_entity_texts_includes_item_linked_readable_entries(self, monkeypatch):
+        monkeypatch.setattr(controllers.config, "getResultLanguages", lambda: [1])
+        monkeypatch.setattr(controllers.config, "getSourceLanguage", lambda: 1)
+        monkeypatch.setattr(
+            controllers.databaseHelper,
+            "selectEntityTextHashesByEntity",
+            lambda source_type_code, entity_id: [(91001, 5002, 1, 1)],
+        )
+        monkeypatch.setattr(
+            controllers.databaseHelper,
+            "getCatalogEntityVersionInfo",
+            lambda source_type_code, entity_id, version_lang_code=None: (None, None),
+        )
+        monkeypatch.setattr(controllers, "_get_entity_source_meta", lambda code: ("item", "道具"))
+        monkeypatch.setattr(controllers, "_get_sub_category_label", lambda code: "任务道具")
+        monkeypatch.setattr(
+            controllers,
+            "_get_text_map_content_with_fallback",
+            lambda text_hash, *args, **kwargs: {
+                5002: "莱茵多特的「礼物」",
+                3377011063: "莱茵多特的「礼物」",
+            }.get(text_hash),
+        )
+        monkeypatch.setattr(
+            controllers,
+            "queryTextHashInfo",
+            lambda text_hash, langs, source_lang_code, queryOrigin=False: {"translates": {}, "hash": text_hash},
+        )
+        monkeypatch.setattr(
+            controllers,
+            "_load_entity_readable_lookup",
+            lambda: {
+                "outfit_item_to_skin": {},
+                "reliquary_set_to_id": {},
+                "reliquary_set_piece_to_id": {},
+                "book_material_ids": set(),
+                "item_readable_ids_by_item_id": {121414: [201140]},
+                "item_ids_by_readable_id": {201140: 121414},
+                "item_ids_by_title_hash": {3377011063: 121414},
+            },
+        )
+        monkeypatch.setattr(
+            controllers.databaseHelper,
+            "getReadableInfo",
+            lambda readable_id, lang_code=None: ("Book1140.txt", 3377011063, readable_id),
+        )
+        monkeypatch.setattr(controllers.databaseHelper, "selectReadableRefsByFileNamePrefix", lambda prefix: [])
+        monkeypatch.setattr(controllers.databaseHelper, "selectReadableRefsByTitleHash", lambda *args, **kwargs: [])
+        monkeypatch.setattr(controllers.databaseHelper, "getLangCodeMap", lambda: {1: "CHS"})
+        monkeypatch.setattr(
+            controllers.databaseHelper,
+            "selectReadableFromReadableId",
+            lambda readable_id, target_lang_strs: [("正文内容", "CHS")],
+        )
+        monkeypatch.setattr(
+            controllers.databaseHelper,
+            "selectReadableFromFileName",
+            lambda file_name, target_lang_strs: [],
+        )
+        monkeypatch.setattr(
+            controllers.databaseHelper,
+            "getReadableVersionInfo",
+            lambda readable_id, file_name: ("Version 4.1", None),
+        )
+
+        result = controllers.getEntityTexts(1, 121414, searchLang=1)
+
+        assert result["title"] == "莱茵多特的「礼物」"
+        assert result["missingBody"] is False
+        assert len(result["entries"]) == 1
+        entry = result["entries"][0]
+        assert entry["fieldLabel"] == "道具"
+        assert entry["readableCategory"] == "BOOK"
+        assert entry["readableCategoryLabel"] == "道具"
+        assert entry["fileName"] == "Book1140.txt"
+        assert entry["readableId"] == 201140
+        assert entry["detailQuery"] == {
+            "kind": "readable",
+            "readableId": 201140,
+            "fileName": "Book1140.txt",
+            "textHash": 3377011063,
+        }
+        assert entry["text"]["translates"] == {"1": "正文内容"}
+        assert entry["text"]["createdVersion"] == "4.1"
+
+
+class TestReadableCategoryLabels:
+    def test_build_readable_category_fields_marks_item_linked_book_as_item(self, monkeypatch):
+        monkeypatch.setattr(
+            controllers,
+            "_load_entity_readable_lookup",
+            lambda: {
+                "outfit_item_to_skin": {},
+                "reliquary_set_to_id": {},
+                "reliquary_set_piece_to_id": {},
+                "book_material_ids": set(),
+                "item_readable_ids_by_item_id": {121414: [201140]},
+                "item_ids_by_readable_id": {201140: 121414},
+                "item_ids_by_title_hash": {3377011063: 121414},
+            },
+        )
+        monkeypatch.setattr(controllers.databaseHelper, "getReadableCategoryCode", lambda file_name: "BOOK")
+
+        result = controllers._build_readable_category_fields("Book1140.txt", 3377011063, 201140)
+
+        assert result == {
+            "readableCategory": "BOOK",
+            "readableCategoryLabel": "道具",
+        }
+
+    def test_build_readable_category_fields_keeps_regular_book_label(self, monkeypatch):
+        monkeypatch.setattr(
+            controllers,
+            "_load_entity_readable_lookup",
+            lambda: {
+                "outfit_item_to_skin": {},
+                "reliquary_set_to_id": {},
+                "reliquary_set_piece_to_id": {},
+                "book_material_ids": set(),
+                "item_readable_ids_by_item_id": {},
+                "item_ids_by_readable_id": {},
+                "item_ids_by_title_hash": {},
+            },
+        )
+        monkeypatch.setattr(controllers.databaseHelper, "selectEntitySourcesByTitleHash", lambda text_hash: [])
+        monkeypatch.setattr(controllers.databaseHelper, "getReadableCategoryCode", lambda file_name: "BOOK")
+
+        result = controllers._build_readable_category_fields("Book2000.txt", 99887766, 2000)
+
+        assert result == {
+            "readableCategory": "BOOK",
+            "readableCategoryLabel": "书籍",
+        }
+
+
+class TestEntitySourceFiltering:
+    def test_select_primary_source_skips_entities_without_visible_text(self, monkeypatch):
+        monkeypatch.setattr(controllers.config, "getResultLanguages", lambda: [1])
+        monkeypatch.setattr(controllers.config, "getSourceLanguage", lambda: 1)
+        monkeypatch.setattr(controllers.databaseHelper, "getTalkInfo", lambda text_hash: None)
+        monkeypatch.setattr(controllers.databaseHelper, "getSourceFromFetter", lambda text_hash, lang_code: None)
+        monkeypatch.setattr(controllers, "_select_story_source_from_text_hash", lambda text_hash, lang_code: None)
+        monkeypatch.setattr(controllers.databaseHelper, "selectQuestHashSources", lambda text_hash: [])
+        monkeypatch.setattr(
+            controllers.databaseHelper,
+            "selectEntitySourcesByTextHash",
+            lambda text_hash: [(5, 100, 5001, 0), (5, 200, 5002, 0)],
+        )
+        monkeypatch.setattr(controllers.databaseHelper, "selectEntitySourcesByTitleHash", lambda text_hash: [])
+        monkeypatch.setattr(
+            controllers.databaseHelper,
+            "selectEntityTextHashesByEntity",
+            lambda source_type_code, entity_id: {
+                (5, 100): [(91001, 5001, 1, 0)],
+                (5, 200): [(91002, 5002, 1, 0)],
+            }.get((source_type_code, entity_id), []),
+        )
+        monkeypatch.setattr(
+            controllers.databaseHelper,
+            "selectTextMapFromTextHash",
+            lambda text_hash, langs=None: [] if int(text_hash) == 91001 else [("可展示文本", 1)],
+        )
+        monkeypatch.setattr(controllers, "_collect_entity_readable_entries", lambda *args, **kwargs: [])
+        monkeypatch.setattr(controllers.databaseHelper, "getReadableInfoByTitleHash", lambda text_hash: None)
+        monkeypatch.setattr(controllers, "_get_entity_source_meta", lambda code: ("costume", "千星奇域"))
+        monkeypatch.setattr(
+            controllers,
+            "_get_entity_title_with_fallback",
+            lambda source_type, title_hash, lang_code, fallbacks: {5001: "空实体", 5002: "有效实体"}.get(title_hash),
+        )
+
+        primary, origin, is_talk, source_count = controllers._select_primary_source_from_text_hash(778899, 1)
+
+        assert is_talk is False
+        assert source_count == 1
+        assert origin == "千星奇域: 有效实体"
+        assert primary["detailQuery"]["entityId"] == 200
+
+    def test_get_text_entity_sources_returns_only_valid_groups(self, monkeypatch):
+        monkeypatch.setattr(controllers.config, "getResultLanguages", lambda: [1])
+        monkeypatch.setattr(controllers.config, "getSourceLanguage", lambda: 1)
+        monkeypatch.setattr(
+            controllers.databaseHelper,
+            "selectEntitySourcesByTextHash",
+            lambda text_hash: [(5, 100, 5001, 0), (5, 200, 5002, 0)],
+        )
+        monkeypatch.setattr(controllers.databaseHelper, "selectEntitySourcesByTitleHash", lambda text_hash: [])
+        monkeypatch.setattr(
+            controllers.databaseHelper,
+            "selectEntityTextHashesByEntity",
+            lambda source_type_code, entity_id: {
+                (5, 100): [(91001, 5001, 1, 0)],
+                (5, 200): [(91002, 5002, 1, 0)],
+            }.get((source_type_code, entity_id), []),
+        )
+        monkeypatch.setattr(
+            controllers.databaseHelper,
+            "selectTextMapFromTextHash",
+            lambda text_hash, langs=None: [] if int(text_hash) == 91001 else [("可展示文本", 1)],
+        )
+        monkeypatch.setattr(controllers, "_collect_entity_readable_entries", lambda *args, **kwargs: [])
+        monkeypatch.setattr(controllers, "_get_entity_source_meta", lambda code: ("costume", "千星奇域"))
+        monkeypatch.setattr(controllers, "_get_sub_category_label", lambda code: "")
+        monkeypatch.setattr(
+            controllers,
+            "_get_entity_title_with_fallback",
+            lambda source_type, title_hash, lang_code, fallbacks: {5001: "空实体", 5002: "有效实体"}.get(title_hash),
+        )
+        monkeypatch.setattr(
+            controllers,
+            "queryTextHashInfo",
+            lambda text_hash, langs, source_lang_code, queryOrigin=False: {
+                "translates": {"1": f"文本-{text_hash}"},
+                "hash": text_hash,
+            } if int(text_hash) == 91002 else {"translates": {}, "hash": text_hash},
+        )
+        monkeypatch.setattr(
+            controllers.databaseHelper,
+            "getCatalogEntityVersionInfo",
+            lambda source_type_code, entity_id, version_lang_code=None: (None, None),
+        )
+
+        result = controllers.getTextEntitySources(778899, searchLang=1)
+
+        assert result["sourceCount"] == 1
+        assert len(result["groups"]) == 1
+        assert result["groups"][0]["entityId"] == 200
+        assert result["groups"][0]["entries"] == [
+            {
+                "entryTitle": "有效实体",
+                "fieldLabel": "介绍",
+                "subtitle": "千星奇域 200 · 男",
+                "textHash": 91002,
+                "titleHash": 5002,
+                "text": {"translates": {"1": "文本-91002"}, "hash": 91002},
+            }
+        ]

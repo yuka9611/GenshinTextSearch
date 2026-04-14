@@ -350,8 +350,8 @@ i.centerIcon{
     border: 1px solid var(--search-section-border);
     background: var(--search-section-bg);
     box-shadow: 0 12px 26px rgba(44, 57, 54, 0.10);
-    backdrop-filter: blur(16px);
     -webkit-backdrop-filter: blur(16px);
+    backdrop-filter: blur(16px);
     transition: background 0.25s ease, border-color 0.25s ease, box-shadow 0.25s ease;
 }
 

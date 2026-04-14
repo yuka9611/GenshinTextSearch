@@ -10,9 +10,11 @@ const uiText = {
   pageTitle: '来源详情',
   back: '返回',
   entityId: 'ID',
+  sourceCount: '来源数',
   textHash: 'Text Hash',
   language: '显示语言',
   empty: '未找到条目来源数据（可能需要更新数据库）',
+  emptySources: '未找到可展示的来源文本',
   copy: '复制',
   copied: '已复制',
   noTextToCopy: '没有可复制的文本',
@@ -41,11 +43,37 @@ const entityId = computed(() => {
   return Number.isFinite(n) ? n : null
 })
 
+const textHash = computed(() => {
+  const raw = route.query.textHash
+  if (raw === undefined || raw === null) return null
+  const n = Number(raw)
+  return Number.isFinite(n) ? n : null
+})
+
+const isGroupedView = computed(() => textHash.value !== null)
+
 const keyword = computed(() => String(route.query.keyword || ''))
 
-const title = computed(() => entity.value?.title || uiText.pageTitle)
+const title = computed(() => {
+  if (isGroupedView.value) return uiText.pageTitle
+  return entity.value?.title || uiText.pageTitle
+})
 const entryCount = computed(() => entity.value?.entries?.length || 0)
-const emptyDescription = computed(() => entity.value?.emptyMessage || uiText.empty)
+const groups = computed(() => Array.isArray(entity.value?.groups) ? entity.value.groups : [])
+const sourceCount = computed(() => Number(entity.value?.sourceCount) || groups.value.length || 0)
+const displayRouteTextHash = computed(() => normalizeDisplayHash(textHash.value))
+const emptyDescription = computed(() => {
+  if (isGroupedView.value) {
+    return entity.value?.emptyMessage || uiText.emptySources
+  }
+  return entity.value?.emptyMessage || uiText.empty
+})
+const isEmptyState = computed(() => {
+  if (isGroupedView.value) {
+    return groups.value.length === 0
+  }
+  return entryCount.value === 0
+})
 
 const resolveVersionValue = (versionTag, rawVersion) => {
   if (versionTag) return String(versionTag).trim()
@@ -132,7 +160,44 @@ const resolveEntryTextHash = (entry) => {
   return normalizeDisplayHash(entry.textHash) || normalizeDisplayHash(entry.text?.hash)
 }
 
+const resolveEntries = (payload) => {
+  if (!payload || !Array.isArray(payload.entries)) return []
+  return payload.entries
+}
+
+const resolveGroupTitle = (group) => {
+  if (group?.title) return String(group.title)
+  if (group?.primarySource?.title) return String(group.primarySource.title)
+  return uiText.pageTitle
+}
+
+const resolveGroupSubtitle = (group) => {
+  const subtitle = group?.primarySource?.subtitle
+  if (subtitle !== undefined && subtitle !== null && String(subtitle).trim() !== '') {
+    return String(subtitle).trim()
+  }
+  const origin = group?.origin
+  if (origin !== undefined && origin !== null && String(origin).trim() !== '') {
+    return String(origin).trim()
+  }
+  return ''
+}
+
 const loadEntity = async () => {
+  if (isGroupedView.value) {
+    loading.value = true
+    try {
+      const ans = (await api.getTextEntitySources(textHash.value, selectedInputLanguage.value)).json
+      entity.value = ans.contents || null
+    } catch (_) {
+      ElMessage.error('加载失败')
+      entity.value = null
+    } finally {
+      loading.value = false
+    }
+    return
+  }
+
   if (sourceTypeCode.value === null || entityId.value === null) {
     entity.value = null
     return
@@ -170,13 +235,17 @@ watch(selectedInputLanguage, async () => {
   <div class="viewWrapper pageShell entityView">
     <div class="pageHeader entityHeader">
       <div class="headerLeft">
-        <div v-if="entity" class="entityMetaTags tagRow">
+        <div v-if="entity && !isGroupedView" class="entityMetaTags tagRow">
           <el-tag v-if="entity.sourceTypeLabel" effect="plain">{{ entity.sourceTypeLabel }}</el-tag>
           <el-tag v-if="entity.subCategoryLabel" effect="plain" type="info">{{ entity.subCategoryLabel }}</el-tag>
           <el-tag effect="plain">{{ uiText.entityId }}: {{ entity.entityId }}</el-tag>
         </div>
+        <div v-else-if="entity && isGroupedView" class="entityMetaTags tagRow">
+          <el-tag v-if="displayRouteTextHash" effect="plain">{{ uiText.textHash }}: {{ displayRouteTextHash }}</el-tag>
+          <el-tag v-if="sourceCount" effect="plain" type="info">{{ uiText.sourceCount }}: {{ sourceCount }}</el-tag>
+        </div>
         <h1 class="pageTitle">{{ title }}</h1>
-        <div v-if="entity" class="versionTags tagRow">
+        <div v-if="entity && !isGroupedView" class="versionTags tagRow">
           <span v-if="resolveVersionValue(entity.createdVersion, entity.createdVersionRaw)" class="versionTag created" :title="entity.createdVersionRaw || ''">
             ✦ 创建: {{ formatVersionTag(entity.createdVersion, entity.createdVersionRaw) }}
           </span>
@@ -188,7 +257,6 @@ watch(selectedInputLanguage, async () => {
             ↻ 更新: {{ formatVersionTag(entity.updatedVersion, entity.updatedVersionRaw) }}
           </span>
         </div>
-        <div v-if="entryCount" class="pageMeta">共 {{ entryCount }} 个字段文本</div>
       </div>
       <div class="headerRight">
         <el-select v-model="selectedInputLanguage" class="langSelect" :placeholder="uiText.language" filterable>
@@ -199,7 +267,62 @@ watch(selectedInputLanguage, async () => {
     </div>
 
     <el-skeleton v-if="loading" :rows="6" animated />
-    <el-empty v-else-if="!entity || !entity.entries || entity.entries.length === 0" :description="emptyDescription" />
+    <el-empty v-else-if="!entity || isEmptyState" :description="emptyDescription" />
+
+    <div v-else-if="isGroupedView" class="sourceGroups">
+      <section
+        v-for="group in groups"
+        :key="`entity-group-${group.sourceTypeCode}-${group.entityId}`"
+        class="sourceGroup"
+      >
+        <div class="sourceGroupHeader resultCard cardPanel">
+          <div class="entityMetaTags tagRow">
+            <el-tag v-if="group.sourceTypeLabel" effect="plain">{{ group.sourceTypeLabel }}</el-tag>
+            <el-tag v-if="group.subCategoryLabel" effect="plain" type="info">{{ group.subCategoryLabel }}</el-tag>
+            <el-tag effect="plain">{{ uiText.entityId }}: {{ group.entityId }}</el-tag>
+          </div>
+          <h2 class="groupTitle">{{ resolveGroupTitle(group) }}</h2>
+          <p v-if="resolveGroupSubtitle(group)" class="groupSubtitle">{{ resolveGroupSubtitle(group) }}</p>
+        </div>
+
+        <div class="entityEntries">
+          <el-card
+            v-for="entry in resolveEntries(group)"
+            :key="`entity-text-${group.sourceTypeCode}-${group.entityId}-${entry.readableId ?? entry.fileName ?? entry.textHash}-${entry.fieldLabel}`"
+            class="entityCard resultCard cardPanel"
+          >
+            <div class="entityCardHeader">
+              <div class="entityCardTitle">
+                <el-tag size="small" effect="plain">{{ entry.fieldLabel }}</el-tag>
+                <el-tag
+                  v-if="entry.readableCategoryLabel && entry.readableCategoryLabel !== entry.fieldLabel"
+                  size="small"
+                  effect="plain"
+                  type="success"
+                >
+                  {{ entry.readableCategoryLabel }}
+                </el-tag>
+                <el-tag v-if="resolveEntryTextHash(entry)" size="small" effect="plain" type="info">
+                  {{ uiText.textHash }}: {{ resolveEntryTextHash(entry) }}
+                </el-tag>
+              </div>
+              <button
+                v-if="isCopyableText(resolveDisplayText(entry.text))"
+                type="button"
+                class="copyButton"
+                :title="uiText.copy"
+                @click="copyToClipboard(resolveDisplayText(entry.text))"
+              >
+                <i class="fi fi-rr-copy"></i>
+              </button>
+            </div>
+            <div class="entityCardBody">
+              <StylizedText :text="resolveDisplayText(entry.text)" :keyword="keyword" />
+            </div>
+          </el-card>
+        </div>
+      </section>
+    </div>
 
     <div v-else class="entityEntries">
       <el-card
@@ -210,6 +333,14 @@ watch(selectedInputLanguage, async () => {
         <div class="entityCardHeader">
           <div class="entityCardTitle">
             <el-tag size="small" effect="plain">{{ entry.fieldLabel }}</el-tag>
+                <el-tag
+                  v-if="entry.readableCategoryLabel && entry.readableCategoryLabel !== entry.fieldLabel"
+                  size="small"
+                  effect="plain"
+                  type="success"
+                >
+                  {{ entry.readableCategoryLabel }}
+                </el-tag>
             <el-tag v-if="resolveEntryTextHash(entry)" size="small" effect="plain" type="info">
               {{ uiText.textHash }}: {{ resolveEntryTextHash(entry) }}
             </el-tag>
@@ -287,6 +418,39 @@ watch(selectedInputLanguage, async () => {
   display: flex;
   flex-direction: column;
   gap: 14px;
+}
+
+.sourceGroups {
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+}
+
+.sourceGroup {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.sourceGroupHeader {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.sourceGroupHeader:hover {
+  transform: none;
+}
+
+.groupTitle {
+  margin: 0;
+  font-size: 20px;
+}
+
+.groupSubtitle {
+  margin: 0;
+  color: var(--theme-text-muted);
+  font-size: 13px;
 }
 
 .entityCard {

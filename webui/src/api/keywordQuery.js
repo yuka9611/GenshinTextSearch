@@ -197,6 +197,13 @@ const getEntityTexts = withCache((sourceTypeCode, entityId, searchLang) => {
     });
 });
 
+const getTextEntitySources = withCache((textHash, searchLang) => {
+    return request.post("/api/getTextEntitySources", {
+        textHash: textHash,
+        searchLang: searchLang,
+    });
+});
+
 const catalogSearch = (keyword, langCode, sourceTypeCode, subCategory, page = 1, pageSize = 50, createdVersion = "", updatedVersion = "") => {
     return request.post("/api/catalogSearch", {
         keyword: keyword,
@@ -232,6 +239,7 @@ export default {
     getReadableContent,
     getQuestDialogues,
     getEntityTexts,
+    getTextEntitySources,
     catalogSearch,
     getCatalogMeta,
 };

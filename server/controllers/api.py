@@ -1110,6 +1110,32 @@ def getEntityTexts():
     })
 
 
+@api_bp.route("/api/getTextEntitySources", methods=["POST"])
+def getTextEntitySources():
+    import time
+
+    textHash = request.json.get("textHash")
+    searchLang = request.json.get("searchLang")
+    if searchLang:
+        searchLang = int(searchLang)
+
+    if textHash is None:
+        return jsonify({"data": None, "code": 400, "msg": "textHash is required"})
+
+    start = time.time()
+    contents = controllers_module.getTextEntitySources(int(textHash), searchLang) # type: ignore
+    end = time.time()
+
+    return jsonify({
+        "data": {
+            "contents": contents,
+            "time": (end - start) * 1000
+        },
+        "code": 200,
+        "msg": "ok"
+    })
+
+
 @api_bp.route("/api/catalogSearch", methods=["POST"])
 def catalogSearch():
     keyword = request.json.get("keyword", "").strip()

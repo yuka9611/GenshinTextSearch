@@ -313,10 +313,6 @@ const onSearch = () => {
   .searchBtn {
     padding: 0 20px;
   }
-
-  .searchHistory {
-    display: none;
-  }
 }
 
 @media (max-width: 760px) {
@@ -348,6 +344,10 @@ const onSearch = () => {
     justify-content: center;
     border-radius: 8px;
     padding: 0 16px;
+  }
+
+  .searchHistory {
+    display: none;
   }
 }
 </style>
