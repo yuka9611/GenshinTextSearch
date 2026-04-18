@@ -1,8 +1,8 @@
 import os
 import sqlite3
-import sys
 from flask import Blueprint, current_app, request, jsonify
 
+import controllers as controllers_module
 from databaseHelper import selectTextMapFromKeywordPaged, selectVoiceFromKeywordPaged, getVoicePath, getTextMapByHash, getVersionData, getLangCodeMap
 from utils.browser_session import (
     disconnect_browser_client,
@@ -27,23 +27,6 @@ def get_lang_id(lang_code: str) -> int:
 
     # 默认语言为中文
     return lang_code_map.get(lang_code.lower(), 1)
-
-# 导入controllers.py文件
-import importlib.util
-
-# 加载controllers.py文件
-server_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-controllers_path = os.path.join(server_dir, 'controllers.py')
-spec = importlib.util.spec_from_file_location('controllers_module', controllers_path)
-if spec and spec.loader:
-    controllers_module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(controllers_module)
-else:
-    # 如果加载失败，尝试直接导入
-    import sys
-    sys.path.insert(0, server_dir)
-    import controllers as controllers_module
-    sys.path.pop(0)
 
 api_bp = Blueprint('api', __name__)
 

@@ -1,17 +1,9 @@
-"""Tests for selected pure/internal logic in server/controllers.py."""
-import importlib.util
+"""Tests for selected pure/internal logic in the controllers package."""
 import sqlite3
-from pathlib import Path
 
 import pytest
 
-
-_CONTROLLERS_FILE = Path(__file__).resolve().parents[1] / "server" / "controllers.py"
-_SPEC = importlib.util.spec_from_file_location("controllers_file_module", _CONTROLLERS_FILE)
-if _SPEC is None or _SPEC.loader is None:
-    raise RuntimeError(f"Cannot load controllers module from {_CONTROLLERS_FILE}")
-controllers = importlib.util.module_from_spec(_SPEC)
-_SPEC.loader.exec_module(controllers)
+import controllers.common as controllers
 
 
 def _patch_avatar_story_dependencies(

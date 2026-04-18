@@ -8,6 +8,7 @@ import TranslateDisplay from '@/components/ResultEntry.vue'
 import AudioPlayer from '@liripeng/vue-audio-player'
 import * as converter from '@/assets/wem2wav'
 import { ElMessage } from 'element-plus'
+import useAvatarScopedSearch from '@/composables/useAvatarScopedSearch'
 import useLanguage from '@/composables/useLanguage'
 import useVersion from '@/composables/useVersion'
 import useSearchCommon from '@/composables/useSearchCommon'
@@ -76,12 +77,24 @@ const {
 } = useSearchCommon()
 
 const voiceSummary = ref('')
-const avatarResults = ref([])
-const voiceEntries = ref([])
-const globalVoiceEntries = ref([])
-const useGlobalVoiceEntries = ref(false)
-const selectedAvatar = ref(null)
 const loadingVoices = ref(false)
+const {
+  avatarResults,
+  scopedEntries: voiceEntries,
+  useGlobalEntries: useGlobalVoiceEntries,
+  selectedAvatar,
+  resetScopedState,
+  setAvatarMatches,
+  beginGlobalResults,
+  showGlobalEntries,
+  filterEntriesByMatchedAvatarIds,
+  selectAvatarFromGlobalEntries,
+  setAvatarEntries,
+} = useAvatarScopedSearch({
+  fallbackAvatarName: uiText.fallbackAvatarName,
+  matchedAvatarLabel: uiText.globalMatchedAvatar,
+  globalAvatarLabel: uiText.globalAvatar,
+})
 
 const categoryFilter = ref('all')
 const textFilter = ref('')
@@ -204,10 +217,7 @@ const voiceEmptyDescription = computed(() => voiceSummary.value || uiText.noVoic
 
 const resetVoiceState = () => {
   voiceSummary.value = ''
-  voiceEntries.value = []
-  globalVoiceEntries.value = []
-  useGlobalVoiceEntries.value = false
-  selectedAvatar.value = null
+  resetScopedState()
 }
 
 const onSearchClicked = async () => {
@@ -230,12 +240,7 @@ const onSearchClicked = async () => {
       const response = await api.searchAvatar(keyword.value, selectedInputLanguage.value)
       const ans = response.json
       const contents = ans.contents || {}
-      avatarResults.value = contents.avatars || []
-      matchedAvatarIds = new Set(
-        avatarResults.value
-          .map((avatar) => Number(avatar.avatarId))
-          .filter((avatarId) => !Number.isNaN(avatarId))
-      )
+      matchedAvatarIds = setAvatarMatches(contents.avatars || [])
       searchSummary.value = formatText(uiText.avatarSummary, {
         time: ans.time.toFixed(2),
         count: avatarResults.value.length,
@@ -259,10 +264,7 @@ const onSearchClicked = async () => {
   if (!avatarKeyword) {
     avatarResults.value = []
   }
-  selectedAvatar.value = {
-    avatarId: null,
-    name: avatarKeyword ? uiText.globalMatchedAvatar : uiText.globalAvatar,
-  }
+  beginGlobalResults(Boolean(avatarKeyword))
 
   try {
     const response = await api.searchAvatarVoices(
@@ -273,25 +275,8 @@ const onSearchClicked = async () => {
     )
     const ans = response.json
     const contents = ans.contents || {}
-    let scopedVoices = contents.voices || []
-    if (matchedAvatarIds) {
-      scopedVoices = scopedVoices.filter((entry) => matchedAvatarIds.has(Number(entry.avatarId)))
-    }
-
-    voiceEntries.value = scopedVoices
-    globalVoiceEntries.value = scopedVoices
-    useGlobalVoiceEntries.value = true
-
-    const avatarMap = new Map()
-    for (const entry of scopedVoices) {
-      if (entry.avatarId === null || entry.avatarId === undefined) continue
-      if (avatarMap.has(entry.avatarId)) continue
-      avatarMap.set(entry.avatarId, {
-        avatarId: entry.avatarId,
-        name: (entry.avatarName || '').trim() || `${uiText.fallbackAvatarName} ${entry.avatarId}`
-      })
-    }
-    avatarResults.value = Array.from(avatarMap.values()).sort((a, b) => a.name.localeCompare(b.name))
+    const scopedVoices = filterEntriesByMatchedAvatarIds(contents.voices || [], matchedAvatarIds)
+    showGlobalEntries(scopedVoices)
 
     searchSummary.value = formatText(uiText.filteredAvatarSummary, {
       time: ans.time.toFixed(2),
@@ -308,13 +293,11 @@ const onSearchClicked = async () => {
 }
 
 const onAvatarClicked = async (avatar) => {
-  selectedAvatar.value = avatar
   voiceSummary.value = ''
   categoryFilter.value = 'all'
 
   if (useGlobalVoiceEntries.value) {
-    const avatarId = Number(avatar?.avatarId)
-    voiceEntries.value = globalVoiceEntries.value.filter((entry) => Number(entry.avatarId) === avatarId)
+    selectAvatarFromGlobalEntries(avatar)
     voiceSummary.value = ''
     return
   }
@@ -326,7 +309,7 @@ const onAvatarClicked = async (avatar) => {
     const response = await api.getAvatarVoices(avatar.avatarId, selectedInputLanguage.value)
     const ans = response.json
     const contents = ans.contents || {}
-    voiceEntries.value = contents.voices || []
+    setAvatarEntries(avatar, contents.voices || [])
     voiceSummary.value = ''
   } catch (error) {
     console.error('load avatar voices failed:', error)

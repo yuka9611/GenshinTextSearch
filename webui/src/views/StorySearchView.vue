@@ -3,6 +3,7 @@ import { onBeforeMount, ref, computed } from 'vue'
 import api from '@/api/keywordQuery'
 import SearchBar from '@/components/SearchBar.vue'
 import TranslateDisplay from '@/components/ResultEntry.vue'
+import useAvatarScopedSearch from '@/composables/useAvatarScopedSearch'
 import useLanguage from '@/composables/useLanguage'
 import useVersion from '@/composables/useVersion'
 import useSearchCommon from '@/composables/useSearchCommon'
@@ -61,13 +62,25 @@ const {
 } = useSearchCommon()
 
 const storySummary = ref('')
-const avatarResults = ref([])
-const storyEntries = ref([])
-const globalStoryEntries = ref([])
-const useGlobalStoryEntries = ref(false)
-const selectedAvatar = ref(null)
 const loadingStories = ref(false)
 const textFilter = ref('')
+const {
+  avatarResults,
+  scopedEntries: storyEntries,
+  useGlobalEntries: useGlobalStoryEntries,
+  selectedAvatar,
+  resetScopedState,
+  setAvatarMatches,
+  beginGlobalResults,
+  showGlobalEntries,
+  filterEntriesByMatchedAvatarIds,
+  selectAvatarFromGlobalEntries,
+  setAvatarEntries,
+} = useAvatarScopedSearch({
+  fallbackAvatarName: uiText.fallbackAvatarName,
+  matchedAvatarLabel: uiText.globalMatchedAvatar,
+  globalAvatarLabel: uiText.globalAvatar,
+})
 
 onBeforeMount(async () => {
   await loadLanguages()
@@ -110,10 +123,7 @@ const storyEmptyDescription = computed(() => storySummary.value || uiText.noStor
 
 const resetStoryState = () => {
   storySummary.value = ''
-  storyEntries.value = []
-  globalStoryEntries.value = []
-  useGlobalStoryEntries.value = false
-  selectedAvatar.value = null
+  resetScopedState()
 }
 
 const onSearchClicked = async () => {
@@ -135,12 +145,7 @@ const onSearchClicked = async () => {
     try {
       const ans = (await api.searchAvatar(keyword.value, selectedInputLanguage.value)).json
       const contents = ans.contents || {}
-      avatarResults.value = contents.avatars || []
-      matchedAvatarIds = new Set(
-        avatarResults.value
-          .map((avatar) => Number(avatar.avatarId))
-          .filter((avatarId) => !Number.isNaN(avatarId))
-      )
+      matchedAvatarIds = setAvatarMatches(contents.avatars || [])
       searchSummary.value = formatText(uiText.avatarSummary, {
         time: ans.time.toFixed(2),
         count: avatarResults.value.length,
@@ -163,10 +168,7 @@ const onSearchClicked = async () => {
   if (!avatarKeyword) {
     avatarResults.value = []
   }
-  selectedAvatar.value = {
-    avatarId: null,
-    name: avatarKeyword ? uiText.globalMatchedAvatar : uiText.globalAvatar,
-  }
+  beginGlobalResults(Boolean(avatarKeyword))
 
   try {
     const ans = (await api.searchAvatarStories(
@@ -176,25 +178,8 @@ const onSearchClicked = async () => {
       selectedInputLanguage.value,
     )).json
     const contents = ans.contents || {}
-    let scopedStories = contents.stories || []
-    if (matchedAvatarIds) {
-      scopedStories = scopedStories.filter((entry) => matchedAvatarIds.has(Number(entry.avatarId)))
-    }
-
-    storyEntries.value = scopedStories
-    globalStoryEntries.value = scopedStories
-    useGlobalStoryEntries.value = true
-
-    const avatarMap = new Map()
-    for (const entry of scopedStories) {
-      if (entry.avatarId === null || entry.avatarId === undefined) continue
-      if (avatarMap.has(entry.avatarId)) continue
-      avatarMap.set(entry.avatarId, {
-        avatarId: entry.avatarId,
-        name: (entry.avatarName || '').trim() || `${uiText.fallbackAvatarName} ${entry.avatarId}`
-      })
-    }
-    avatarResults.value = Array.from(avatarMap.values()).sort((a, b) => a.name.localeCompare(b.name))
+    const scopedStories = filterEntriesByMatchedAvatarIds(contents.stories || [], matchedAvatarIds)
+    showGlobalEntries(scopedStories)
 
     searchSummary.value = formatText(uiText.filteredAvatarSummary, {
       time: ans.time.toFixed(2),
@@ -217,11 +202,10 @@ const onAvatarClicked = async (avatar) => {
     return
   }
 
-  selectedAvatar.value = { ...avatar, avatarId }
   storySummary.value = ''
 
   if (useGlobalStoryEntries.value) {
-    storyEntries.value = globalStoryEntries.value.filter((entry) => Number(entry.avatarId) === avatarId)
+    selectAvatarFromGlobalEntries(avatar)
     storySummary.value = ''
     return
   }
@@ -232,7 +216,7 @@ const onAvatarClicked = async (avatar) => {
   try {
     const ans = (await api.getAvatarStories(avatarId, selectedInputLanguage.value)).json
     const contents = ans.contents || {}
-    storyEntries.value = contents.stories || []
+    setAvatarEntries(avatar, contents.stories || [])
     storySummary.value = ''
   } catch (err) {
     storyEntries.value = []

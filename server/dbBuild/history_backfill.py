@@ -85,14 +85,11 @@ from versioning import (
     set_meta,
 )
 from lightweight_progress import LightweightProgress
+from server_import import import_server_module
 
-try:
-    from quest_text_filters import build_quest_version_dialogue_not_excluded_sql
-except ImportError:
-    SERVER_DIR = os.path.normpath(os.path.join(os.path.dirname(__file__), os.pardir))
-    if SERVER_DIR not in sys.path:
-        sys.path.insert(0, SERVER_DIR)
-    from quest_text_filters import build_quest_version_dialogue_not_excluded_sql  # type: ignore
+build_quest_version_dialogue_not_excluded_sql = import_server_module(
+    "quest_text_filters"
+).build_quest_version_dialogue_not_excluded_sql
 
 try:
     reconfigure = getattr(sys.stderr, "reconfigure", None)

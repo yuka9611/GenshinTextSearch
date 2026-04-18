@@ -2501,18 +2501,6 @@ def countTextMapFromKeywordVoice(
         return int(row[0]) if row else 0
 
 
-def _legacy_hasVoiceForTextHashDb(textHash: int) -> bool:
-    with closing(conn.cursor()) as cursor:
-        # 优化语音存在性检查：直接查询dialogue和voice表，减少子查询嵌套
-        sql = (
-            "SELECT 1 FROM dialogue d JOIN voice v ON v.dialogueId = d.dialogueId WHERE d.textHash = ? LIMIT 1 "
-            "UNION "
-            "SELECT 1 FROM fetters f JOIN voice v ON v.dialogueId = f.voiceFile AND (v.avatarId = f.avatarId OR v.avatarId = 0) WHERE f.voiceFileTextTextMapHash = ? LIMIT 1"
-        )
-        cursor.execute(sql, (textHash, textHash))
-        return cursor.fetchone() is not None
-
-
 def isTextMapHashInKeyword(textHash: int, keyword: str, langCode: int) -> bool:
     with closing(conn.cursor()) as cursor:
         exact, fuzzy = _build_like_patterns(keyword, langCode)
@@ -2567,28 +2555,6 @@ def getTextMapVersionInfo(textHash: int, preferred_lang: int | None = None):
                 return row
         # 如果没有首选语言或首选语言没有数据，返回None
         return None, None
-
-
-def _legacy_selectVoicePathFromTextHash(textHash: int):
-    with closing(conn.cursor()) as cursor:
-        # 先查询dialogue表
-        sql_dialogue = "select voicePath from dialogue join voice on voice.dialogueId = dialogue.dialogueId where textHash=? limit 1"
-        cursor.execute(sql_dialogue, (textHash,))
-        match = cursor.fetchone()
-        if match:
-            return match[0]
-
-        # 再查询fetters表
-        sql_fetter = (
-            "select voicePath from fetters join voice on voice.dialogueId = fetters.voiceFile "
-            "where voiceFileTextTextMapHash=? and (fetters.avatarId=voice.avatarId or voice.avatarId=0) limit 1"
-        )
-        cursor.execute(sql_fetter, (textHash,))
-        match = cursor.fetchone()
-        if match:
-            return match[0]
-
-        return None
 
 
 def getImportedTextMapLangs():
@@ -3387,40 +3353,6 @@ def selectVoiceFromKeywordPaged(keyWord: str, page: int, size: int, langCode: in
             })
 
         return results
-
-
-def _legacy_getVoicePath(voice_hash: str, lang: int):
-    """
-    获取语音路径
-    """
-    with closing(conn.cursor()) as cursor:
-        # 先查询dialogue表
-        sql_dialogue = """
-        SELECT v.voicePath
-        FROM voice v
-        JOIN dialogue d ON v.dialogueId = d.dialogueId
-        WHERE d.textHash = ?
-        LIMIT 1
-        """
-        cursor.execute(sql_dialogue, (voice_hash,))
-        result = cursor.fetchone()
-        if result:
-            return result[0]
-
-        # 再查询fetters表
-        sql_fetter = """
-        SELECT v.voicePath
-        FROM voice v
-        JOIN fetters f ON v.dialogueId = f.voiceFile
-        WHERE f.voiceFileTextTextMapHash = ? AND (v.avatarId = f.avatarId OR v.avatarId = 0)
-        LIMIT 1
-        """
-        cursor.execute(sql_fetter, (voice_hash,))
-        result = cursor.fetchone()
-        if result:
-            return result[0]
-
-        return None
 
 
 def getTextMapByHash(hash_val: str, lang: int):
@@ -4782,21 +4714,6 @@ def selectAvatarByNameKeyword(keyword: str, langCode: int):
         return cursor.fetchall()
 
 
-def _legacy_selectAvatarVoiceItems(avatarId: int, limit: int = 400):
-    with closing(conn.cursor()) as cursor:
-        sql = (
-            "select fetters.voiceTitleTextMapHash, fetters.voiceFileTextTextMapHash, voice.voicePath "
-            "from fetters "
-            "left join voice on voice.dialogueId = fetters.voiceFile "
-            "and (voice.avatarId = fetters.avatarId or voice.avatarId = 0) "
-            "where fetters.avatarId=? "
-            "order by fetters.fetterId "
-            "limit ?"
-        )
-        cursor.execute(sql, (avatarId, limit))
-        return cursor.fetchall()
-
-
 def selectAvatarStories(avatarId: int, limit: int = 800):
     with closing(conn.cursor()) as cursor:
         try:
@@ -4839,79 +4756,6 @@ def selectStorySourcesByTextHash(textHash: int):
             "order by entries.fetterId"
         )
         cursor.execute(sql, (textHash,))
-        return cursor.fetchall()
-
-
-def _legacy_selectAvatarVoiceItemsByFilters(
-    keyword: str | None,
-    langCode: int,
-    limit: int | None = 800,
-    created_version: str | None = None,
-    updated_version: str | None = None,
-    version_lang_code: int | None = None,
-):
-    with closing(conn.cursor()) as cursor:
-        keyword_text = (keyword or "").strip()
-        exact = fuzzy = None
-        if keyword_text:
-            escaped = _escape_like(keyword_text)
-            exact = f"%{escaped}%"
-            fuzzy = exact
-
-        sql = (
-            "select fetters.avatarId, fetters.voiceTitleTextMapHash, "
-            "fetters.voiceFileTextTextMapHash, voice.voicePath "
-            "from fetters "
-            "left join voice on voice.dialogueId = fetters.voiceFile "
-            "and (voice.avatarId = fetters.avatarId or voice.avatarId = 0) "
-            "left join textMap as titleText on titleText.hash = fetters.voiceTitleTextMapHash "
-            "and titleText.lang = ? "
-            "left join textMap as contentText on contentText.hash = fetters.voiceFileTextTextMapHash "
-            "and contentText.lang = ? "
-            "where 1=1 "
-        )
-        params: list[object] = []
-        params.append(langCode)
-        params.append(langCode)
-
-        if keyword_text:
-            sql += (
-                "and ("
-                "(titleText.content like ? escape '\\' or titleText.content like ? escape '\\') "
-                "or (contentText.content like ? escape '\\' or contentText.content like ? escape '\\')"
-                ") "
-            )
-            params.append(exact)
-            params.append(fuzzy)
-            params.append(exact)
-            params.append(fuzzy)
-
-        sql = _append_textmap_exists_version_filter(
-            sql,
-            params,
-            "fetters.voiceFileTextTextMapHash",
-            created_version,
-            updated_version,
-            version_lang_code,
-        )
-
-        if keyword_text:
-            sql += (
-                "order by case "
-                "when titleText.content like ? escape '\\' then 0 "
-                "when contentText.content like ? escape '\\' then 1 "
-                "else 2 end, "
-                "length(coalesce(titleText.content, contentText.content, '')), fetters.fetterId "
-            )
-            params.extend([exact, exact])
-        else:
-            sql += "order by fetters.fetterId "
-
-        if limit is not None:
-            sql += "limit ?"
-            params.append(limit)
-
-        cursor.execute(sql, params)
         return cursor.fetchall()
 
 

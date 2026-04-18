@@ -6,6 +6,7 @@ from DBConfig import conn
 from DBInit import ensure_base_schema
 from import_utils import reset_temp_table
 from quest_hash_map_utils import _quest_talk_dialogue_join_condition
+from server_import import import_server_module
 from versioning import (
     VERSION_DIM_TABLE,
     ensure_version_schema as _ensure_version_schema_impl,
@@ -15,19 +16,9 @@ from versioning import (
     set_current_version as _set_current_version_impl,
 )
 
-try:
-    from quest_text_filters import (
-        build_quest_version_dialogue_not_excluded_sql,
-        get_quest_text_filter_lang_id,
-    )
-except ImportError:
-    SERVER_DIR = os.path.normpath(os.path.join(os.path.dirname(__file__), os.pardir))
-    if SERVER_DIR not in sys.path:
-        sys.path.insert(0, SERVER_DIR)
-    from quest_text_filters import (  # type: ignore
-        build_quest_version_dialogue_not_excluded_sql,
-        get_quest_text_filter_lang_id,
-    )
+quest_text_filters = import_server_module("quest_text_filters")
+build_quest_version_dialogue_not_excluded_sql = quest_text_filters.build_quest_version_dialogue_not_excluded_sql
+get_quest_text_filter_lang_id = quest_text_filters.get_quest_text_filter_lang_id
 
 
 _VERSION_SORT_KEY_MAX = 2147483647

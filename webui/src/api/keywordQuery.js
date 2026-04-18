@@ -2,16 +2,6 @@ import request from "@/utils/request";
 import axios from "axios";
 import { withCache } from "@/utils/requestCache";
 
-const queryBaidu = (keyword) => {
-    return {
-        "k": "KEYWORD",
-        "v": "KEYWORD EXPLAIN"
-    };
-    // return request.post("/api/baiduQuery", {
-    //     keyword: keyword
-    // });
-};
-
 const queryByKeyword = (
     keyword,
     langCode,
@@ -222,7 +212,6 @@ const getCatalogMeta = () => {
 };
 
 export default {
-    queryBaidu,
     queryByKeyword,
     getVoiceOver,
     getTalkFromHash,

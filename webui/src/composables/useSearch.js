@@ -2,6 +2,7 @@ import { ref, computed } from 'vue'
 import api from '@/api/keywordQuery'
 import useLanguage from '@/composables/useLanguage'
 import useVersion from '@/composables/useVersion'
+import { matchVersionFilters } from '@/utils/versionFilters'
 
 const useSearch = () => {
   const { selectedInputLanguage, supportedInputLanguage, loadLanguages } = useLanguage()
@@ -66,45 +67,14 @@ const useSearch = () => {
 
   const totalPages = computed(() => Math.max(1, Math.ceil(totalCount.value / pageSize.value)))
 
-  const normalizeText = (value) => {
-    if (!value) return ''
-    return String(value).trim().toLowerCase()
-  }
-
-  const normalizeVersion = (value) => normalizeText(value)
-
   const getSourceTypeLabel = (value) => {
     const normalized = String(value || '').trim()
     const option = sourceTypeOptions.find((item) => item.value === normalized)
     return option?.label || '来源'
   }
 
-  const getNormalizedEntryVersion = (entry, kind) => {
-    if (kind === 'created') return normalizeVersion(entry.createdVersion || entry.createdVersionRaw || '')
-    return normalizeVersion(entry.updatedVersion || entry.updatedVersionRaw || '')
-  }
-
   const shouldKeepByVersionFilter = (entry, updatedFilterRaw, createdFilterRaw) => {
-    const updatedFilter = normalizeVersion(updatedFilterRaw)
-    const createdFilter = normalizeVersion(createdFilterRaw)
-
-    // 检查创建版本筛选
-    if (createdFilter) {
-      const createdValue = getNormalizedEntryVersion(entry, 'created')
-      if (!createdValue.includes(createdFilter)) return false
-    }
-
-    // 检查更新版本筛选
-    if (updatedFilter) {
-      const updatedValue = getNormalizedEntryVersion(entry, 'updated')
-      if (!updatedValue.includes(updatedFilter)) return false
-
-      const createdValue = getNormalizedEntryVersion(entry, 'created')
-      if (!createdValue || !updatedValue) return true
-      return createdValue !== updatedValue
-    }
-
-    return true
+    return matchVersionFilters(entry, createdFilterRaw, updatedFilterRaw)
   }
 
   const fetchPage = async (page, useLast = false) => {

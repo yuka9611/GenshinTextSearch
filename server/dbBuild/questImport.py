@@ -40,24 +40,13 @@ from version_control import (
     get_or_create_version_id,
     should_update_version,
 )
+from server_import import import_server_module
 
-try:
-    from quest_text_filters import (
-        build_quest_text_excluded_sql,
-        build_quest_text_not_excluded_sql,
-        get_quest_text_filter_lang_id,
-        sanitize_quest_text_hash,
-    )
-except ImportError:
-    SERVER_DIR = os.path.normpath(os.path.join(os.path.dirname(__file__), os.pardir))
-    if SERVER_DIR not in sys.path:
-        sys.path.insert(0, SERVER_DIR)
-    from quest_text_filters import (  # type: ignore
-        build_quest_text_excluded_sql,
-        build_quest_text_not_excluded_sql,
-        get_quest_text_filter_lang_id,
-        sanitize_quest_text_hash,
-    )
+quest_text_filters = import_server_module("quest_text_filters")
+build_quest_text_excluded_sql = quest_text_filters.build_quest_text_excluded_sql
+build_quest_text_not_excluded_sql = quest_text_filters.build_quest_text_not_excluded_sql
+get_quest_text_filter_lang_id = quest_text_filters.get_quest_text_filter_lang_id
+sanitize_quest_text_hash = quest_text_filters.sanitize_quest_text_hash
 
 
 _MAIN_QUEST_DESC_HASH_BY_ID: dict[int, int | None] | None = None

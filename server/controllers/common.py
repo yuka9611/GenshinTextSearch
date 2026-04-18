@@ -3676,54 +3676,6 @@ def getDialogueGroup(
     }
 
 
-def _legacy_getAvatarVoices(avatarId: int, searchLang: int | None = None):
-    langs, sourceLangCode, _keywordLangCode = _resolve_avatar_query_langs(searchLang)
-
-    avatarName = databaseHelper.getCharterName(avatarId, sourceLangCode)
-    voice_rows = databaseHelper.selectAvatarVoiceItems(avatarId)
-
-    voices = []
-    seen_hashes = set()
-
-    for titleHash, textHash, voicePath in voice_rows:
-        if textHash is None:
-            continue
-        if textHash in seen_hashes:
-            continue
-        seen_hashes.add(textHash)
-
-        obj = queryTextHashInfo(textHash, langs, sourceLangCode)
-        obj['isTalk'] = False
-        obj['viewAsTextHash'] = True
-        obj['disableDetail'] = True
-        if avatarName:
-            if titleHash:
-                title = _get_text_map_content_with_fallback(titleHash, sourceLangCode, langs)
-                if title:
-                    obj['origin'] = f"{avatarName} · {title}"
-                    obj['voiceTitle'] = title
-                else:
-                    obj['origin'] = avatarName
-                    obj['voiceTitle'] = ""
-            else:
-                obj['origin'] = avatarName
-                obj['voiceTitle'] = ""
-        else:
-            obj['voiceTitle'] = ""
-        created_raw, updated_raw = databaseHelper.getTextMapVersionInfo(textHash, sourceLangCode)
-        obj.update(_build_version_fields(created_raw, updated_raw))
-
-        _attach_voice_metadata(obj, voicePath, langs)
-
-        voices.append(obj)
-
-    return {
-        "avatarId": avatarId,
-        "avatarName": avatarName,
-        "voices": voices
-    }
-
-
 def getAvatarStories(avatarId: int, searchLang: int | None = None):
     langs, sourceLangCode, _keywordLangCode = _resolve_avatar_query_langs(searchLang)
 
@@ -3802,92 +3754,6 @@ def getAvatarStories(avatarId: int, searchLang: int | None = None):
         "avatarName": avatarName,
         "stories": stories
     }
-
-
-
-
-
-def _legacy_searchAvatarVoicesByFilters(
-    title_keyword: str | None = None,
-    searchLang: int | None = None,
-    created_version: str | None = None,
-    updated_version: str | None = None,
-    limit: int = 1200,
-):
-    langs, sourceLangCode, keywordLangCode = _resolve_avatar_query_langs(searchLang)
-
-    voice_rows = databaseHelper.selectAvatarVoiceItemsByFilters(
-        title_keyword,
-        keywordLangCode,
-        limit=limit,
-        created_version=created_version,
-        updated_version=updated_version,
-        version_lang_code=sourceLangCode,
-    )
-
-    voices = []
-    seen_keys = set()
-    avatar_name_cache: dict[int, str | None] = {}
-    title_cache: dict[int, str | None] = {}
-
-    for avatarId, titleHash, textHash, voicePath in voice_rows:
-        if textHash is None:
-            continue
-        dedupe_key = (avatarId, textHash)
-        if dedupe_key in seen_keys:
-            continue
-        seen_keys.add(dedupe_key)
-
-        if avatarId not in avatar_name_cache:
-            avatar_name_cache[avatarId] = databaseHelper.getCharterName(avatarId, sourceLangCode)
-        avatarName = avatar_name_cache[avatarId]
-
-        if titleHash and titleHash not in title_cache:
-            title_cache[titleHash] = _normalize_text_map_content(
-                databaseHelper.getTextMapContent(titleHash, sourceLangCode),
-                sourceLangCode,
-            )
-        title = title_cache.get(titleHash) if titleHash else None
-
-        obj = queryTextHashInfo(textHash, langs, sourceLangCode)
-        obj['isTalk'] = False
-        obj['viewAsTextHash'] = True
-        obj['disableDetail'] = True
-        if avatarName and title:
-            obj['origin'] = f"{avatarName} · {title}"
-            obj['voiceTitle'] = title
-        elif avatarName:
-            obj['origin'] = avatarName
-            obj['voiceTitle'] = ""
-        elif title:
-            obj['origin'] = title
-            obj['voiceTitle'] = title
-        else:
-            obj['origin'] = "角色语音"
-            obj['voiceTitle'] = ""
-        created_raw, updated_raw = databaseHelper.getTextMapVersionInfo(textHash, sourceLangCode)
-        obj.update(_build_version_fields(created_raw, updated_raw))
-
-        obj['avatarId'] = avatarId
-        obj['avatarName'] = avatarName or ""
-
-        _attach_voice_metadata(obj, voicePath, langs)
-
-        voices.append(obj)
-
-    _sort_entries_by_match(
-        voices,
-        title_keyword or "",
-        keywordLangCode,
-        lambda entry: [
-            entry.get("voiceTitle"),
-            entry.get("translates", {}).get(str(keywordLangCode)),
-        ],
-    )
-    return {
-        "voices": voices
-    }
-
 
 def searchAvatarStoriesByFilters(
     title_keyword: str | None = None,
@@ -4459,6 +4325,44 @@ def setIsMale(isMale):
     config.setIsMale(isMale)
 
 
+def _build_avatar_voice_entry(
+    text_hash: int,
+    *,
+    langs: list[int],
+    source_lang_code: int,
+    avatar_name: str | None,
+    title: str | None,
+    avatar_id: int | None = None,
+):
+    obj = queryTextHashInfo(text_hash, langs, source_lang_code)
+    obj['isTalk'] = False
+    obj['viewAsTextHash'] = True
+    obj['disableDetail'] = True
+
+    normalized_title = (title or "").strip()
+    if avatar_name and normalized_title:
+        obj['origin'] = f"{avatar_name} · {normalized_title}"
+        obj['voiceTitle'] = normalized_title
+    elif avatar_name:
+        obj['origin'] = avatar_name
+        obj['voiceTitle'] = ""
+    elif normalized_title:
+        obj['origin'] = normalized_title
+        obj['voiceTitle'] = normalized_title
+    else:
+        obj['origin'] = "角色语音"
+        obj['voiceTitle'] = ""
+
+    created_raw, updated_raw = databaseHelper.getTextMapVersionInfo(text_hash, source_lang_code)
+    obj.update(_build_version_fields(created_raw, updated_raw))
+
+    if avatar_id is not None:
+        obj['avatarId'] = avatar_id
+        obj['avatarName'] = avatar_name or ""
+
+    return obj
+
+
 def getAvatarVoices(avatarId: int, searchLang: int | None = None):
     langs, sourceLangCode, _keywordLangCode = _resolve_avatar_query_langs(searchLang)
 
@@ -4474,26 +4378,16 @@ def getAvatarVoices(avatarId: int, searchLang: int | None = None):
 
         obj = voice_map.get(textHash)
         if obj is None:
-            obj = queryTextHashInfo(textHash, langs, sourceLangCode)
-            obj['isTalk'] = False
-            obj['viewAsTextHash'] = True
-            obj['disableDetail'] = True
-            if avatarName:
-                if titleHash:
-                    title = _get_text_map_content_with_fallback(titleHash, sourceLangCode, langs)
-                    if title:
-                        obj['origin'] = f"{avatarName} · {title}"
-                        obj['voiceTitle'] = title
-                    else:
-                        obj['origin'] = avatarName
-                        obj['voiceTitle'] = ""
-                else:
-                    obj['origin'] = avatarName
-                    obj['voiceTitle'] = ""
-            else:
-                obj['voiceTitle'] = ""
-            created_raw, updated_raw = databaseHelper.getTextMapVersionInfo(textHash, sourceLangCode)
-            obj.update(_build_version_fields(created_raw, updated_raw))
+            title = None
+            if titleHash:
+                title = _get_text_map_content_with_fallback(titleHash, sourceLangCode, langs)
+            obj = _build_avatar_voice_entry(
+                textHash,
+                langs=langs,
+                source_lang_code=sourceLangCode,
+                avatar_name=avatarName,
+                title=title,
+            )
             voice_map[textHash] = obj
             voices.append(obj)
 
@@ -4547,27 +4441,14 @@ def searchAvatarVoicesByFilters(
                 )
             title = title_cache.get(titleHash) if titleHash else None
 
-            obj = queryTextHashInfo(textHash, langs, sourceLangCode)
-            obj['isTalk'] = False
-            obj['viewAsTextHash'] = True
-            obj['disableDetail'] = True
-            if avatarName and title:
-                obj['origin'] = f"{avatarName} · {title}"
-                obj['voiceTitle'] = title
-            elif avatarName:
-                obj['origin'] = avatarName
-                obj['voiceTitle'] = ""
-            elif title:
-                obj['origin'] = title
-                obj['voiceTitle'] = title
-            else:
-                obj['origin'] = "角色语音"
-                obj['voiceTitle'] = ""
-            created_raw, updated_raw = databaseHelper.getTextMapVersionInfo(textHash, sourceLangCode)
-            obj.update(_build_version_fields(created_raw, updated_raw))
-
-            obj['avatarId'] = avatarId
-            obj['avatarName'] = avatarName or ""
+            obj = _build_avatar_voice_entry(
+                textHash,
+                langs=langs,
+                source_lang_code=sourceLangCode,
+                avatar_name=avatarName,
+                title=title,
+                avatar_id=avatarId,
+            )
 
             voice_map[dedupe_key] = obj
             voices.append(obj)

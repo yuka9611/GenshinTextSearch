@@ -4,22 +4,12 @@ import os
 import sys
 
 from import_utils import DEFAULT_BATCH_SIZE, executemany_batched, normalize_unique_ints
+from server_import import import_server_module
 
-try:
-    from quest_text_filters import (
-        build_quest_text_excluded_sql,
-        build_quest_version_dialogue_excluded_sql,
-        get_quest_text_filter_lang_id,
-    )
-except ImportError:
-    SERVER_DIR = os.path.normpath(os.path.join(os.path.dirname(__file__), os.pardir))
-    if SERVER_DIR not in sys.path:
-        sys.path.insert(0, SERVER_DIR)
-    from quest_text_filters import (  # type: ignore
-        build_quest_text_excluded_sql,
-        build_quest_version_dialogue_excluded_sql,
-        get_quest_text_filter_lang_id,
-    )
+quest_text_filters = import_server_module("quest_text_filters")
+build_quest_text_excluded_sql = quest_text_filters.build_quest_text_excluded_sql
+build_quest_version_dialogue_excluded_sql = quest_text_filters.build_quest_version_dialogue_excluded_sql
+get_quest_text_filter_lang_id = quest_text_filters.get_quest_text_filter_lang_id
 
 QUEST_HASH_SOURCE_TYPE_TITLE = "title"
 QUEST_HASH_SOURCE_TYPE_DESC = "desc"

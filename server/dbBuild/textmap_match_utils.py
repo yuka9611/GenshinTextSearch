@@ -9,14 +9,9 @@ from dataclasses import dataclass
 from difflib import SequenceMatcher
 
 from import_utils import to_hash_value
+from server_import import import_server_module
 
-try:
-    from quest_text_filters import is_short_generic_text
-except ImportError:
-    SERVER_DIR = os.path.normpath(os.path.join(os.path.dirname(__file__), os.pardir))
-    if SERVER_DIR not in sys.path:
-        sys.path.insert(0, SERVER_DIR)
-    from quest_text_filters import is_short_generic_text  # type: ignore
+is_short_generic_text = import_server_module("quest_text_filters").is_short_generic_text
 
 
 _SCALAR_TYPE_TAGS = {

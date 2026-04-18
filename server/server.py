@@ -115,22 +115,7 @@ if __name__ == "__main__":
         try:
             import tkinter as tk
             from tkinter import messagebox
-            import importlib.util
-            import os
-            import sys
-
-            # 动态加载controllers.py文件
-            server_dir = os.path.dirname(os.path.abspath(__file__))
-            controllers_path = os.path.join(server_dir, 'controllers.py')
-            spec = importlib.util.spec_from_file_location('controllers_module', controllers_path)
-            if spec and spec.loader:
-                controllers_module = importlib.util.module_from_spec(spec)
-                spec.loader.exec_module(controllers_module)
-            else:
-                # 如果加载失败，尝试直接导入
-                sys.path.insert(0, server_dir)
-                import controllers as controllers_module
-                sys.path.pop(0)
+            import controllers as controllers_module
 
             # 询问用户是否选择游戏目录
             root = tk.Tk()
