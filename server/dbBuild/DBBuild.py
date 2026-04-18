@@ -10,6 +10,7 @@ from contextlib import contextmanager
 from DBConfig import conn, DATA_PATH, DB_PATH
 import voiceItemImport
 import readableImport
+import readableMetaImport
 import subtitleImport
 import textMapImport
 import questImport
@@ -528,6 +529,7 @@ def main(
         "readable",
         "subtitles",
         "textmap",
+        "readable_meta",
         "entity_sources",
         "version_catalog"
     ]
@@ -608,6 +610,13 @@ def main(
                     stage,
                     textMapImport.importAllTextMap,
                     prune_missing=prune_missing,
+                    skip_asking=True,
+                )
+            elif stage == "readable_meta":
+                _run_stage(
+                    stage_timer,
+                    stage,
+                    readableMetaImport.refresh_readable_meta,
                     skip_asking=True,
                 )
             elif stage == "entity_sources":

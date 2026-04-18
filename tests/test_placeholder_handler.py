@@ -53,6 +53,20 @@ class TestReplaceWithNames:
         )
         assert result == "流浪者来了"
 
+    def test_little_one_showhost_replacement(self):
+        text = "{REALNAME[ID(2)|SHOWHOST(true)]}来了"
+        result = placeholderHandler._replace_with_names(
+            text, playerIsMale=True, lang=1, wander_name="", traveller_name="",
+        )
+        assert result == "小家伙来了"
+
+    def test_little_one_showhost_replacement_with_leading_hash(self):
+        text = "#{REALNAME[ID(2)|SHOWHOST(true)]}来了"
+        result = placeholderHandler._replace_with_names(
+            text, playerIsMale=True, lang=1, wander_name="", traveller_name="",
+        )
+        assert result == "小家伙来了"
+
     def test_leading_hash_stripped(self):
         text = "#开头的文本"
         result = placeholderHandler._replace_with_names(

@@ -38,7 +38,7 @@ def _replace_with_names(text: str, playerIsMale, lang: int, wander_name: str, tr
     normalized = re.sub(r"\{F#(.*?)}\{M#(.*?)}", replace_twin_text_reverse, normalized)
     normalized = re.sub(r"\{(.*?)AVATAR#SEXPRO\[(.*?)\|(.*?)]}", replace_sex_pro, normalized)
     normalized = re.sub(r"\{REALNAME\[ID\(1\)\|HOSTONLY\(true\)]}", wander_name, normalized)
-    normalized = re.sub(r"#\{REALNAME\[ID\(2\)\|SHOWHOST\(true\)]}", _LITTLE_ONE_NAME, normalized)
+    normalized = re.sub(r"#?\{REALNAME\[ID\(2\)\|SHOWHOST\(true\)]}", _LITTLE_ONE_NAME, normalized)
     normalized = re.sub(r"\{REALNAME\[ID\(2\)\|HOSTONLY\(true\)]}", _LITTLE_ONE_NAME, normalized)
     normalized = re.sub(r"\{NICKNAME}", traveller_name, normalized)
     if normalized.startswith("#"):

@@ -1,12 +1,22 @@
 from __future__ import annotations
 
 import json
+import os
+import sys
 from collections import defaultdict
 from collections.abc import Collection, Mapping
 from dataclasses import dataclass
 from difflib import SequenceMatcher
 
 from import_utils import to_hash_value
+
+try:
+    from quest_text_filters import is_short_generic_text
+except ImportError:
+    SERVER_DIR = os.path.normpath(os.path.join(os.path.dirname(__file__), os.pardir))
+    if SERVER_DIR not in sys.path:
+        sys.path.insert(0, SERVER_DIR)
+    from quest_text_filters import is_short_generic_text  # type: ignore
 
 
 _SCALAR_TYPE_TAGS = {
@@ -304,6 +314,9 @@ def allocate_textmap_current_matches(
         ]
         if not remaining_history_hashes:
             continue
+        current_content = current_index.hash_to_content.get(remaining_current_hashes[0])
+        if is_short_generic_text(current_content):
+            continue
 
         for current_hash, history_hash in zip(remaining_current_hashes, remaining_history_hashes):
             matched[current_hash] = history_hash
@@ -375,6 +388,9 @@ def match_textmap_lineage_to_previous(
         ]
         if not remaining_previous_hashes:
             continue
+        current_content = current_states[unmatched_by_content[content_key][0]].content
+        if is_short_generic_text(current_content):
+            continue
         for current_hash, previous_hash in zip(sorted(unmatched_by_content[content_key]), remaining_previous_hashes):
             previous_content = previous_get(previous_hash)
             matched[current_hash] = TextMapLineageMatch(
@@ -418,7 +434,6 @@ def match_textmap_lineage_to_previous(
         ]
     else:
         remaining_previous_rows = []
-    pair_count = len(remaining_current_hashes) * len(remaining_previous_rows)
     if remaining_current_hashes:
         candidate_limit_per_current = min(
             DEFAULT_TEXTMAP_MAX_SIMILARITY_CANDIDATES_PER_CURRENT,
@@ -430,32 +445,44 @@ def match_textmap_lineage_to_previous(
     else:
         candidate_limit_per_current = 0
 
-    if remaining_current_hashes and remaining_previous_rows and pair_count > 0:
+    if remaining_current_hashes and remaining_previous_rows:
         current_text_cache = {
             current_hash: stringify_textmap_value_for_similarity(current_states[current_hash].content)
             for current_hash in remaining_current_hashes
         }
+        current_is_short_generic = {
+            current_hash: is_short_generic_text(current_states[current_hash].content)
+            for current_hash in remaining_current_hashes
+        }
         previous_text_cache: dict[int, str]
         candidate_rows_by_current: dict[int, tuple[tuple[int, object], ...]]
-        if pair_count <= max_similarity_pairs:
+        filtered_previous_rows = [
+            (previous_hash, previous_content)
+            for previous_hash, previous_content in remaining_previous_rows
+            if not is_short_generic_text(previous_content)
+        ]
+        filtered_pair_count = len(remaining_current_hashes) * len(filtered_previous_rows)
+        if filtered_pair_count <= max_similarity_pairs:
             previous_text_cache = {
                 previous_hash: stringify_textmap_value_for_similarity(previous_content)
-                for previous_hash, previous_content in remaining_previous_rows
+                for previous_hash, previous_content in filtered_previous_rows
             }
-            candidate_rows = tuple(remaining_previous_rows)
+            candidate_rows = tuple(filtered_previous_rows)
             candidate_rows_by_current = {
-                current_hash: candidate_rows
+                current_hash: tuple() if current_is_short_generic[current_hash] else candidate_rows
                 for current_hash in remaining_current_hashes
             }
         else:
-            candidate_index = _build_textmap_similarity_candidate_index(remaining_previous_rows)
+            candidate_index = _build_textmap_similarity_candidate_index(filtered_previous_rows)
             previous_text_cache = dict(candidate_index.text_by_hash)
             previous_row_map = {
                 previous_hash: previous_content
-                for previous_hash, previous_content in remaining_previous_rows
+                for previous_hash, previous_content in filtered_previous_rows
             }
             candidate_rows_by_current = {}
             for current_hash in remaining_current_hashes:
+                if current_is_short_generic[current_hash]:
+                    continue
                 candidate_hashes = _select_textmap_similarity_candidate_hashes(
                     current_text_cache[current_hash],
                     candidate_index,

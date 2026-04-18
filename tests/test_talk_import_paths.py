@@ -159,6 +159,19 @@ def test_diff_update_analyze_diff_marks_new_qianxing_entity_excels():
     assert plan["entity_sources"] is True
 
 
+def test_diff_update_analyze_diff_marks_readable_meta_refresh_triggers():
+    plan = diffUpdate._analyze_diff(
+        [
+            {"action": "M", "old_path": None, "new_path": "Readable/CHS/Book1039.txt"},
+            {"action": "M", "old_path": None, "new_path": "ExcelBinOutput/MaterialExcelConfigData.json"},
+            {"action": "M", "old_path": None, "new_path": "ExcelBinOutput/BooksCodexExcelConfigData.json"},
+            {"action": "M", "old_path": None, "new_path": "TextMap/TextMapCHS.json"},
+        ]
+    )
+
+    assert plan["readable_meta"] is True
+
+
 def test_diff_update_resolve_talk_keys_supports_aadkdkpmgno_schema():
     obj = {
         "AADKDKPMGNO": 7008901,

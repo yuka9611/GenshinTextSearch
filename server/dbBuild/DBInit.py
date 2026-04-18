@@ -19,6 +19,7 @@ _BASE_SCHEMA_TABLES = (
     "questTalk",
     "quest_version",
     "readable",
+    "readable_meta",
     "subtitle",
     "textMap",
     "voice",

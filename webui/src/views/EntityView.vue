@@ -5,6 +5,7 @@ import { ElMessage } from 'element-plus'
 import api from '@/api/keywordQuery'
 import StylizedText from '@/components/StylizedText.vue'
 import useLanguage from '@/composables/useLanguage'
+import { getReadableCategoryLabel } from '@/utils/readableCategory'
 
 const uiText = {
   pageTitle: '来源详情',
@@ -74,6 +75,8 @@ const isEmptyState = computed(() => {
   }
   return entryCount.value === 0
 })
+
+const resolveReadableCategoryLabel = (entry) => getReadableCategoryLabel(entry?.readableCategory)
 
 const resolveVersionValue = (versionTag, rawVersion) => {
   if (versionTag) return String(versionTag).trim()
@@ -295,12 +298,12 @@ watch(selectedInputLanguage, async () => {
               <div class="entityCardTitle">
                 <el-tag size="small" effect="plain">{{ entry.fieldLabel }}</el-tag>
                 <el-tag
-                  v-if="entry.readableCategoryLabel && entry.readableCategoryLabel !== entry.fieldLabel"
+                  v-if="resolveReadableCategoryLabel(entry) && resolveReadableCategoryLabel(entry) !== entry.fieldLabel"
                   size="small"
                   effect="plain"
                   type="success"
                 >
-                  {{ entry.readableCategoryLabel }}
+                  {{ resolveReadableCategoryLabel(entry) }}
                 </el-tag>
                 <el-tag v-if="resolveEntryTextHash(entry)" size="small" effect="plain" type="info">
                   {{ uiText.textHash }}: {{ resolveEntryTextHash(entry) }}
@@ -334,12 +337,12 @@ watch(selectedInputLanguage, async () => {
           <div class="entityCardTitle">
             <el-tag size="small" effect="plain">{{ entry.fieldLabel }}</el-tag>
                 <el-tag
-                  v-if="entry.readableCategoryLabel && entry.readableCategoryLabel !== entry.fieldLabel"
+                  v-if="resolveReadableCategoryLabel(entry) && resolveReadableCategoryLabel(entry) !== entry.fieldLabel"
                   size="small"
                   effect="plain"
                   type="success"
                 >
-                  {{ entry.readableCategoryLabel }}
+                  {{ resolveReadableCategoryLabel(entry) }}
                 </el-tag>
             <el-tag v-if="resolveEntryTextHash(entry)" size="small" effect="plain" type="info">
               {{ uiText.textHash }}: {{ resolveEntryTextHash(entry) }}

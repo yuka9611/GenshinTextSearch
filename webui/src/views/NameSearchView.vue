@@ -9,6 +9,7 @@ import useVersion from '@/composables/useVersion'
 import useSearchCommon from '@/composables/useSearchCommon'
 import ActiveFilterTags from '@/components/ActiveFilterTags.vue'
 import formatText from '@/utils/formatText'
+import { READABLE_CATEGORY_OPTIONS, getReadableCategoryLabel } from '@/utils/readableCategory'
 
 const router = useRouter()
 
@@ -58,15 +59,7 @@ const questSourceTypeOptions = [
   { value: 'ANECDOTE', label: '游逸旅闻' },
   { value: 'UNKNOWN', label: '未分类' },
 ]
-const readableCategoryOptions = [
-  { value: '', label: '全部' },
-  { value: 'BOOK', label: '书籍' },
-  { value: 'COSTUME', label: '角色装扮' },
-  { value: 'RELIC', label: '圣遗物' },
-  { value: 'WEAPON', label: '武器' },
-  { value: 'WINGS', label: '风之翼' },
-  { value: 'OTHER', label: '其他' },
-]
+const readableCategoryOptions = READABLE_CATEGORY_OPTIONS
 
 const {
   selectedInputLanguage,
@@ -395,7 +388,14 @@ const clearAllFilters = () => {
               <StylizedText :text="readable.contentPreview" :keyword="keywordLast" />
             </div>
             <div class="versionTags tagRow">
-              <el-tag v-if="readable.readableCategoryLabel" size="small" effect="plain" type="success">{{ readable.readableCategoryLabel }}</el-tag>
+              <el-tag
+                v-if="getReadableCategoryLabel(readable.readableCategory)"
+                size="small"
+                effect="plain"
+                type="success"
+              >
+                {{ getReadableCategoryLabel(readable.readableCategory) }}
+              </el-tag>
               <span class="versionTag created">✦ {{ uiText.created }}: {{ displayVersion(readable, 'created') }}</span>
               <span v-if="showUpdatedVersionTag(readable)" class="versionTag updated">↻ {{ uiText.updated }}: {{ displayVersion(readable, 'updated') }}</span>
             </div>

@@ -11,6 +11,10 @@ import fts_tokenizer
 from quest_text_filters import build_quest_text_not_excluded_sql, is_excluded_quest_text
 
 
+_READABLE_LANG_SUFFIX_RE = re.compile(r"_(CHS|CHT|DE|EN|ES|FR|ID|IT|JP|KR|PT|RU|TH|TR|VI)$", re.IGNORECASE)
+_REGISTERED_SQL_CONNECTION_IDS: set[int] = set()
+
+
 def _coerce_optional_int(value: object) -> int | None:
     if value is None:
         return None
@@ -142,9 +146,30 @@ def _ensure_runtime_query_indexes(connection: sqlite3.Connection) -> None:
         pass
 
 
+def _normalize_readable_file_name(file_name: str | None) -> str:
+    normalized = str(file_name or "").replace("\\", "/").strip()
+    base_name = os.path.basename(normalized)
+    if not base_name:
+        return ""
+    root, ext = os.path.splitext(base_name)
+    return _READABLE_LANG_SUFFIX_RE.sub("", root) + ext
+
+
+def _ensure_runtime_sql_functions(connection: sqlite3.Connection) -> None:
+    conn_id = id(connection)
+    if conn_id in _REGISTERED_SQL_CONNECTION_IDS:
+        return
+    try:
+        connection.create_function("gts_normalize_readable_file_name", 1, _normalize_readable_file_name)
+    except Exception:
+        return
+    _REGISTERED_SQL_CONNECTION_IDS.add(conn_id)
+
+
 def _configure_connection(connection: sqlite3.Connection) -> None:
     """Register FTS helpers and apply default runtime PRAGMAs."""
     tokenizer, ext_path, ext_entry = _resolve_fts_settings()
+    _ensure_runtime_sql_functions(connection)
     _register_fts_content_function(connection, tokenizer)
     _try_load_fts_extension(connection, ext_path, ext_entry)
     _apply_connection_pragmas(connection)
@@ -1862,15 +1887,15 @@ _QUEST_SOURCE_TYPE_FILTERS = {
 
 READABLE_CATEGORY_LABELS = {
     "BOOK": "书籍",
+    "ITEM": "道具",
+    "READABLE": "阅读物",
     "COSTUME": "角色装扮",
     "RELIC": "圣遗物",
     "WEAPON": "武器",
     "WINGS": "风之翼",
-    "OTHER": "其他",
 }
 
 _READABLE_CATEGORY_PREFIXES = (
-    ("BOOK", "Book"),
     ("COSTUME", "Costume"),
     ("RELIC", "Relic"),
     ("WEAPON", "Weapon"),
@@ -1914,11 +1939,22 @@ def _quest_text_not_excluded_clause(content_expr: str) -> tuple[str, tuple[str, 
 
 
 def getReadableCategoryCode(file_name: str | None) -> str:
-    normalized_name = str(file_name or "").strip()
+    normalized_file_name = _normalize_readable_file_name(file_name)
+    if _table_exists("readable_meta"):
+        with closing(conn.cursor()) as cursor:
+            row = cursor.execute(
+                "SELECT readable_category FROM readable_meta WHERE normalized_file_name=? LIMIT 1",
+                (normalized_file_name,),
+            ).fetchone()
+        if row and row[0]:
+            normalized_category = str(row[0]).strip().upper()
+            if normalized_category in _READABLE_CATEGORY_FILTERS:
+                return normalized_category
+    normalized_name = os.path.splitext(normalized_file_name)[0]
     for code, prefix in _READABLE_CATEGORY_PREFIXES:
         if normalized_name.startswith(prefix):
             return code
-    return "OTHER"
+    return "READABLE"
 
 
 def _normalize_readable_category_filter(category: str | None) -> str | None:
@@ -1932,17 +1968,36 @@ def _normalize_readable_category_filter(category: str | None) -> str | None:
     return "__INVALID__"
 
 
-def _readable_category_case_expr(table_alias: str) -> str:
+def _fallback_readable_category_case_expr(table_alias: str) -> str:
     file_name_expr = f"{table_alias}.fileName"
     return (
         f"case "
-        f"when {file_name_expr} glob 'Book*' then 'BOOK' "
         f"when {file_name_expr} glob 'Costume*' then 'COSTUME' "
         f"when {file_name_expr} glob 'Relic*' then 'RELIC' "
         f"when {file_name_expr} glob 'Weapon*' then 'WEAPON' "
         f"when {file_name_expr} glob 'Wings*' then 'WINGS' "
-        f"else 'OTHER' end"
+        f"else 'READABLE' end"
     )
+
+
+def _build_readable_meta_join_sql(
+    table_alias: str,
+    meta_alias: str = "readable_meta",
+) -> str:
+    if not _table_exists("readable_meta"):
+        return ""
+    _ensure_runtime_sql_functions(conn)
+    return (
+        f"left join readable_meta {meta_alias} "
+        f"on {meta_alias}.normalized_file_name = gts_normalize_readable_file_name({table_alias}.fileName) "
+    )
+
+
+def _readable_category_case_expr(table_alias: str, meta_alias: str = "readable_meta") -> str:
+    fallback_expr = _fallback_readable_category_case_expr(table_alias)
+    if not _table_exists("readable_meta"):
+        return fallback_expr
+    return f"coalesce({meta_alias}.readable_category, {fallback_expr})"
 
 
 def _append_readable_category_filter_clause(
@@ -1950,13 +2005,16 @@ def _append_readable_category_filter_clause(
     params: list,
     table_alias: str,
     category: str | None,
+    meta_alias: str = "readable_meta",
 ) -> str:
     normalized = _normalize_readable_category_filter(category)
     if normalized is None:
         return sql
     if normalized == "__INVALID__":
         return sql + "and 1=0 "
-    sql += f"and {_readable_category_case_expr(table_alias)} = ? "
+    if normalized in {"BOOK", "ITEM"} and not _table_exists("readable_meta"):
+        return sql + "and 1=0 "
+    sql += f"and {_readable_category_case_expr(table_alias, meta_alias)} = ? "
     params.append(normalized)
     return sql
 
@@ -3721,8 +3779,10 @@ def selectReadableFromKeyword(
             return []
         lang_placeholders = ",".join(["?"] * len(readable_langs))
         version_select = _version_select_expr("readable", "readable")
+        readable_meta_join = _build_readable_meta_join_sql("readable")
         sql = (
             f"select fileName, content, titleTextMapHash, readableId, {version_select} from readable "
+            f"{readable_meta_join}"
             f"where lang in ({lang_placeholders}) and (content like ? escape '\\' or content like ? escape '\\') "
         )
         params = []
@@ -3858,9 +3918,10 @@ def resolveReadableTitleHash(readableId: int | None = None, fileName: str | None
 
 def getReadableInfoByTitleHash(titleTextMapHash: int, category: str | None = None):
     with closing(conn.cursor()) as cursor:
+        readable_meta_join = _build_readable_meta_join_sql("readable")
         sql = (
             "select fileName, titleTextMapHash, readableId "
-            "from readable where titleTextMapHash=? "
+            f"from readable {readable_meta_join} where titleTextMapHash=? "
         )
         params: list[object] = [int(titleTextMapHash)]
         sql = _append_readable_category_filter_clause(sql, params, "readable", category)
@@ -3874,9 +3935,10 @@ def getReadableInfoByTitleHash(titleTextMapHash: int, category: str | None = Non
 
 def selectReadableRefsByTitleHash(titleTextMapHash: int, category: str | None = None):
     with closing(conn.cursor()) as cursor:
+        readable_meta_join = _build_readable_meta_join_sql("readable")
         sql = (
             "select min(fileName) as fileName, titleTextMapHash, readableId "
-            "from readable where titleTextMapHash=? "
+            f"from readable {readable_meta_join} where titleTextMapHash=? "
         )
         params: list[object] = [int(titleTextMapHash)]
         sql = _append_readable_category_filter_clause(sql, params, "readable", category)
@@ -5158,6 +5220,8 @@ def selectReadableByTitleKeyword(
     created_version: str | None = None,
     updated_version: str | None = None,
     category: str | None = None,
+    limit: int | None = 200,
+    offset: int | None = None,
 ):
     with closing(conn.cursor()) as cursor:
         exact, fuzzy = _build_like_patterns(keyword, langCode)
@@ -5169,9 +5233,11 @@ def selectReadableByTitleKeyword(
         readable_lang_placeholders = ",".join(["?"] * len(readable_langs))
         version_select = _version_select_expr("readable", "readable")
         version_group = "readable.created_version_id, readable.updated_version_id"
+        readable_meta_join = _build_readable_meta_join_sql("readable")
         sql = (f"select readable.fileName, readable.readableId, readable.titleTextMapHash, textMap.content, "
                f"{version_select} "
-               "from readable join textMap on readable.titleTextMapHash=textMap.hash "
+               f"from readable {readable_meta_join}"
+               "join textMap on readable.titleTextMapHash=textMap.hash "
                f"where readable.lang in ({readable_lang_placeholders}) and textMap.lang=? "
                "and (textMap.content like ? escape '\\' or textMap.content like ? escape '\\') ")
         params = readable_langs + [langCode, exact, fuzzy]
@@ -5186,9 +5252,16 @@ def selectReadableByTitleKeyword(
         sql = _append_readable_category_filter_clause(sql, params, "readable", category)
         sql += ("group by readable.fileName, readable.readableId, readable.titleTextMapHash, textMap.content, "
                 f"{version_group} "
-                f"order by {match_sort_sql}, {normalized_length_sql} "
-                "limit 200")
+                f"order by {match_sort_sql}, {normalized_length_sql} ")
         params.extend(match_sort_params)
+        if limit is not None:
+            sql += "limit ? "
+            params.append(limit)
+        if offset is not None and offset > 0:
+            if limit is None:
+                sql += "limit -1 "
+            sql += "offset ? "
+            params.append(offset)
         cursor.execute(sql, params)
         return cursor.fetchall()
 
@@ -5200,6 +5273,8 @@ def selectReadableByFileNameContains(
     created_version: str | None = None,
     updated_version: str | None = None,
     category: str | None = None,
+    limit: int | None = 200,
+    offset: int | None = None,
 ):
     with closing(conn.cursor()) as cursor:
         escaped = _escape_like(keyword)
@@ -5212,10 +5287,11 @@ def selectReadableByFileNameContains(
         readable_lang_placeholders = ",".join(["?"] * len(readable_langs))
         version_select = _version_select_expr("readable", "readable")
         version_group = "readable.created_version_id, readable.updated_version_id"
+        readable_meta_join = _build_readable_meta_join_sql("readable")
         sql = (
             f"select readable.fileName, readable.readableId, readable.titleTextMapHash, textMap.content, "
             f"{version_select} "
-            "from readable "
+            f"from readable {readable_meta_join}"
             "left join textMap on readable.titleTextMapHash=textMap.hash and textMap.lang=? "
             f"where readable.lang in ({readable_lang_placeholders}) and readable.fileName like ? escape '\\' "
         )
@@ -5231,9 +5307,16 @@ def selectReadableByFileNameContains(
         sql = _append_readable_category_filter_clause(sql, params, "readable", category)
         sql += ("group by readable.fileName, readable.readableId, readable.titleTextMapHash, textMap.content, "
                 f"{version_group} "
-                f"order by {match_sort_sql}, {normalized_length_sql} "
-                "limit 200")
+                f"order by {match_sort_sql}, {normalized_length_sql} ")
         params.extend(match_sort_params)
+        if limit is not None:
+            sql += "limit ? "
+            params.append(limit)
+        if offset is not None and offset > 0:
+            if limit is None:
+                sql += "limit -1 "
+            sql += "offset ? "
+            params.append(offset)
         cursor.execute(sql, params)
         return cursor.fetchall()
 
@@ -5280,6 +5363,7 @@ def selectReadableByVersion(
     updated_version: str | None = None,
     limit: int | None = 2000,
     category: str | None = None,
+    offset: int | None = None,
 ):
     with closing(conn.cursor()) as cursor:
         readable_langs = _expand_readable_langs([langStr])
@@ -5287,10 +5371,11 @@ def selectReadableByVersion(
             return []
         readable_lang_placeholders = ",".join(["?"] * len(readable_langs))
         version_select = _version_select_expr("readable", "readable")
+        readable_meta_join = _build_readable_meta_join_sql("readable")
         sql = (
             f"select readable.fileName, readable.readableId, readable.titleTextMapHash, "
             f"textMap.content as title, {version_select} "
-            "from readable "
+            f"from readable {readable_meta_join}"
             "left join textMap on readable.titleTextMapHash=textMap.hash and textMap.lang=? "
             f"where readable.lang in ({readable_lang_placeholders}) "
         )
@@ -5308,6 +5393,11 @@ def selectReadableByVersion(
         if limit is not None:
             sql += "limit ?"
             params.append(limit)
+        if offset is not None and offset > 0:
+            if limit is None:
+                sql += " limit -1"
+            sql += " offset ?"
+            params.append(offset)
         cursor.execute(sql, params)
         return cursor.fetchall()
 

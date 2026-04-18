@@ -25,6 +25,20 @@ def test_build_versioned_textmap_row_plan_inherits_versions_across_hash_change()
     }
 
 
+def test_build_versioned_textmap_row_plan_does_not_reuse_short_generic_versions_across_hash_change():
+    row_plan = textMapImport._build_versioned_textmap_row_plan(
+        current_obj={100: "呀！"},
+        existing_rows_by_hash={
+            200: ("呀！", 10, 10),
+        },
+        version_id=30,
+    )
+
+    assert row_plan == {
+        100: ("呀！", 30, 30),
+    }
+
+
 def test_build_versioned_textmap_row_plan_keeps_same_hash_same_content_versions():
     row_plan = textMapImport._build_versioned_textmap_row_plan(
         current_obj={100: "same text"},
@@ -37,6 +51,20 @@ def test_build_versioned_textmap_row_plan_keeps_same_hash_same_content_versions(
 
     assert row_plan == {
         100: ("same text", 10, 12),
+    }
+
+
+def test_build_versioned_textmap_row_plan_keeps_same_hash_versions_for_short_generic_text():
+    row_plan = textMapImport._build_versioned_textmap_row_plan(
+        current_obj={100: "呀！"},
+        existing_rows_by_hash={
+            100: ("呀！", 10, 12),
+        },
+        version_id=30,
+    )
+
+    assert row_plan == {
+        100: ("呀！", 10, 12),
     }
 
 
@@ -81,6 +109,20 @@ def test_build_versioned_textmap_row_plan_can_reuse_versions_from_another_hash_w
 
     assert row_plan == {
         100: ("same text", 10, 10),
+    }
+
+
+def test_build_versioned_textmap_row_plan_still_reuses_semantic_short_sentences_across_hash_change():
+    row_plan = textMapImport._build_versioned_textmap_row_plan(
+        current_obj={100: "谢谢。"},
+        existing_rows_by_hash={
+            200: ("谢谢。", 10, 10),
+        },
+        version_id=30,
+    )
+
+    assert row_plan == {
+        100: ("谢谢。", 10, 10),
     }
 
 

@@ -87,6 +87,14 @@ from versioning import (
 from lightweight_progress import LightweightProgress
 
 try:
+    from quest_text_filters import build_quest_version_dialogue_not_excluded_sql
+except ImportError:
+    SERVER_DIR = os.path.normpath(os.path.join(os.path.dirname(__file__), os.pardir))
+    if SERVER_DIR not in sys.path:
+        sys.path.insert(0, SERVER_DIR)
+    from quest_text_filters import build_quest_version_dialogue_not_excluded_sql  # type: ignore
+
+try:
     reconfigure = getattr(sys.stderr, "reconfigure", None)
     if callable(reconfigure):
         reconfigure(encoding="utf-8", errors="backslashreplace")
@@ -2405,6 +2413,9 @@ def apply_quest_version_delta_from_textmap(
                         (lang, version_id),
                     )
                 else:
+                    dialogue_not_excluded_sql, dialogue_not_excluded_params = (
+                        build_quest_version_dialogue_not_excluded_sql("tm.content")
+                    )
                     cursor.execute(
                         f"""
                         INSERT INTO quest_version(questId, lang, updated_version_id)
@@ -2422,6 +2433,8 @@ def apply_quest_version_delta_from_textmap(
                                        OR (coalesce(qt.coopQuestId, 0) > 0 AND d.coopQuestId = qt.coopQuestId)
                                    )
                                 JOIN _changed_textmap_hash c ON c.hash = d.textHash
+                                JOIN textMap tm ON tm.hash = d.textHash AND tm.lang = ?
+                                WHERE {dialogue_not_excluded_sql}
                             )
                         )
                         ON CONFLICT(questId, lang) DO UPDATE SET
@@ -2431,7 +2444,7 @@ def apply_quest_version_delta_from_textmap(
                             is_created=False,
                         )}
                         """,
-                        (lang, version_id),
+                        (lang, version_id, lang, *dialogue_not_excluded_params),
                     )
                 stats["quest_updated_by_textmap"] += int(cursor.rowcount or 0)
             except Exception as e:

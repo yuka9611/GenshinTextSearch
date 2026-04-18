@@ -181,6 +181,72 @@ def test_compute_textmap_group_authoritative_versions_prefers_same_content_prede
     }
 
 
+def test_compute_textmap_group_authoritative_versions_does_not_reuse_short_generic_same_content_across_hash(monkeypatch):
+    history_backfill._clear_history_runtime_caches()
+    snapshots = (
+        history_backfill.VersionSnapshot("5.0", "5.0", 50, "sha50", 50),
+        history_backfill.VersionSnapshot("6.5", "6.5", 65, "sha65", 65),
+    )
+    snapshot_payloads = {
+        ("sha50", "TextMapCHS.json"): {
+            "100": "呀！",
+        },
+    }
+
+    monkeypatch.setattr(
+        history_backfill,
+        "_load_snapshot_textmap_group",
+        lambda repo_path, commit_sha, base_name: snapshot_payloads.get((commit_sha, base_name)),
+    )
+
+    version_plan = history_backfill._compute_textmap_group_authoritative_versions(
+        repo_path="/tmp/fake-repo",
+        base_name="TextMapCHS.json",
+        current_obj={
+            "200": "呀！",
+        },
+        target_hashes=[200],
+        snapshots=snapshots,
+    )
+
+    assert version_plan == {
+        200: (65, 65),
+    }
+
+
+def test_compute_textmap_group_authoritative_versions_does_not_reuse_short_generic_similar_text(monkeypatch):
+    history_backfill._clear_history_runtime_caches()
+    snapshots = (
+        history_backfill.VersionSnapshot("5.0", "5.0", 50, "sha50", 50),
+        history_backfill.VersionSnapshot("6.5", "6.5", 65, "sha65", 65),
+    )
+    snapshot_payloads = {
+        ("sha50", "TextMapCHS.json"): {
+            "100": "呀！",
+        },
+    }
+
+    monkeypatch.setattr(
+        history_backfill,
+        "_load_snapshot_textmap_group",
+        lambda repo_path, commit_sha, base_name: snapshot_payloads.get((commit_sha, base_name)),
+    )
+
+    version_plan = history_backfill._compute_textmap_group_authoritative_versions(
+        repo_path="/tmp/fake-repo",
+        base_name="TextMapCHS.json",
+        current_obj={
+            "200": "呀呀！",
+        },
+        target_hashes=[200],
+        snapshots=snapshots,
+    )
+
+    assert version_plan == {
+        200: (65, 65),
+    }
+
+
 def test_compute_textmap_group_authoritative_versions_marks_updated_when_hash_migration_and_text_change_happen_together(monkeypatch):
     history_backfill._clear_history_runtime_caches()
     snapshots = (

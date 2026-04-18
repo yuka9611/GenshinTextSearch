@@ -3,6 +3,7 @@ import json
 import math
 import os
 import re
+import unicodedata
 import zlib
 from functools import lru_cache
 from typing import TypedDict
@@ -601,6 +602,27 @@ def _get_sub_category_label(sub_category_code: int) -> str:
 
 _READABLE_LANG_SUFFIX_RE = re.compile(r"_(CHT|DE|EN|ES|FR|ID|IT|JP|KR|PT|RU|TH|TR|VI)$", re.IGNORECASE)
 _ENTITY_EMPTY_BODY_MESSAGE = "暂无可用描述文本"
+_READABLE_CATEGORY_LABELS = {
+    "BOOK": "书籍",
+    "ITEM": "道具",
+    "READABLE": "阅读物",
+    "COSTUME": "角色装扮",
+    "RELIC": "圣遗物",
+    "WEAPON": "武器",
+    "WINGS": "风之翼",
+}
+_SEMANTIC_READABLE_CATEGORIES = {
+    "BOOK",
+    "ITEM",
+    "READABLE",
+}
+_STRUCTURAL_READABLE_CATEGORIES = {
+    "COSTUME",
+    "RELIC",
+    "WEAPON",
+    "WINGS",
+}
+_READABLE_ITEM_MATCH_STRIP_RE = re.compile(r"[\s\"'“”‘’《》「」『』\(\)（）\[\]【】<>〈〉·・]")
 
 
 class _EntityReadableLookup(TypedDict):
@@ -608,9 +630,13 @@ class _EntityReadableLookup(TypedDict):
     reliquary_set_to_id: dict[int, int]
     reliquary_set_piece_to_id: dict[tuple[int, int], int]
     book_material_ids: set[int]
+    codex_readable_ids: set[int]
+    codex_title_hashes: set[int]
     item_readable_ids_by_item_id: dict[int, list[int]]
     item_ids_by_readable_id: dict[int, int]
     item_ids_by_title_hash: dict[int, int]
+    item_name_hash_by_item_id: dict[int, int]
+    item_desc_hash_by_item_id: dict[int, int]
 
 
 @lru_cache(maxsize=1)
@@ -639,9 +665,13 @@ def _load_entity_readable_lookup() -> _EntityReadableLookup:
             "reliquary_set_to_id": {},
             "reliquary_set_piece_to_id": {},
             "book_material_ids": set(),
+            "codex_readable_ids": set(),
+            "codex_title_hashes": set(),
             "item_readable_ids_by_item_id": {},
             "item_ids_by_readable_id": {},
             "item_ids_by_title_hash": {},
+            "item_name_hash_by_item_id": {},
+            "item_desc_hash_by_item_id": {},
         }
 
     excel_root = os.path.join(data_root, "ExcelBinOutput")
@@ -684,11 +714,25 @@ def _load_entity_readable_lookup() -> _EntityReadableLookup:
         if piece_no:
             reliquary_set_piece_to_id.setdefault((set_id, piece_no), reliquary_id)
 
+    material_rows = _load_rows("MaterialExcelConfigData.json")
     material_ids = {
         int(row["id"])
-        for row in _load_rows("MaterialExcelConfigData.json")
+        for row in material_rows
         if isinstance(row.get("id"), int) and row.get("id")
     }
+    item_name_hash_by_item_id: dict[int, int] = {}
+    item_desc_hash_by_item_id: dict[int, int] = {}
+    for row in material_rows:
+        item_id = row.get("id")
+        if not isinstance(item_id, int) or not item_id:
+            continue
+        name_hash = row.get("nameTextMapHash")
+        desc_hash = row.get("descTextMapHash")
+        if isinstance(name_hash, int) and name_hash:
+            item_name_hash_by_item_id[item_id] = name_hash
+        if isinstance(desc_hash, int) and desc_hash:
+            item_desc_hash_by_item_id[item_id] = desc_hash
+
     readable_localization_ids: set[int] = set()
     for row in _load_rows("LocalizationExcelConfigData.json"):
         loc_id = row.get("id")
@@ -697,12 +741,13 @@ def _load_entity_readable_lookup() -> _EntityReadableLookup:
         if any(isinstance(value, str) and "Readable" in value for value in row.values()):
             readable_localization_ids.add(loc_id)
 
+    book_material_ids = _build_book_material_ids(_load_rows("BooksCodexExcelConfigData.json"))
+    codex_readable_ids: set[int] = set()
+    codex_title_hashes: set[int] = set()
     item_readable_ids_by_item_id: dict[int, list[int]] = {}
     item_ids_by_readable_id: dict[int, int] = {}
     item_ids_by_title_hash: dict[int, int] = {}
     for row in _load_rows("DocumentExcelConfigData.json"):
-        if str(row.get("documentType") or "").strip() != "Book":
-            continue
         item_id = row.get("id")
         if not isinstance(item_id, int) or not item_id or item_id not in material_ids:
             continue
@@ -715,19 +760,28 @@ def _load_entity_readable_lookup() -> _EntityReadableLookup:
             item_ids_by_readable_id.setdefault(loc_id, item_id)
         if not readable_ids:
             continue
-        deduped_readable_ids = sorted(set(readable_ids))
+        item_readable_ids_by_item_id.setdefault(item_id, []).extend(readable_ids)
+        deduped_readable_ids = sorted(set(item_readable_ids_by_item_id[item_id]))
         item_readable_ids_by_item_id[item_id] = deduped_readable_ids
         if isinstance(title_hash, int) and title_hash:
             item_ids_by_title_hash.setdefault(title_hash, item_id)
+            if item_id in book_material_ids:
+                codex_title_hashes.add(title_hash)
+        if item_id in book_material_ids:
+            codex_readable_ids.update(deduped_readable_ids)
 
     return {
         "outfit_item_to_skin": outfit_item_to_skin,
         "reliquary_set_to_id": reliquary_set_to_id,
         "reliquary_set_piece_to_id": reliquary_set_piece_to_id,
-        "book_material_ids": _build_book_material_ids(_load_rows("BooksCodexExcelConfigData.json")),
+        "book_material_ids": book_material_ids,
+        "codex_readable_ids": codex_readable_ids,
+        "codex_title_hashes": codex_title_hashes,
         "item_readable_ids_by_item_id": item_readable_ids_by_item_id,
         "item_ids_by_readable_id": item_ids_by_readable_id,
         "item_ids_by_title_hash": item_ids_by_title_hash,
+        "item_name_hash_by_item_id": item_name_hash_by_item_id,
+        "item_desc_hash_by_item_id": item_desc_hash_by_item_id,
     }
 
 
@@ -817,6 +871,101 @@ def _is_item_linked_readable(readable_id: int | None = None, title_text_hash: in
     if title_text_hash is not None and int(title_text_hash) in lookup.get("item_ids_by_title_hash", {}):
         return True
     return False
+
+
+def _get_readable_category_label(category: str | None) -> str:
+    normalized = str(category or "").strip().upper()
+    return _READABLE_CATEGORY_LABELS.get(normalized, _READABLE_CATEGORY_LABELS["READABLE"])
+
+
+def _normalize_readable_item_match_text(text: str | None) -> str:
+    normalized = unicodedata.normalize("NFKC", str(text or "")).strip().lower()
+    normalized = _READABLE_ITEM_MATCH_STRIP_RE.sub("", normalized)
+    return normalized
+
+
+def _has_visible_text_hash_content(text_hash: int | None) -> bool:
+    if not text_hash:
+        return False
+    content = _get_text_map_content_with_fallback(
+        int(text_hash),
+        config.getSourceLanguage(),
+        [],
+    )
+    return bool(content and str(content).strip())
+
+
+def _resolve_item_id_for_readable(
+    readable_id: int | None = None,
+    title_text_hash: int | None = None,
+) -> int | None:
+    lookup = _load_entity_readable_lookup()
+    if readable_id is not None:
+        item_id = lookup.get("item_ids_by_readable_id", {}).get(int(readable_id))
+        if item_id:
+            return int(item_id)
+    if title_text_hash is not None:
+        item_id = lookup.get("item_ids_by_title_hash", {}).get(int(title_text_hash))
+        if item_id:
+            return int(item_id)
+    return None
+
+
+def _is_codex_readable(
+    readable_id: int | None = None,
+    title_text_hash: int | None = None,
+) -> bool:
+    lookup = _load_entity_readable_lookup()
+    if readable_id is not None and int(readable_id) in lookup.get("codex_readable_ids", set()):
+        return True
+    if title_text_hash is not None and int(title_text_hash) in lookup.get("codex_title_hashes", set()):
+        return True
+    return False
+
+
+def _is_non_codex_item_readable(
+    file_name: str | None,
+    title_text_hash: int | None = None,
+    readable_id: int | None = None,
+) -> bool:
+    normalized_file_name = str(file_name or "").strip()
+    if not normalized_file_name.startswith("Book"):
+        return False
+    if _is_codex_readable(readable_id, title_text_hash):
+        return False
+    item_id = _resolve_item_id_for_readable(readable_id, title_text_hash)
+    if item_id is None:
+        return False
+
+    lookup = _load_entity_readable_lookup()
+    item_name_hash = lookup.get("item_name_hash_by_item_id", {}).get(item_id)
+    item_desc_hash = lookup.get("item_desc_hash_by_item_id", {}).get(item_id)
+
+    item_name = _get_text_map_content_with_fallback(
+        item_name_hash,
+        config.getSourceLanguage(),
+        [],
+    )
+    readable_title = _get_text_map_content_with_fallback(
+        title_text_hash,
+        config.getSourceLanguage(),
+        [],
+    )
+    if (
+        _normalize_readable_item_match_text(item_name)
+        and _normalize_readable_item_match_text(readable_title)
+        and _normalize_readable_item_match_text(item_name) != _normalize_readable_item_match_text(readable_title)
+    ):
+        return True
+    return _has_visible_text_hash_content(item_desc_hash)
+
+
+def _resolve_readable_category(
+    file_name: str | None,
+    title_text_hash: int | None = None,
+    readable_id: int | None = None,
+) -> str:
+    return databaseHelper.getReadableCategoryCode(file_name)
 
 
 def _resolve_item_readable_refs(item_id: int) -> list[tuple[str, int | None, int | None]]:
@@ -940,7 +1089,12 @@ def _collect_entity_readable_entries(
 
     seen_keys: set[int | str] = set()
     entries: list[dict] = []
-    fixed_field_label = "故事" if source_type in {"costume", "suit", "dressing", "weapon", "reliquary"} else None
+    if source_type == "item":
+        fixed_field_label = "道具"
+    elif source_type in {"costume", "suit", "dressing", "weapon", "reliquary"}:
+        fixed_field_label = "故事"
+    else:
+        fixed_field_label = None
 
     for file_name, readable_title_hash, readable_id in refs:
         dedupe_key: int | str
@@ -952,7 +1106,13 @@ def _collect_entity_readable_entries(
             continue
         seen_keys.add(dedupe_key)
         resolved_title_hash = int(readable_title_hash or title_text_hash or 0)
-        field_label = fixed_field_label or _classify_readable_label(str(file_name), resolved_title_hash, int(readable_id) if readable_id is not None else None)
+        field_label = fixed_field_label or _get_readable_category_label(
+            _resolve_readable_category(
+                str(file_name),
+                resolved_title_hash,
+                int(readable_id) if readable_id is not None else None,
+            )
+        )
         entry = _build_entity_readable_entry(
             str(file_name),
             resolved_title_hash,
@@ -1313,44 +1473,13 @@ def _build_quest_source_type_fields(source_type: str | None) -> dict:
     }
 
 
-def _classify_readable_label(
-    file_name: str | None,
-    title_text_hash: int | None = None,
-    readable_id: int | None = None,
-) -> str:
-    """统一阅读物分类：先按 codex（书籍/任务道具），再按文件名前缀。"""
-    if _is_item_linked_readable(readable_id, title_text_hash):
-        return "道具"
-    if title_text_hash:
-        lookup = _load_entity_readable_lookup()
-        book_ids = lookup.get("book_material_ids", set())
-        entity_rows = databaseHelper.selectEntitySourcesByTitleHash(title_text_hash)
-        for row in entity_rows:
-            source_type_code, entity_id = row[0], row[1]
-            if entity_id in book_ids:
-                return "书籍"
-            sub_rows = databaseHelper.selectEntityTextHashesByEntity(source_type_code, entity_id)
-            for sub_row in sub_rows:
-                sub_cat = sub_row[3] if len(sub_row) > 3 else 0
-                if sub_cat == 1:  # SUB_QUEST_ITEM
-                    return "任务道具"
-    category = databaseHelper.getReadableCategoryCode(file_name)
-    label = databaseHelper.READABLE_CATEGORY_LABELS.get(category, "")
-    if label == "书籍":
-        return "书籍"
-    return label if label and label != "其他" else "阅读物"
-
-
 def _build_readable_category_fields(
     file_name: str | None,
     title_text_hash: int | None = None,
     readable_id: int | None = None,
 ) -> dict:
-    category = databaseHelper.getReadableCategoryCode(file_name)
-    label = _classify_readable_label(file_name, title_text_hash, readable_id)
     return {
-        "readableCategory": category,
-        "readableCategoryLabel": label,
+        "readableCategory": _resolve_readable_category(file_name, title_text_hash, readable_id),
     }
 
 
@@ -2683,7 +2812,7 @@ def _build_readable_obj(fileName, content, titleTextMapHash, readableId, created
     """
     fileHash = zlib.crc32(fileName.encode('utf-8'))
     readable_category_fields = _build_readable_category_fields(fileName, titleTextMapHash, readableId)
-    origin_label = readable_category_fields["readableCategoryLabel"]
+    origin_label = _get_readable_category_label(readable_category_fields["readableCategory"])
 
     # 搜索阶段：返回最小化信息
     if isSearchPhase:
@@ -2891,6 +3020,9 @@ def searchNameEntries(
     updated_version_filter = _normalize_version_filter(updated_version)
     quest_source_type_filter = (quest_source_type or "").strip().upper() or None
     readable_category_filter = (readable_category or "").strip().upper() or None
+    invalid_readable_category_filter = bool(
+        readable_category_filter and readable_category_filter not in _READABLE_CATEGORY_LABELS
+    )
     if (
         not keyword_trim
         and not created_version_filter
@@ -2915,6 +3047,48 @@ def searchNameEntries(
 
     def build_preview(content: str | None):
         return _build_keyword_preview(content, keyword_trim)
+
+    def resolve_readable_title_hash(
+        file_name: str,
+        readable_id: int | None,
+        title_text_map_hash: int | None,
+    ) -> int | None:
+        if title_text_map_hash is not None:
+            return int(title_text_map_hash)
+        resolved_hash = databaseHelper.resolveReadableTitleHash(readable_id, file_name)
+        if resolved_hash is None:
+            return None
+        return int(resolved_hash)
+
+    def build_readable_entry(
+        file_name: str,
+        readable_id: int | None,
+        title_text_map_hash: int | None,
+        title: str | None,
+        created_raw: str | None,
+        updated_raw: str | None,
+        content_preview: str | None = None,
+    ) -> dict | None:
+        resolved_hash = resolve_readable_title_hash(file_name, readable_id, title_text_map_hash)
+        category = _resolve_readable_category(file_name, resolved_hash, readable_id)
+        if readable_category_filter and category != readable_category_filter:
+            return None
+        resolved_title = title or _get_text_map_content_with_fallback(
+            resolved_hash,
+            langCode,
+            [config.getSourceLanguage()],
+        )
+        entry = {
+            "fileName": file_name,
+            "readableId": readable_id,
+            "title": resolved_title or file_name,
+            "titleTextMapHash": resolved_hash,
+            "readableCategory": category,
+            **_build_version_fields(created_raw, updated_raw),
+        }
+        if content_preview:
+            entry["contentPreview"] = content_preview
+        return entry
 
     quest_map = {}
     if keyword_trim:
@@ -3080,10 +3254,41 @@ def searchNameEntries(
         not speaker_keyword_trim
         and langCode in langMap
         and (keyword_trim or created_version_filter or updated_version_filter or readable_category_filter)
+        and not invalid_readable_category_filter
     ):
         langStr = langMap[langCode]
         readable_seen = set()
         readable_entry_map = {}
+
+        def upsert_readable_entry(
+            file_name: str,
+            readable_id: int | None,
+            title_text_map_hash: int | None,
+            title: str | None,
+            created_raw: str | None,
+            updated_raw: str | None,
+            content_preview: str | None = None,
+        ) -> None:
+            key = (readable_id, file_name)
+            if key in readable_seen:
+                if content_preview and key in readable_entry_map and not readable_entry_map[key].get("contentPreview"):
+                    readable_entry_map[key]["contentPreview"] = content_preview
+                return
+            entry = build_readable_entry(
+                file_name,
+                readable_id,
+                title_text_map_hash,
+                title,
+                created_raw,
+                updated_raw,
+                content_preview,
+            )
+            if entry is None:
+                return
+            readable_seen.add(key)
+            readable_entry_map[key] = entry
+            readables.append(entry)
+
         if keyword_trim:
             readableMatches = databaseHelper.selectReadableByTitleKeyword(
                 keyword_trim,
@@ -3094,25 +3299,15 @@ def searchNameEntries(
                 readable_category_filter,
             )
             for fileName, readableId, titleTextMapHash, title, created_raw, updated_raw in readableMatches:
-                resolved_hash = titleTextMapHash
-                if resolved_hash is None:
-                    resolved_hash = databaseHelper.resolveReadableTitleHash(readableId, fileName)
-                resolved_title = title or _get_text_map_content_with_fallback(
-                    resolved_hash,
-                    langCode,
-                    [config.getSourceLanguage()],
+                upsert_readable_entry(
+                    fileName,
+                    readableId,
+                    titleTextMapHash,
+                    title,
+                    created_raw,
+                    updated_raw,
                 )
-                entry = {
-                    "fileName": fileName,
-                    "readableId": readableId,
-                    "title": resolved_title or fileName,
-                    "titleTextMapHash": resolved_hash,
-                    **_build_readable_category_fields(fileName, resolved_hash, readableId),
-                    **_build_version_fields(created_raw, updated_raw),
-                }
-                readables.append(entry)
-                readable_entry_map[(readableId, fileName)] = entry
-                readable_seen.add((readableId, fileName))
+
             readableFileMatches = databaseHelper.selectReadableByFileNameContains(
                 keyword_trim,
                 langCode,
@@ -3122,28 +3317,15 @@ def searchNameEntries(
                 readable_category_filter,
             )
             for fileName, readableId, titleTextMapHash, title, created_raw, updated_raw in readableFileMatches:
-                key = (readableId, fileName)
-                if key in readable_seen:
-                    continue
-                readable_seen.add(key)
-                resolved_hash = titleTextMapHash
-                if resolved_hash is None:
-                    resolved_hash = databaseHelper.resolveReadableTitleHash(readableId, fileName)
-                resolved_title = title or _get_text_map_content_with_fallback(
-                    resolved_hash,
-                    langCode,
-                    [config.getSourceLanguage()],
+                upsert_readable_entry(
+                    fileName,
+                    readableId,
+                    titleTextMapHash,
+                    title,
+                    created_raw,
+                    updated_raw,
                 )
-                entry = {
-                    "fileName": fileName,
-                    "readableId": readableId,
-                    "title": resolved_title or fileName,
-                    "titleTextMapHash": resolved_hash,
-                    **_build_readable_category_fields(fileName, resolved_hash, readableId),
-                    **_build_version_fields(created_raw, updated_raw),
-                }
-                readables.append(entry)
-                readable_entry_map[key] = entry
+
             readableContentMatches = databaseHelper.selectReadableFromKeyword(
                 keyword_trim,
                 langCode,
@@ -3155,32 +3337,15 @@ def searchNameEntries(
                 category=readable_category_filter,
             )
             for fileName, content, titleTextMapHash, readableId, created_raw, updated_raw in readableContentMatches:
-                key = (readableId, fileName)
-                preview = build_preview(content)
-                if key in readable_seen:
-                    if preview and key in readable_entry_map and not readable_entry_map[key].get("contentPreview"):
-                        readable_entry_map[key]["contentPreview"] = preview
-                    continue
-                readable_seen.add(key)
-                resolved_hash = titleTextMapHash
-                if resolved_hash is None:
-                    resolved_hash = databaseHelper.resolveReadableTitleHash(readableId, fileName)
-                title = _get_text_map_content_with_fallback(
-                    resolved_hash,
-                    langCode,
-                    [config.getSourceLanguage()],
+                upsert_readable_entry(
+                    fileName,
+                    readableId,
+                    titleTextMapHash,
+                    None,
+                    created_raw,
+                    updated_raw,
+                    build_preview(content),
                 )
-                entry = {
-                    "fileName": fileName,
-                    "readableId": readableId,
-                    "title": title or fileName,
-                    "titleTextMapHash": resolved_hash,
-                    "contentPreview": preview,
-                    **_build_readable_category_fields(fileName, resolved_hash, readableId),
-                    **_build_version_fields(created_raw, updated_raw),
-                }
-                readables.append(entry)
-                readable_entry_map[key] = entry
         else:
             readableMatches = databaseHelper.selectReadableByVersion(
                 langCode,
@@ -3190,24 +3355,14 @@ def searchNameEntries(
                 category=readable_category_filter,
             )
             for fileName, readableId, titleTextMapHash, title, created_raw, updated_raw in readableMatches:
-                resolved_hash = titleTextMapHash
-                if resolved_hash is None:
-                    resolved_hash = databaseHelper.resolveReadableTitleHash(readableId, fileName)
-                resolved_title = title or _get_text_map_content_with_fallback(
-                    resolved_hash,
-                    langCode,
-                    [config.getSourceLanguage()],
+                upsert_readable_entry(
+                    fileName,
+                    readableId,
+                    titleTextMapHash,
+                    title,
+                    created_raw,
+                    updated_raw,
                 )
-                entry = {
-                    "fileName": fileName,
-                    "readableId": readableId,
-                    "title": resolved_title or fileName,
-                    "titleTextMapHash": resolved_hash,
-                    **_build_readable_category_fields(fileName, resolved_hash, readableId),
-                    **_build_version_fields(created_raw, updated_raw),
-                }
-                readables.append(entry)
-                readable_entry_map[(readableId, fileName)] = entry
 
     _sort_entries_by_match_with_exact_id(
         quests,

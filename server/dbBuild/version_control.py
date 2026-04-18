@@ -17,7 +17,7 @@ from versioning import (
 
 try:
     from quest_text_filters import (
-        build_quest_text_not_excluded_sql,
+        build_quest_version_dialogue_not_excluded_sql,
         get_quest_text_filter_lang_id,
     )
 except ImportError:
@@ -25,7 +25,7 @@ except ImportError:
     if SERVER_DIR not in sys.path:
         sys.path.insert(0, SERVER_DIR)
     from quest_text_filters import (  # type: ignore
-        build_quest_text_not_excluded_sql,
+        build_quest_version_dialogue_not_excluded_sql,
         get_quest_text_filter_lang_id,
     )
 
@@ -514,7 +514,7 @@ def _build_qh_source_sql(
     if _quest_hash_map_available(cursor):
         if target_updated_version_id is not None:
             qh_sql = f"""
-                SELECT DISTINCT q.questId AS questId, qhm.hash AS hash
+                SELECT DISTINCT q.questId AS questId, qhm.hash AS hash, qhm.source_type AS source_type
                 FROM quest q
                 JOIN quest_hash_map qhm ON qhm.questId = q.questId
                 JOIN quest_version qv ON qv.questId = q.questId
@@ -526,7 +526,7 @@ def _build_qh_source_sql(
             """
             return qh_sql, (target_updated_version_id,)
         qh_sql = f"""
-            SELECT DISTINCT q.questId AS questId, qhm.hash AS hash
+            SELECT DISTINCT q.questId AS questId, qhm.hash AS hash, qhm.source_type AS source_type
             FROM quest q
             JOIN quest_hash_map qhm ON qhm.questId = q.questId
             WHERE qhm.source_type IN ('title', 'dialogue')
@@ -538,7 +538,7 @@ def _build_qh_source_sql(
 
     if target_updated_version_id is not None:
         qh_sql = f"""
-            SELECT q.questId AS questId, q.titleTextMapHash AS hash
+            SELECT q.questId AS questId, q.titleTextMapHash AS hash, 'title' AS source_type
             FROM quest q
             JOIN quest_version qv ON qv.questId = q.questId
             WHERE qv.updated_version_id=?
@@ -546,7 +546,7 @@ def _build_qh_source_sql(
               AND q.titleTextMapHash <> 0
               {target_filter_q}
             UNION ALL
-            SELECT q.questId AS questId, d.textHash AS hash
+            SELECT q.questId AS questId, d.textHash AS hash, 'dialogue' AS source_type
             FROM quest q
             JOIN questTalk qt ON qt.questId = q.questId
             JOIN dialogue d ON d.talkId = qt.talkId
@@ -559,13 +559,13 @@ def _build_qh_source_sql(
         return qh_sql, (target_updated_version_id, target_updated_version_id)
 
     qh_sql = f"""
-        SELECT q.questId AS questId, q.titleTextMapHash AS hash
+        SELECT q.questId AS questId, q.titleTextMapHash AS hash, 'title' AS source_type
         FROM quest q
         WHERE q.titleTextMapHash IS NOT NULL
           AND q.titleTextMapHash <> 0
           {target_filter_q}
         UNION ALL
-        SELECT qt.questId AS questId, d.textHash AS hash
+        SELECT qt.questId AS questId, d.textHash AS hash, 'dialogue' AS source_type
         FROM questTalk qt
         JOIN dialogue d ON d.talkId = qt.talkId
            AND ({_quest_talk_dialogue_join_condition('qt', 'd')})
@@ -680,7 +680,7 @@ def backfill_quest_created_version_from_textmap(
     reset_temp_table(
         cursor,
         "CREATE TEMP TABLE IF NOT EXISTS _quest_hash_source("
-        "questId INTEGER NOT NULL, hash INTEGER NOT NULL)",
+        "questId INTEGER NOT NULL, hash INTEGER NOT NULL, source_type TEXT NOT NULL)",
         "_quest_hash_source",
     )
 
@@ -722,20 +722,26 @@ def backfill_quest_created_version_from_textmap(
             target_updated_version_id=target_updated_version_id,
         )
         cursor.execute(
-            f"INSERT INTO _quest_hash_source(questId, hash) {qh_sql}",
+            f"INSERT INTO _quest_hash_source(questId, hash, source_type) {qh_sql}",
             qh_params,
         )
         cursor.execute("CREATE INDEX IF NOT EXISTS _quest_hash_source_hash_idx ON _quest_hash_source(hash)")
         cursor.execute("CREATE INDEX IF NOT EXISTS _quest_hash_source_quest_idx ON _quest_hash_source(questId)")
 
         chs_lang_id = get_quest_text_filter_lang_id(cursor)
-        created_not_excluded_sql = ""
+        created_dialogue_filter_sql = ""
         created_filter_params: tuple[object, ...] = tuple()
         created_lang_sql = "tm.lang = (SELECT id FROM langCode WHERE codeName = 'TextMapCHS.json' LIMIT 1)"
         if chs_lang_id is not None:
             created_lang_sql = "tm.lang = ?"
-            created_not_excluded_sql, created_not_excluded_params = build_quest_text_not_excluded_sql("tm.content")
-            created_not_excluded_sql = " AND " + created_not_excluded_sql
+            created_dialogue_filter_sql, created_not_excluded_params = (
+                build_quest_version_dialogue_not_excluded_sql("tm.content")
+            )
+            created_dialogue_filter_sql = (
+                " AND (qh.source_type <> 'dialogue' OR "
+                + created_dialogue_filter_sql
+                + ")"
+            )
             created_filter_params = (chs_lang_id, *created_not_excluded_params)
 
         created_sql = f"""
@@ -750,7 +756,7 @@ def backfill_quest_created_version_from_textmap(
             WHERE tm.created_version_id IS NOT NULL
               AND qh.hash <> 0
               AND {created_lang_sql}
-              {created_not_excluded_sql}
+              {created_dialogue_filter_sql}
         ),
         ranked AS (
             SELECT
@@ -837,7 +843,9 @@ def backfill_quest_created_version_from_textmap(
 
         updated_backfilled = 0
         for lang in languages:
-            updated_not_excluded_sql, updated_not_excluded_params = build_quest_text_not_excluded_sql("tm.content")
+            updated_not_excluded_sql, updated_not_excluded_params = (
+                build_quest_version_dialogue_not_excluded_sql("tm.content")
+            )
             updated_sql = f"""
             WITH candidates AS (
                 SELECT
@@ -850,7 +858,10 @@ def backfill_quest_created_version_from_textmap(
                 WHERE tm.updated_version_id IS NOT NULL
                   AND qh.hash <> 0
                   AND tm.lang = ?
-                  AND {updated_not_excluded_sql}
+                  AND (
+                      qh.source_type <> 'dialogue'
+                      OR {updated_not_excluded_sql}
+                  )
             ),
             ranked AS (
                 SELECT

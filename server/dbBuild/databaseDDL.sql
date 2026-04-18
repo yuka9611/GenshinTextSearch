@@ -289,6 +289,27 @@ create index readable_lang_fileName_index
 create index readable_readableId_index
     on readable (readableId);
 
+create table readable_meta
+(
+    normalized_file_name TEXT
+        constraint readable_meta_pk
+            primary key,
+    readable_id INTEGER,
+    title_text_map_hash INTEGER,
+    readable_category TEXT not null
+        constraint readable_meta_category_check
+            check (readable_category in ('BOOK', 'ITEM', 'READABLE', 'COSTUME', 'RELIC', 'WEAPON', 'WINGS'))
+);
+
+create index readable_meta_readable_category_index
+    on readable_meta (readable_category);
+
+create index readable_meta_readable_id_index
+    on readable_meta (readable_id);
+
+create index readable_meta_title_text_map_hash_index
+    on readable_meta (title_text_map_hash);
+
 create table subtitle
 (
     id        integer

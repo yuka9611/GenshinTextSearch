@@ -8,6 +8,7 @@ from import_utils import DEFAULT_BATCH_SIZE, executemany_batched, normalize_uniq
 try:
     from quest_text_filters import (
         build_quest_text_excluded_sql,
+        build_quest_version_dialogue_excluded_sql,
         get_quest_text_filter_lang_id,
     )
 except ImportError:
@@ -16,6 +17,7 @@ except ImportError:
         sys.path.insert(0, SERVER_DIR)
     from quest_text_filters import (  # type: ignore
         build_quest_text_excluded_sql,
+        build_quest_version_dialogue_excluded_sql,
         get_quest_text_filter_lang_id,
     )
 
@@ -199,14 +201,17 @@ def _refresh_quest_hash_map_by_target_table(cursor):
     dialogue_exclusion_sql = ""
     dialogue_exclusion_params: tuple[object, ...] = tuple()
     if filter_lang_id is not None:
+        dialogue_excluded_sql, dialogue_excluded_params = (
+            build_quest_version_dialogue_excluded_sql("tm.content")
+        )
         dialogue_exclusion_sql = (
             " AND NOT EXISTS ("
             "SELECT 1 FROM textMap tm "
             "WHERE tm.hash = d.textHash AND tm.lang = ? AND "
-            + excluded_sql
+            + dialogue_excluded_sql
             + ")"
         )
-        dialogue_exclusion_params = (filter_lang_id, *excluded_params)
+        dialogue_exclusion_params = (filter_lang_id, *dialogue_excluded_params)
 
     cursor.execute(
         """

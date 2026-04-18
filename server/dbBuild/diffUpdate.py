@@ -11,6 +11,7 @@ from DBConfig import conn, DATA_PATH, LANG_PATH
 import DBBuild
 import voiceItemImport
 import readableImport
+import readableMetaImport
 import subtitleImport
 import entitySourceImport
 import textMapImport
@@ -466,6 +467,7 @@ def _analyze_diff(diff_entries: list[dict]) -> dict:
         "readable_changed": set(),  # 变更的readable文件
         "readable_deleted": set(),  # 删除的readable文件
         "readable_mapping_changed": False,  # 是否有readable映射变更
+        "readable_meta": False,     # 是否需要刷新readable元数据
         "subtitle_changed": set(),  # 变更的subtitle文件
         "subtitle_deleted": set(),  # 删除的subtitle文件
         "subtitle_mapping_changed": False,  # 是否有subtitle映射变更
@@ -565,11 +567,13 @@ def _analyze_diff(diff_entries: list[dict]) -> dict:
                 plan["readable_deleted"].add(file_rel)
             elif not old_side:
                 plan["readable_changed"].add(file_rel)
+            plan["readable_meta"] = True
             return
 
         # 处理Readable映射文件
         if rel == "ExcelBinOutput/DocumentExcelConfigData.json":
             plan["readable_mapping_changed"] = True
+            plan["readable_meta"] = True
             return
 
         # 处理Subtitle文件
@@ -585,6 +589,15 @@ def _analyze_diff(diff_entries: list[dict]) -> dict:
         if rel == "ExcelBinOutput/LocalizationExcelConfigData.json":
             plan["subtitle_mapping_changed"] = True
             plan["readable_mapping_changed"] = True
+            plan["readable_meta"] = True
+            return
+
+        if rel == "ExcelBinOutput/MaterialExcelConfigData.json":
+            plan["readable_meta"] = True
+            return
+
+        if rel == "ExcelBinOutput/BooksCodexExcelConfigData.json":
+            plan["readable_meta"] = True
             return
 
         # 处理Entity Source相关的Excel文件
@@ -601,6 +614,7 @@ def _analyze_diff(diff_entries: list[dict]) -> dict:
             parsed = parse_textmap_file_name(file_name)
             if parsed is not None:
                 plan["textmap_bases"].add(parsed[0])
+                plan["readable_meta"] = True
 
     # 处理所有diff条目
     for entry in diff_entries:
@@ -638,6 +652,7 @@ def _init_diff_update():
             + ", ".join(missing)
             + ". Run DBInit.py + a full DBBuild.py once first."
         )
+    readableMetaImport.ensure_readable_meta_schema(conn)
 
 
 def _prepare_git_operation(repo_path, remote_ref, fetch_remote):
@@ -973,6 +988,14 @@ def _process_readable_stage(plan, target_version):
         )
 
 
+def _process_readable_meta_stage(plan):
+    """
+    处理readable_meta阶段
+    """
+    if plan["readable_meta"]:
+        readableMetaImport.refresh_readable_meta()
+
+
 def _process_subtitle_stage(plan, target_version):
     """
     处理subtitle阶段
@@ -1277,6 +1300,7 @@ def run_diff_update(
         "entity_sources",
         "voice",
         "readable",
+        "readable_meta",
         "subtitle",
         "source_file_version",
         "version_catalog",
@@ -1345,6 +1369,10 @@ def run_diff_update(
     if not stage_done("readable"):
         _process_readable_stage(plan, target_version)
         mark_stage("readable")
+
+    if not stage_done("readable_meta"):
+        _process_readable_meta_stage(plan)
+        mark_stage("readable_meta")
 
     if not stage_done("subtitle"):
         _process_subtitle_stage(plan, target_version)

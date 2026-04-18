@@ -1134,6 +1134,7 @@ class TestEntityTexts:
             lambda text_hash, *args, **kwargs: {
                 5002: "莱茵多特的「礼物」",
                 3377011063: "莱茵多特的「礼物」",
+                2842036365: "「黄金」莱茵多特赠给阿贝多的礼物。",
             }.get(text_hash),
         )
         monkeypatch.setattr(
@@ -1149,9 +1150,13 @@ class TestEntityTexts:
                 "reliquary_set_to_id": {},
                 "reliquary_set_piece_to_id": {},
                 "book_material_ids": set(),
+                "codex_readable_ids": set(),
+                "codex_title_hashes": set(),
                 "item_readable_ids_by_item_id": {121414: [201140]},
                 "item_ids_by_readable_id": {201140: 121414},
                 "item_ids_by_title_hash": {3377011063: 121414},
+                "item_name_hash_by_item_id": {121414: 3377011063},
+                "item_desc_hash_by_item_id": {121414: 2842036365},
             },
         )
         monkeypatch.setattr(
@@ -1177,6 +1182,11 @@ class TestEntityTexts:
             "getReadableVersionInfo",
             lambda readable_id, file_name: ("Version 4.1", None),
         )
+        monkeypatch.setattr(
+            controllers.databaseHelper,
+            "getReadableCategoryCode",
+            lambda file_name: "ITEM",
+        )
 
         result = controllers.getEntityTexts(1, 121414, searchLang=1)
 
@@ -1185,8 +1195,7 @@ class TestEntityTexts:
         assert len(result["entries"]) == 1
         entry = result["entries"][0]
         assert entry["fieldLabel"] == "道具"
-        assert entry["readableCategory"] == "BOOK"
-        assert entry["readableCategoryLabel"] == "道具"
+        assert entry["readableCategory"] == "ITEM"
         assert entry["fileName"] == "Book1140.txt"
         assert entry["readableId"] == 201140
         assert entry["detailQuery"] == {
@@ -1200,52 +1209,132 @@ class TestEntityTexts:
 
 
 class TestReadableCategoryLabels:
-    def test_build_readable_category_fields_marks_item_linked_book_as_item(self, monkeypatch):
+    @pytest.mark.parametrize(
+        ("file_name", "category"),
+        [
+            ("Book1140.txt", "ITEM"),
+            ("Book1039.txt", "READABLE"),
+            ("Book2000.txt", "BOOK"),
+            ("Weapon11431_2.txt", "WEAPON"),
+        ],
+    )
+    def test_build_readable_category_fields_delegates_to_database_helper(self, monkeypatch, file_name, category):
         monkeypatch.setattr(
-            controllers,
-            "_load_entity_readable_lookup",
-            lambda: {
-                "outfit_item_to_skin": {},
-                "reliquary_set_to_id": {},
-                "reliquary_set_piece_to_id": {},
-                "book_material_ids": set(),
-                "item_readable_ids_by_item_id": {121414: [201140]},
-                "item_ids_by_readable_id": {201140: 121414},
-                "item_ids_by_title_hash": {3377011063: 121414},
-            },
+            controllers.databaseHelper,
+            "getReadableCategoryCode",
+            lambda raw_file_name: {
+                "Book1140.txt": "ITEM",
+                "Book1039.txt": "READABLE",
+                "Book2000.txt": "BOOK",
+                "Weapon11431_2.txt": "WEAPON",
+            }[raw_file_name],
         )
-        monkeypatch.setattr(controllers.databaseHelper, "getReadableCategoryCode", lambda file_name: "BOOK")
 
-        result = controllers._build_readable_category_fields("Book1140.txt", 3377011063, 201140)
+        result = controllers._build_readable_category_fields(file_name, 0, None)
 
         assert result == {
-            "readableCategory": "BOOK",
-            "readableCategoryLabel": "道具",
+            "readableCategory": category,
         }
 
-    def test_build_readable_category_fields_keeps_regular_book_label(self, monkeypatch):
+
+def _patch_search_name_empty_quest_dependencies(monkeypatch):
+    monkeypatch.setattr(controllers.config, "getSourceLanguage", lambda: 1)
+    monkeypatch.setattr(controllers.databaseHelper, "selectQuestByTitleKeyword", lambda *args, **kwargs: [])
+    monkeypatch.setattr(controllers.databaseHelper, "selectQuestByChapterKeyword", lambda *args, **kwargs: [])
+    monkeypatch.setattr(controllers.databaseHelper, "selectQuestByIdContains", lambda *args, **kwargs: [])
+    monkeypatch.setattr(controllers.databaseHelper, "selectQuestByContentKeyword", lambda *args, **kwargs: [])
+    monkeypatch.setattr(controllers.databaseHelper, "selectQuestByVersion", lambda *args, **kwargs: [])
+    monkeypatch.setattr(controllers.databaseHelper, "getLangCodeMap", lambda: {1: "CHS"})
+    monkeypatch.setattr(controllers.databaseHelper, "resolveReadableTitleHash", lambda readable_id, file_name: None)
+
+
+class TestSearchNameReadableCategoryFilters:
+    def test_search_name_entries_passes_book_filter_directly_to_db(self, monkeypatch):
+        _patch_search_name_empty_quest_dependencies(monkeypatch)
+
+        calls = []
+
+        def fake_select_readable_by_title(
+            keyword,
+            lang_code,
+            lang_str,
+            created_version=None,
+            updated_version=None,
+            category=None,
+            limit=200,
+            offset=None,
+        ):
+            calls.append((category, limit, offset))
+            return [("BookCodex.txt", 999, 9999, "Codex Title", None, None)]
+
+        monkeypatch.setattr(controllers.databaseHelper, "selectReadableByTitleKeyword", fake_select_readable_by_title)
+        monkeypatch.setattr(controllers.databaseHelper, "selectReadableByFileNameContains", lambda *args, **kwargs: [])
+        monkeypatch.setattr(controllers.databaseHelper, "selectReadableFromKeyword", lambda *args, **kwargs: [])
         monkeypatch.setattr(
-            controllers,
-            "_load_entity_readable_lookup",
-            lambda: {
-                "outfit_item_to_skin": {},
-                "reliquary_set_to_id": {},
-                "reliquary_set_piece_to_id": {},
-                "book_material_ids": set(),
-                "item_readable_ids_by_item_id": {},
-                "item_ids_by_readable_id": {},
-                "item_ids_by_title_hash": {},
-            },
+            controllers.databaseHelper,
+            "getReadableCategoryCode",
+            lambda file_name: "BOOK",
         )
-        monkeypatch.setattr(controllers.databaseHelper, "selectEntitySourcesByTitleHash", lambda text_hash: [])
-        monkeypatch.setattr(controllers.databaseHelper, "getReadableCategoryCode", lambda file_name: "BOOK")
 
-        result = controllers._build_readable_category_fields("Book2000.txt", 99887766, 2000)
+        result = controllers.searchNameEntries("book", 1, readable_category="BOOK")
 
-        assert result == {
-            "readableCategory": "BOOK",
-            "readableCategoryLabel": "书籍",
-        }
+        assert calls == [("BOOK", 200, None)]
+        assert result["quests"] == []
+        assert result["readables"] == [
+            {
+                "fileName": "BookCodex.txt",
+                "readableId": 999,
+                "title": "Codex Title",
+                "titleTextMapHash": 9999,
+                "readableCategory": "BOOK",
+                "createdVersion": None,
+                "updatedVersion": None,
+                "createdVersionRaw": None,
+                "updatedVersionRaw": None,
+            }
+        ]
+
+    @pytest.mark.parametrize(
+        ("filter_value", "expected_ids"),
+        [
+            ("ITEM", [11]),
+            ("READABLE", [22, 33]),
+        ],
+    )
+    def test_search_name_entries_filters_semantic_readable_categories(self, monkeypatch, filter_value, expected_ids):
+        _patch_search_name_empty_quest_dependencies(monkeypatch)
+        calls = []
+
+        def fake_select_readable_by_title(*args, **kwargs):
+            calls.append(kwargs.get("category") if "category" in kwargs else args[5])
+            category = kwargs.get("category") if "category" in kwargs else args[5]
+            if category == "ITEM":
+                return [("BookItem.txt", 11, 1011, "Item Title", None, None)]
+            if category == "READABLE":
+                return [
+                    ("BookReadable.txt", 22, 1022, "Readable Title", None, None),
+                    ("Poster1.txt", 33, 1033, "Poster Title", None, None),
+                ]
+            return []
+
+        monkeypatch.setattr(controllers.databaseHelper, "selectReadableByTitleKeyword", fake_select_readable_by_title)
+        monkeypatch.setattr(controllers.databaseHelper, "selectReadableByFileNameContains", lambda *args, **kwargs: [])
+        monkeypatch.setattr(controllers.databaseHelper, "selectReadableFromKeyword", lambda *args, **kwargs: [])
+        monkeypatch.setattr(
+            controllers.databaseHelper,
+            "getReadableCategoryCode",
+            lambda file_name: {
+                "BookItem.txt": "ITEM",
+                "BookReadable.txt": "READABLE",
+                "Poster1.txt": "READABLE",
+            }[file_name],
+        )
+
+        result = controllers.searchNameEntries("readable", 1, readable_category=filter_value)
+
+        assert calls == [filter_value]
+        assert [entry["readableId"] for entry in result["readables"]] == expected_ids
+        assert all(entry["readableCategory"] == filter_value for entry in result["readables"])
 
 
 class TestEntitySourceFiltering:
