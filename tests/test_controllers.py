@@ -61,6 +61,7 @@ class TestSourceTypeFilter:
             ("", None),
             ("all", None),
             ("  all  ", None),
+            ("未归类", "unknown"),
             ("角色语音", "voice"),
             ("角色故事", "story"),
             ("武器", "weapon"),
@@ -99,6 +100,13 @@ class TestSourceTypeFilter:
     def test_matches_source_type_filter_costume_supports_qianxing_internal_types(self, source_type):
         entry = {"primarySource": {"sourceType": source_type}}
         assert controllers._matches_source_type_filter(entry, "costume") is True
+
+    def test_matches_source_type_filter_unknown_uses_known_source_flag(self):
+        assert controllers._matches_source_type_filter({"hash": 101}, "unknown") is True
+        assert controllers._matches_source_type_filter(
+            {"primarySource": {"sourceType": "unknown"}, "_hasKnownPrimarySource": True},
+            "unknown",
+        ) is False
 
     def test_filter_entries_by_source_type(self):
         entries = [
@@ -470,6 +478,131 @@ class TestSearchResultSorting:
         assert total == 2
         assert [entry["hash"] for entry in result] == [2]
         assert result[0]["_hasKnownPrimarySource"] is True
+
+    def test_unknown_filter_matches_missing_source_but_excludes_known_flagged_entries(self):
+        entries = [
+            {"hash": 10, "translates": {"4": "keyword"}},
+            {"hash": 20, "translates": {"4": "keyword"}, "_hasKnownPrimarySource": True},
+            {"hash": 30, "translates": {"4": "keyword"}, "primarySource": {"sourceType": "unknown"}},
+        ]
+
+        filtered = controllers._filter_entries_by_source_type(entries, "unknown")
+
+        assert [entry["hash"] for entry in filtered] == [10, 30]
+
+    def test_unknown_ranked_handler_scans_beyond_known_prefix_and_keeps_full_total(self, monkeypatch):
+        known_hashes = set(range(1, 206))
+        all_hashes = list(range(1, 211))
+
+        monkeypatch.setattr(
+            controllers.databaseHelper,
+            "selectTextMapFromKeywordPaged",
+            lambda *args, **kwargs: [
+                (text_hash, None, None, None)
+                for text_hash in all_hashes[kwargs.get("offset", args[3]):kwargs.get("offset", args[3]) + kwargs.get("limit", args[2])]
+            ],
+        )
+        monkeypatch.setattr(
+            controllers,
+            "queryTextHashInfo",
+            lambda text_hash, *args, **kwargs: {
+                "hash": text_hash,
+                "translates": {"4": "keyword"},
+                "voicePaths": [],
+            },
+        )
+        monkeypatch.setattr(
+            controllers.databaseHelper,
+            "selectTextHashesWithKnownPrimarySource",
+            lambda text_hashes: set(text_hashes) & known_hashes,
+        )
+
+        result, total = controllers._handle_all_voice_filter_ranked(
+            "keyword",
+            "keyword",
+            4,
+            1,
+            1,
+            None,
+            False,
+            None,
+            False,
+            set(),
+            [4],
+            1,
+            None,
+            [],
+            {},
+            {},
+            None,
+            None,
+            "unknown",
+        )
+
+        assert total == 5
+        assert [entry["hash"] for entry in result] == [206]
+
+    def test_unknown_ranked_handler_without_voice_reuses_unknown_scan(self, monkeypatch):
+        known_hashes = set(range(1, 204))
+        all_hashes = list(range(1, 206))
+        seen_voice_filters = []
+
+        def fake_select_textmap(*args, **kwargs):
+            limit = kwargs.get("limit", args[2])
+            offset = kwargs.get("offset", args[3])
+            voice_filter = kwargs.get("voice_filter", args[5] if len(args) > 5 else None)
+            seen_voice_filters.append(voice_filter)
+            return [
+                (text_hash, None, None, None)
+                for text_hash in all_hashes[offset:offset + limit]
+            ]
+
+        monkeypatch.setattr(
+            controllers.databaseHelper,
+            "selectTextMapFromKeywordPaged",
+            fake_select_textmap,
+        )
+        monkeypatch.setattr(
+            controllers,
+            "queryTextHashInfo",
+            lambda text_hash, *args, **kwargs: {
+                "hash": text_hash,
+                "translates": {"4": "keyword"},
+                "voicePaths": [],
+            },
+        )
+        monkeypatch.setattr(
+            controllers.databaseHelper,
+            "selectTextHashesWithKnownPrimarySource",
+            lambda text_hashes: set(text_hashes) & known_hashes,
+        )
+
+        result, total = controllers._handle_specific_voice_filter_ranked(
+            "keyword",
+            "keyword",
+            4,
+            1,
+            1,
+            "without",
+            None,
+            False,
+            None,
+            False,
+            set(),
+            [4],
+            1,
+            None,
+            [],
+            {},
+            {},
+            None,
+            None,
+            "unknown",
+        )
+
+        assert seen_voice_filters == ["without", "without"]
+        assert total == 2
+        assert [entry["hash"] for entry in result] == [204]
 
     def test_enrich_primary_sources_removes_internal_known_source_flag(self):
         entry = {

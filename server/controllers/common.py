@@ -366,6 +366,7 @@ def _normalize_source_type_filter(source_type: str | None) -> str | None:
     if not normalized or normalized == "all":
         return None
     alias_map = {
+        "未归类": "unknown",
         "角色语音": "voice",
         "角色故事": "story",
         "奇偶装扮": "costume",
@@ -404,6 +405,8 @@ def _matches_source_type_filter(entry: dict, source_type_filter: str | None) -> 
     normalized_filter = _normalize_source_type_filter(source_type_filter)
     if normalized_filter is None:
         return True
+    if normalized_filter == "unknown":
+        return not _entry_has_known_primary_source(entry)
     primary_source = entry.get("primarySource") or {}
     source_type = str(primary_source.get("sourceType") or "").strip().lower()
     if normalized_filter == "costume":
@@ -433,6 +436,10 @@ def _text_hash_matches_source_type(
         return databaseHelper.getSourceFromFetter(text_hash, lang_code) is not None
     if normalized_filter == "story":
         return bool(databaseHelper.selectStorySourcesByTextHash(text_hash))
+    if normalized_filter == "unknown":
+        if entry is not None:
+            return _matches_source_type_filter(entry, normalized_filter)
+        return text_hash not in databaseHelper.selectTextHashesWithKnownPrimarySource([text_hash])
     return _matches_source_type_filter(entry or {}, normalized_filter)
 
 
@@ -1812,6 +1819,61 @@ def _mark_entries_with_known_primary_source(entries: list[dict]):
     return entries
 
 
+_UNKNOWN_SOURCE_SCAN_BATCH_SIZE = 200
+
+
+def _collect_unknown_textmap_candidates(
+    keyword: str,
+    langCode: int,
+    hash_value: int | None,
+    is_hash_query: bool,
+    text_hashes_seen: set[int],
+    langs: list[int],
+    sourceLangCode: int,
+    voice_filter: str | None,
+    created_version_filter: str | None,
+    updated_version_filter: str | None,
+) -> tuple[list[dict], int]:
+    """
+    扫描全部 textMap 候选并仅保留没有已知 primary source 的条目。
+    这里不混入 readable/subtitle，保证 unknown 仅表示未归类的 textMap 文本。
+    """
+    offset = 0
+    candidates: list[dict] = []
+
+    while True:
+        rows = databaseHelper.selectTextMapFromKeywordPaged(
+            keyword,
+            langCode,
+            _UNKNOWN_SOURCE_SCAN_BATCH_SIZE,
+            offset,
+            hash_value if is_hash_query else None,
+            voice_filter,
+            created_version_filter,
+            updated_version_filter,
+        )
+        if not rows:
+            break
+
+        batch_entries: list[dict] = []
+        for text_hash, _content, _created_raw, _updated_raw in rows:
+            if text_hash in text_hashes_seen:
+                continue
+            text_hashes_seen.add(text_hash)
+            batch_entries.append(queryTextHashInfo(text_hash, langs, sourceLangCode, queryOrigin=False))
+
+        _mark_entries_with_known_primary_source(batch_entries)
+        candidates.extend(
+            entry for entry in batch_entries if _matches_source_type_filter(entry, "unknown")
+        )
+
+        offset += len(rows)
+        if len(rows) < _UNKNOWN_SOURCE_SCAN_BATCH_SIZE:
+            break
+
+    return candidates, len(candidates)
+
+
 def _sort_entries_by_match_with_exact_id(
     entries: list[dict],
     keyword: str,
@@ -2554,6 +2616,22 @@ def _handle_all_voice_filter_ranked(keyword, keyword_trim, langCode, safe_page, 
             text_hashes_seen.add(text_hash)
             candidates.append(queryTextHashInfo(text_hash, langs, sourceLangCode, queryOrigin=False))
 
+    elif normalized_source_type == "unknown":
+        unknown_candidates, unknown_total = _collect_unknown_textmap_candidates(
+            keyword,
+            langCode,
+            hash_value,
+            is_hash_query,
+            text_hashes_seen,
+            langs,
+            sourceLangCode,
+            None,
+            created_version_filter,
+            updated_version_filter,
+        )
+        candidates.extend(unknown_candidates)
+        total = unknown_total + (1 if hash_extra and hash_matches_source_type else 0)
+
     elif normalized_source_type in _get_db_filterable_source_types():
         # 数据库层 JOIN 过滤：dialogue, voice, quest, entity types
         db_source_type = normalized_source_type
@@ -2605,7 +2683,7 @@ def _handle_all_voice_filter_ranked(keyword, keyword_trim, langCode, safe_page, 
             candidates.append(_build_subtitle_obj(fileName, content, startTime, endTime, subtitleId, created_raw, updated_raw, langs))
 
     else:
-        # 无筛选或 unknown：加载所有来源
+        # 无筛选：加载所有来源
         total_textmap = _count_textmap_from_keyword_cached(
             keyword, langCode, created_version_filter, updated_version_filter,
         )
@@ -2700,6 +2778,22 @@ def _handle_specific_voice_filter_ranked(keyword, keyword_trim, langCode, safe_p
             text_hashes_seen.add(text_hash)
             candidates.append(queryTextHashInfo(text_hash, langs, sourceLangCode, queryOrigin=False))
 
+    elif normalized_source_type == "unknown":
+        unknown_candidates, unknown_total = _collect_unknown_textmap_candidates(
+            keyword,
+            langCode,
+            hash_value,
+            is_hash_query,
+            text_hashes_seen,
+            langs,
+            sourceLangCode,
+            voice_filter,
+            created_version_filter,
+            updated_version_filter,
+        )
+        candidates.extend(unknown_candidates)
+        total = unknown_total + (1 if hash_extra_filtered else 0)
+
     elif normalized_source_type in _get_db_filterable_source_types():
         # 数据库层 JOIN 过滤 + 语音过滤
         # 注意：voice_filter 需要通过 selectTextMapFromKeywordPaged 而非 BySourceType 处理
@@ -2751,7 +2845,7 @@ def _handle_specific_voice_filter_ranked(keyword, keyword_trim, langCode, safe_p
             total = 0
 
     else:
-        # 无筛选或 unknown
+        # 无筛选
         total_textmap = _count_textmap_from_keyword_voice_cached(
             keyword, langCode, voice_filter, created_version_filter, updated_version_filter,
         )
