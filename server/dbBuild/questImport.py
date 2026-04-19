@@ -22,6 +22,7 @@ from quest_hash_map_utils import (
 )
 from quest_utils import extract_quest_id, extract_quest_row, extract_quest_talk_ids
 from quest_source_utils import (
+    ANECDOTE_SOURCE_STATUS_MAPPING_MISS,
     SOURCE_TYPE_ANECDOTE,
     SOURCE_TYPE_HANGOUT,
     build_hangout_payload,
@@ -29,7 +30,8 @@ from quest_source_utils import (
     extract_anecdote_payload,
     iter_subquest_talk_rows,
     load_main_coop_ids_by_quest_id,
-    load_talk_excel_perform_cfg_map,
+    load_storyboard_file_by_talk_id,
+    load_storyboard_talk_excel_by_quest_id,
     reset_quest_source_caches,
     resolve_quest_source_fields,
 )
@@ -428,6 +430,15 @@ def _filter_quest_talk_rows_by_available_dialogues(cursor, talk_rows):
 
     filtered_rows.sort(key=lambda item: (item[2], item[0]))
     return filtered_rows
+
+
+def _collect_anecdote_mapping_misses(
+    payload: dict,
+    *,
+    mapping_miss_collector: list[str] | None = None,
+):
+    if mapping_miss_collector is not None:
+        mapping_miss_collector.extend(payload.get("mapping_miss_refs") or [])
 
 
 def _filter_subquest_talk_rows_by_available_dialogues(cursor, rows):
@@ -1338,16 +1349,18 @@ def backfillQuestMetadata(*, commit: bool = True, batch_size: int = DEFAULT_BATC
         "skipped_quest_file_count": len(skipped_quest_files),
         "skipped_brief_file_count": len(skipped_brief_files),
     }
+
+
 def importAnecdote(
     row: dict,
     *,
     cursor=None,
-    talk_excel_map: dict[int, list[str]] | None = None,
+    talk_excel_map: dict[int, list[int]] | None = None,
+    storyboard_file_by_talk_id: dict[int, str] | None = None,
     skip_collector: list[str] | None = None,
     missing_title_collector: list[str] | None = None,
     no_talk_collector: list[str] | None = None,
-    missing_group_collector: list[str] | None = None,
-    missing_talk_excel_collector: list[str] | None = None,
+    mapping_miss_collector: list[str] | None = None,
 ) -> tuple[int | None, bool]:
     own_cursor = cursor is None
     if own_cursor:
@@ -1357,8 +1370,7 @@ def importAnecdote(
     payload = extract_anecdote_payload(
         row,
         talk_excel_map=talk_excel_map,
-        missing_group_collector=missing_group_collector,
-        missing_talk_excel_collector=missing_talk_excel_collector,
+        storyboard_file_by_talk_id=storyboard_file_by_talk_id,
         normal_coop_id=QUEST_TALK_NORMAL_COOP_ID,
     )
     if payload is None:
@@ -1373,12 +1385,20 @@ def importAnecdote(
     desc_text_map_hash = payload["desc_text_map_hash"]
     long_desc_text_map_hash = payload["long_desc_text_map_hash"]
     new_talk_rows = _filter_quest_talk_rows_by_available_dialogues(cursor, payload["talk_rows"])
+    _collect_anecdote_mapping_misses(
+        payload,
+        mapping_miss_collector=mapping_miss_collector,
+    )
     source_type = payload["source_type"]
     source_code_raw = payload["source_code_raw"]
 
     if title_text_map_hash is None and missing_title_collector is not None:
         missing_title_collector.append(str(quest_id))
-    if not new_talk_rows and no_talk_collector is not None:
+    if (
+        not new_talk_rows
+        and payload["source_status"] != ANECDOTE_SOURCE_STATUS_MAPPING_MISS
+        and no_talk_collector is not None
+    ):
         no_talk_collector.append(str(quest_id))
 
     sql1 = _build_quest_upsert_sql(with_created_version=False)
@@ -1431,12 +1451,12 @@ def importAnecdoteForDiff(
     current_version: str,
     *,
     cursor=None,
-    talk_excel_map: dict[int, list[str]] | None = None,
+    talk_excel_map: dict[int, list[int]] | None = None,
+    storyboard_file_by_talk_id: dict[int, str] | None = None,
     skip_collector: list[str] | None = None,
     missing_title_collector: list[str] | None = None,
     no_talk_collector: list[str] | None = None,
-    missing_group_collector: list[str] | None = None,
-    missing_talk_excel_collector: list[str] | None = None,
+    mapping_miss_collector: list[str] | None = None,
 ) -> tuple[int | None, bool]:
     own_cursor = cursor is None
     if own_cursor:
@@ -1449,8 +1469,7 @@ def importAnecdoteForDiff(
     payload = extract_anecdote_payload(
         row,
         talk_excel_map=talk_excel_map,
-        missing_group_collector=missing_group_collector,
-        missing_talk_excel_collector=missing_talk_excel_collector,
+        storyboard_file_by_talk_id=storyboard_file_by_talk_id,
         normal_coop_id=QUEST_TALK_NORMAL_COOP_ID,
     )
     if payload is None:
@@ -1465,12 +1484,20 @@ def importAnecdoteForDiff(
     desc_text_map_hash = payload["desc_text_map_hash"]
     long_desc_text_map_hash = payload["long_desc_text_map_hash"]
     new_talk_rows = _filter_quest_talk_rows_by_available_dialogues(cursor, payload["talk_rows"])
+    _collect_anecdote_mapping_misses(
+        payload,
+        mapping_miss_collector=mapping_miss_collector,
+    )
     source_type = payload["source_type"]
     source_code_raw = payload["source_code_raw"]
 
     if title_text_map_hash is None and missing_title_collector is not None:
         missing_title_collector.append(str(quest_id))
-    if not new_talk_rows and no_talk_collector is not None:
+    if (
+        not new_talk_rows
+        and payload["source_status"] != ANECDOTE_SOURCE_STATUS_MAPPING_MISS
+        and no_talk_collector is not None
+    ):
         no_talk_collector.append(str(quest_id))
 
     sql1 = _build_quest_upsert_sql(with_created_version=True)
@@ -1570,22 +1597,21 @@ def importAllAnecdotes(
             "new_quest_count": 0,
             "missing_title_count": 0,
             "no_talk_count": 0,
-            "missing_group_count": 0,
-            "missing_talk_excel_count": 0,
+            "mapping_miss_count": 0,
             "hash_map_refreshed_quest_count": 0,
         }
 
     rows = load_json_file(anecdote_path)
     if not isinstance(rows, list):
         rows = []
-    talk_excel_map = load_talk_excel_perform_cfg_map()
+    talk_excel_map = load_storyboard_talk_excel_by_quest_id()
+    storyboard_file_by_talk_id = load_storyboard_file_by_talk_id()
     imported_quest_ids: set[int] = set()
     new_quest_ids: set[int] = set()
     skipped_rows: list[str] = []
     missing_title_rows: list[str] = []
     no_talk_rows: list[str] = []
-    missing_group_rows: list[str] = []
-    missing_talk_excel_rows: list[str] = []
+    mapping_miss_rows: list[str] = []
 
     try:
         with LightweightProgress(len(rows), desc="Anecdote rows", unit="rows") as pbar:
@@ -1594,11 +1620,11 @@ def importAllAnecdotes(
                     row,
                     cursor=cursor,
                     talk_excel_map=talk_excel_map,
+                    storyboard_file_by_talk_id=storyboard_file_by_talk_id,
                     skip_collector=skipped_rows,
                     missing_title_collector=missing_title_rows,
                     no_talk_collector=no_talk_rows,
-                    missing_group_collector=missing_group_rows,
-                    missing_talk_excel_collector=missing_talk_excel_rows,
+                    mapping_miss_collector=mapping_miss_rows,
                 )
                 if quest_id is not None:
                     imported_quest_ids.add(quest_id)
@@ -1642,9 +1668,8 @@ def importAllAnecdotes(
 
     _print_skip_summary("anecdote", skipped_rows)
     _print_issue_summary("anecdote missing titleTextMapHash", missing_title_rows)
-    _print_issue_summary("anecdote without talk ids", no_talk_rows)
-    _print_issue_summary("anecdote missing storyboard group", missing_group_rows)
-    _print_issue_summary("anecdote missing talk excel mapping", missing_talk_excel_rows)
+    _print_issue_summary("anecdote without importable talk rows", no_talk_rows)
+    _print_issue_summary("anecdote source mapping miss", mapping_miss_rows)
     return {
         "anecdote_row_count": len(rows),
         "imported_quest_count": len(imported_quest_ids),
@@ -1652,8 +1677,7 @@ def importAllAnecdotes(
         "skipped_row_count": len(skipped_rows),
         "missing_title_count": len(missing_title_rows),
         "no_talk_count": len(no_talk_rows),
-        "missing_group_count": len(missing_group_rows),
-        "missing_talk_excel_count": len(missing_talk_excel_rows),
+        "mapping_miss_count": len(mapping_miss_rows),
         "hash_map_refreshed_quest_count": int(refreshed_hash_map_quests or 0),
     }
 
@@ -1677,22 +1701,21 @@ def importAllAnecdotesForDiff(
             "new_quest_count": 0,
             "missing_title_count": 0,
             "no_talk_count": 0,
-            "missing_group_count": 0,
-            "missing_talk_excel_count": 0,
+            "mapping_miss_count": 0,
             "hash_map_refreshed_quest_count": 0,
         }
 
     rows = load_json_file(anecdote_path)
     if not isinstance(rows, list):
         rows = []
-    talk_excel_map = load_talk_excel_perform_cfg_map()
+    talk_excel_map = load_storyboard_talk_excel_by_quest_id()
+    storyboard_file_by_talk_id = load_storyboard_file_by_talk_id()
     imported_quest_ids: set[int] = set()
     new_quest_ids: set[int] = set()
     skipped_rows: list[str] = []
     missing_title_rows: list[str] = []
     no_talk_rows: list[str] = []
-    missing_group_rows: list[str] = []
-    missing_talk_excel_rows: list[str] = []
+    mapping_miss_rows: list[str] = []
 
     try:
         with LightweightProgress(len(rows), desc="Anecdote rows", unit="rows") as pbar:
@@ -1702,11 +1725,11 @@ def importAllAnecdotesForDiff(
                     version,
                     cursor=cursor,
                     talk_excel_map=talk_excel_map,
+                    storyboard_file_by_talk_id=storyboard_file_by_talk_id,
                     skip_collector=skipped_rows,
                     missing_title_collector=missing_title_rows,
                     no_talk_collector=no_talk_rows,
-                    missing_group_collector=missing_group_rows,
-                    missing_talk_excel_collector=missing_talk_excel_rows,
+                    mapping_miss_collector=mapping_miss_rows,
                 )
                 if quest_id is not None:
                     imported_quest_ids.add(quest_id)
@@ -1756,9 +1779,8 @@ def importAllAnecdotesForDiff(
 
     _print_skip_summary("anecdote", skipped_rows)
     _print_issue_summary("anecdote missing titleTextMapHash", missing_title_rows)
-    _print_issue_summary("anecdote without talk ids", no_talk_rows)
-    _print_issue_summary("anecdote missing storyboard group", missing_group_rows)
-    _print_issue_summary("anecdote missing talk excel mapping", missing_talk_excel_rows)
+    _print_issue_summary("anecdote without importable talk rows", no_talk_rows)
+    _print_issue_summary("anecdote source mapping miss", mapping_miss_rows)
     return {
         "anecdote_row_count": len(rows),
         "imported_quest_count": len(imported_quest_ids),
@@ -1766,10 +1788,11 @@ def importAllAnecdotesForDiff(
         "skipped_row_count": len(skipped_rows),
         "missing_title_count": len(missing_title_rows),
         "no_talk_count": len(no_talk_rows),
-        "missing_group_count": len(missing_group_rows),
-        "missing_talk_excel_count": len(missing_talk_excel_rows),
+        "mapping_miss_count": len(mapping_miss_rows),
         "hash_map_refreshed_quest_count": int(refreshed_hash_map_quests or 0),
     }
+
+
 def importHangout(
     quest_id: int,
     *,
@@ -2621,6 +2644,7 @@ def runQuestOnly(
     result["anecdote_row_count"] = int(anecdote_stats.get("anecdote_row_count", 0) or 0)
     result["anecdote_imported_count"] = int(anecdote_stats.get("imported_quest_count", 0) or 0)
     result["anecdote_new_count"] = int(anecdote_stats.get("new_quest_count", 0) or 0)
+    result["anecdote_mapping_miss_count"] = int(anecdote_stats.get("mapping_miss_count", 0) or 0)
     result["talk_rows_imported"] = int(talk_rows or 0)
     result["quests_processed"] = bool(include_quests)
     result["talks_processed"] = bool(include_talks)

@@ -17,6 +17,8 @@ SOURCE_TYPE_IQ = "IQ"
 SOURCE_TYPE_HANGOUT = "HANGOUT"
 SOURCE_TYPE_ANECDOTE = "ANECDOTE"
 SOURCE_TYPE_UNKNOWN = "UNKNOWN"
+ANECDOTE_SOURCE_STATUS_IMPORTABLE = "importable"
+ANECDOTE_SOURCE_STATUS_MAPPING_MISS = "mapping_miss"
 BASE_QUEST_SOURCE_TYPES = {
     SOURCE_TYPE_AQ,
     SOURCE_TYPE_LQ,
@@ -32,6 +34,9 @@ _STEP_TALK_CONDITION_TYPES = {
 _QUEST_SOURCE_RAW_BY_ID: dict[int, str] | None = None
 _HANGOUT_QUEST_IDS: set[int] | None = None
 _MAIN_COOP_IDS_BY_QUEST_ID: dict[int, list[int]] | None = None
+_STORYBOARD_TALK_EXCEL_BY_QUEST_ID: dict[int, list[int]] | None = None
+_STORYBOARD_FILE_BY_TALK_ID: dict[int, str] | None = None
+
 
 def _extract_first_positive_int(row: dict, *keys: str) -> int | None:
     for key in keys:
@@ -77,9 +82,12 @@ def normalize_source_code_raw(value) -> str:
 
 def reset_quest_source_caches():
     global _QUEST_SOURCE_RAW_BY_ID, _HANGOUT_QUEST_IDS, _MAIN_COOP_IDS_BY_QUEST_ID
+    global _STORYBOARD_TALK_EXCEL_BY_QUEST_ID, _STORYBOARD_FILE_BY_TALK_ID
     _QUEST_SOURCE_RAW_BY_ID = None
     _HANGOUT_QUEST_IDS = None
     _MAIN_COOP_IDS_BY_QUEST_ID = None
+    _STORYBOARD_TALK_EXCEL_BY_QUEST_ID = None
+    _STORYBOARD_FILE_BY_TALK_ID = None
 
 
 def load_quest_source_raw_by_id() -> dict[int, str]:
@@ -302,8 +310,13 @@ def iter_talk_excel_config_paths() -> list[str]:
     return sorted(glob.glob(pattern))
 
 
-def load_talk_excel_perform_cfg_map() -> dict[int, list[str]]:
-    mapping: dict[int, list[str]] = {}
+def load_storyboard_talk_excel_by_quest_id() -> dict[int, list[int]]:
+    global _STORYBOARD_TALK_EXCEL_BY_QUEST_ID
+    if _STORYBOARD_TALK_EXCEL_BY_QUEST_ID is not None:
+        return _STORYBOARD_TALK_EXCEL_BY_QUEST_ID
+
+    mapping: dict[int, list[int]] = {}
+    seen_pairs: set[tuple[int, int]] = set()
     for path in iter_talk_excel_config_paths():
         rows = load_json_file(path, error_msg=f"Error loading {os.path.basename(path)}", default=[])
         if not isinstance(rows, list):
@@ -311,13 +324,51 @@ def load_talk_excel_perform_cfg_map() -> dict[int, list[str]]:
         for row in rows:
             if not isinstance(row, dict):
                 continue
+            if row.get("loadType") != "TALK_STORYBOARD":
+                continue
             quest_id = row.get("questId")
-            perform_cfg = row.get("performCfg")
+            talk_id = row.get("id")
             if not isinstance(quest_id, int) or quest_id <= 0:
                 continue
-            if not isinstance(perform_cfg, str) or not perform_cfg:
+            if not isinstance(talk_id, int) or talk_id <= 0:
                 continue
-            mapping.setdefault(quest_id, []).append(perform_cfg)
+            pair = (quest_id, talk_id)
+            if pair in seen_pairs:
+                continue
+            seen_pairs.add(pair)
+            mapping.setdefault(quest_id, []).append(talk_id)
+
+    _STORYBOARD_TALK_EXCEL_BY_QUEST_ID = mapping
+    return mapping
+
+
+def iter_storyboard_talk_paths() -> list[str]:
+    pattern = os.path.join(DATA_PATH, "BinOutput", "Talk", "Storyboard", "*.json")
+    return sorted(glob.glob(pattern))
+
+
+def load_storyboard_file_by_talk_id() -> dict[int, str]:
+    global _STORYBOARD_FILE_BY_TALK_ID
+    if _STORYBOARD_FILE_BY_TALK_ID is not None:
+        return _STORYBOARD_FILE_BY_TALK_ID
+
+    mapping: dict[int, str] = {}
+    for path in iter_storyboard_talk_paths():
+        try:
+            obj = load_json_file(path)
+        except Exception:
+            continue
+        if not isinstance(obj, dict):
+            continue
+        talk_id = obj.get("AADKDKPMGNO")
+        if not isinstance(talk_id, int) or talk_id <= 0:
+            talk_id = obj.get("LBPGKDMGFBN")
+        if not isinstance(talk_id, int) or talk_id <= 0:
+            continue
+        rel_path = os.path.relpath(path, DATA_PATH).replace(os.sep, "/")
+        mapping.setdefault(talk_id, rel_path)
+
+    _STORYBOARD_FILE_BY_TALK_ID = mapping
     return mapping
 
 
@@ -350,9 +401,8 @@ def extract_storyboard_group_talk_ids(obj: dict) -> list[int]:
 def extract_anecdote_payload(
     row: dict,
     *,
-    talk_excel_map: dict[int, list[str]] | None = None,
-    missing_group_collector: list[str] | None = None,
-    missing_talk_excel_collector: list[str] | None = None,
+    talk_excel_map: dict[int, list[int]] | None = None,
+    storyboard_file_by_talk_id: dict[int, str] | None = None,
     normal_coop_id: int = 0,
 ) -> dict | None:
     core_fields = extract_anecdote_core_fields(row)
@@ -364,41 +414,80 @@ def extract_anecdote_payload(
     desc_text_map_hash = core_fields["desc_text_map_hash"]
     long_desc_text_map_hash = core_fields["long_desc_text_map_hash"]
     group_ids = core_fields["group_ids"]
+    if talk_excel_map is None:
+        talk_excel_map = load_storyboard_talk_excel_by_quest_id()
+    if storyboard_file_by_talk_id is None:
+        storyboard_file_by_talk_id = load_storyboard_file_by_talk_id()
+
     talk_ids: list[int] = []
     seen_talk_ids: set[int] = set()
+    mapping_miss_refs: list[str] = []
+    group_statuses: list[str] = []
     storyboard_group_root = os.path.join(DATA_PATH, "BinOutput", "Talk", "StoryboardGroup")
 
     for group_id in group_ids:
-        if talk_excel_map is not None and group_id not in talk_excel_map:
-            if missing_talk_excel_collector is not None:
-                missing_talk_excel_collector.append(f"{anecdote_id}:{group_id}")
+        latest_talk_ids = talk_excel_map.get(group_id) or []
+        if latest_talk_ids:
+            importable_talk_ids = [
+                talk_id
+                for talk_id in latest_talk_ids
+                if isinstance(talk_id, int) and talk_id > 0 and talk_id in storyboard_file_by_talk_id
+            ]
+            if importable_talk_ids:
+                group_statuses.append(ANECDOTE_SOURCE_STATUS_IMPORTABLE)
+                for talk_id in importable_talk_ids:
+                    if talk_id in seen_talk_ids:
+                        continue
+                    seen_talk_ids.add(talk_id)
+                    talk_ids.append(talk_id)
+            else:
+                group_statuses.append(ANECDOTE_SOURCE_STATUS_MAPPING_MISS)
+                mapping_miss_refs.append(f"{anecdote_id}:{group_id}")
+            continue
+
         group_path = os.path.join(storyboard_group_root, f"{group_id}.json")
         if not os.path.isfile(group_path):
-            if missing_group_collector is not None:
-                missing_group_collector.append(f"{anecdote_id}:{group_id}")
+            group_statuses.append(ANECDOTE_SOURCE_STATUS_MAPPING_MISS)
+            mapping_miss_refs.append(f"{anecdote_id}:{group_id}")
             continue
         try:
             group_obj = load_json_file(group_path)
         except Exception:
-            if missing_group_collector is not None:
-                missing_group_collector.append(f"{anecdote_id}:{group_id}")
+            group_statuses.append(ANECDOTE_SOURCE_STATUS_MAPPING_MISS)
+            mapping_miss_refs.append(f"{anecdote_id}:{group_id}")
             continue
         if not isinstance(group_obj, dict):
-            if missing_group_collector is not None:
-                missing_group_collector.append(f"{anecdote_id}:{group_id}")
+            group_statuses.append(ANECDOTE_SOURCE_STATUS_MAPPING_MISS)
+            mapping_miss_refs.append(f"{anecdote_id}:{group_id}")
             continue
-        for talk_id in extract_storyboard_group_talk_ids(group_obj):
+        group_talk_ids = extract_storyboard_group_talk_ids(group_obj)
+        if not group_talk_ids:
+            group_statuses.append(ANECDOTE_SOURCE_STATUS_MAPPING_MISS)
+            mapping_miss_refs.append(f"{anecdote_id}:{group_id}")
+            continue
+        group_statuses.append(ANECDOTE_SOURCE_STATUS_IMPORTABLE)
+        for talk_id in group_talk_ids:
             if talk_id in seen_talk_ids:
                 continue
             seen_talk_ids.add(talk_id)
             talk_ids.append(talk_id)
+
+    source_status = ANECDOTE_SOURCE_STATUS_MAPPING_MISS
+    if ANECDOTE_SOURCE_STATUS_IMPORTABLE in group_statuses:
+        source_status = ANECDOTE_SOURCE_STATUS_IMPORTABLE
+
+    talk_rows = [(talk_id, None, normal_coop_id) for talk_id in sorted(talk_ids)]
+    if source_status == ANECDOTE_SOURCE_STATUS_MAPPING_MISS:
+        talk_rows = []
 
     return {
         "quest_id": anecdote_id,
         "title_text_map_hash": title_text_map_hash,
         "desc_text_map_hash": desc_text_map_hash,
         "long_desc_text_map_hash": long_desc_text_map_hash,
-        "talk_rows": [(talk_id, None, normal_coop_id) for talk_id in sorted(talk_ids)],
+        "talk_rows": talk_rows,
+        "source_status": source_status,
+        "mapping_miss_refs": mapping_miss_refs,
         "source_type": SOURCE_TYPE_ANECDOTE,
         "source_code_raw": SOURCE_TYPE_ANECDOTE,
     }

@@ -822,7 +822,7 @@ def _process_quest_stage(plan, target_version, prune_missing):
         hangout_missing_coop_count = int(hangout_stats.get("missing_coop_count", 0) or 0)
         anecdote_missing_title_count = int(anecdote_stats.get("missing_title_count", 0) or 0)
         anecdote_no_talk_count = int(anecdote_stats.get("no_talk_count", 0) or 0)
-        anecdote_missing_group_count = int(anecdote_stats.get("missing_group_count", 0) or 0)
+        anecdote_mapping_miss_count = int(anecdote_stats.get("mapping_miss_count", 0) or 0)
 
         if skipped_quest_count > 0:
             anomalies.append(
@@ -854,11 +854,11 @@ def _process_quest_stage(plan, target_version, prune_missing):
             )
         if anecdote_no_talk_count > 0:
             anomalies.append(
-                f"Anecdote import found {anecdote_no_talk_count} rows without storyboard talk ids."
+                f"Anecdote import found {anecdote_no_talk_count} rows without importable talk rows."
             )
-        if anecdote_missing_group_count > 0:
+        if anecdote_mapping_miss_count > 0:
             anomalies.append(
-                f"Anecdote import found {anecdote_missing_group_count} missing storyboard groups."
+                f"Anecdote import found {anecdote_mapping_miss_count} source mapping misses."
             )
         # Heuristic anomaly detection for possible mapping mismatch.
         if quest_added_count >= 3 and new_quest_count == 0:

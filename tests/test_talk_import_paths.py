@@ -13,6 +13,7 @@ if DBBUILD_DIR not in sys.path:
 import diffUpdate
 import databaseHelper
 import questImport
+import quest_source_utils
 
 
 class _DummyCursor:
@@ -96,6 +97,17 @@ def _create_quest_tables(connection: sqlite3.Connection):
             talkId INTEGER,
             stepTitleTextMapHash INTEGER,
             coopQuestId INTEGER NOT NULL DEFAULT 0
+        )
+        """
+    )
+
+
+def _create_text_filter_tables(connection: sqlite3.Connection):
+    connection.execute(
+        """
+        CREATE TABLE langCode (
+            id INTEGER PRIMARY KEY,
+            codeName TEXT
         )
         """
     )
@@ -352,3 +364,225 @@ def test_database_helper_quest_dialogue_queries_use_talk_dialogue_link(monkeypat
         (1937334897, "TALK_ROLE_NPC", 203601, 10000201, 100002),
         (1937334897, "TALK_ROLE_NPC", 203601, 10000201, 10000201),
     ]
+
+
+def test_load_storyboard_file_by_talk_id_indexes_hashed_storyboard_files(monkeypatch, tmp_path):
+    storyboard_dir = tmp_path / "BinOutput" / "Talk" / "Storyboard"
+    storyboard_dir.mkdir(parents=True)
+    (storyboard_dir / "a8e1ffaf.json").write_text(
+        json.dumps({"AADKDKPMGNO": 6987810, "GALIDJOEHOC": []}),
+        encoding="utf-8",
+    )
+    (storyboard_dir / "legacy.json").write_text(
+        json.dumps({"LBPGKDMGFBN": 7002, "BLMFMJHINJN": []}),
+        encoding="utf-8",
+    )
+
+    monkeypatch.setattr(quest_source_utils, "DATA_PATH", str(tmp_path))
+    quest_source_utils.reset_quest_source_caches()
+
+    mapping = quest_source_utils.load_storyboard_file_by_talk_id()
+
+    assert mapping == {
+        6987810: "BinOutput/Talk/Storyboard/a8e1ffaf.json",
+        7002: "BinOutput/Talk/Storyboard/legacy.json",
+    }
+
+
+def test_extract_anecdote_payload_uses_hashed_storyboard_file_for_107601(monkeypatch, tmp_path):
+    excel_dir = tmp_path / "ExcelBinOutput"
+    excel_dir.mkdir(parents=True)
+    (excel_dir / "TalkExcelConfigData_1.json").write_text(
+        json.dumps(
+            [
+                {
+                    "questId": 510760101,
+                    "id": 6987810,
+                    "initDialog": 698781001,
+                    "performCfg": "QuestDialogue/Anecdote/Varka_9878/Q6987810",
+                    "loadType": "TALK_STORYBOARD",
+                }
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    storyboard_dir = tmp_path / "BinOutput" / "Talk" / "Storyboard"
+    storyboard_dir.mkdir(parents=True)
+    (storyboard_dir / "a8e1ffaf.json").write_text(
+        json.dumps({"AADKDKPMGNO": 6987810, "GALIDJOEHOC": []}),
+        encoding="utf-8",
+    )
+
+    monkeypatch.setattr(quest_source_utils, "DATA_PATH", str(tmp_path))
+    quest_source_utils.reset_quest_source_caches()
+
+    payload = quest_source_utils.extract_anecdote_payload(
+        {
+            "GBDGFHNLDFF": 107601,
+            "BBOMCGBIOFM": [510760101],
+        }
+    )
+
+    assert payload is not None
+    assert payload["talk_rows"] == [(6987810, None, 0)]
+    assert payload["source_status"] == quest_source_utils.ANECDOTE_SOURCE_STATUS_IMPORTABLE
+    assert payload["mapping_miss_refs"] == []
+    assert "located_talk_refs" not in payload
+
+
+def test_extract_anecdote_payload_reports_storyboard_missing_for_107501(monkeypatch, tmp_path):
+    excel_dir = tmp_path / "ExcelBinOutput"
+    excel_dir.mkdir(parents=True)
+    (excel_dir / "TalkExcelConfigData_1.json").write_text(
+        json.dumps(
+            [
+                {
+                    "questId": 510750101,
+                    "id": 6988401,
+                    "initDialog": 698840101,
+                    "performCfg": "QuestDialogue/Anecdote/Dahlia_9884/Q6988401",
+                    "loadType": "TALK_STORYBOARD",
+                },
+                {
+                    "questId": 510750101,
+                    "id": 6988402,
+                    "initDialog": 698840201,
+                    "performCfg": "QuestDialogue/Anecdote/Dahlia_9884/Q6988402",
+                    "loadType": "TALK_STORYBOARD",
+                },
+                {
+                    "questId": 510750101,
+                    "id": 6988403,
+                    "initDialog": 698840301,
+                    "performCfg": "QuestDialogue/Anecdote/Dahlia_9884/Q6988403",
+                    "loadType": "TALK_STORYBOARD",
+                },
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    monkeypatch.setattr(quest_source_utils, "DATA_PATH", str(tmp_path))
+    quest_source_utils.reset_quest_source_caches()
+
+    payload = quest_source_utils.extract_anecdote_payload(
+        {
+            "GBDGFHNLDFF": 107501,
+            "BBOMCGBIOFM": [510750101],
+        }
+    )
+
+    assert payload is not None
+    assert payload["talk_rows"] == []
+    assert payload["source_status"] == quest_source_utils.ANECDOTE_SOURCE_STATUS_MAPPING_MISS
+    assert payload["mapping_miss_refs"] == ["107501:510750101"]
+    assert "located_talk_refs" not in payload
+
+
+def test_extract_anecdote_payload_falls_back_to_storyboard_group(monkeypatch, tmp_path):
+    group_dir = tmp_path / "BinOutput" / "Talk" / "StoryboardGroup"
+    group_dir.mkdir(parents=True)
+    (group_dir / "510750101.json").write_text(
+        json.dumps(
+            {
+                "NFFIGDHFAJG": [
+                    {"NFIEHACCECI": 7001},
+                    {"BLKKAMEMBBJ": 7002},
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    monkeypatch.setattr(quest_source_utils, "DATA_PATH", str(tmp_path))
+    quest_source_utils.reset_quest_source_caches()
+
+    payload = quest_source_utils.extract_anecdote_payload(
+        {
+            "GBDGFHNLDFF": 107501,
+            "BBOMCGBIOFM": [510750101],
+        },
+        talk_excel_map={},
+        storyboard_file_by_talk_id={},
+    )
+
+    assert payload is not None
+    assert payload["talk_rows"] == [(7001, None, 0), (7002, None, 0)]
+    assert payload["source_status"] == quest_source_utils.ANECDOTE_SOURCE_STATUS_IMPORTABLE
+    assert payload["mapping_miss_refs"] == []
+    assert "located_talk_refs" not in payload
+
+
+def test_import_anecdote_mapping_miss_does_not_duplicate_no_talk(monkeypatch, tmp_path):
+    excel_dir = tmp_path / "ExcelBinOutput"
+    excel_dir.mkdir(parents=True)
+    (excel_dir / "TalkExcelConfigData_1.json").write_text(
+        json.dumps(
+            [
+                {
+                    "questId": 510750101,
+                    "id": 6988401,
+                    "initDialog": 698840101,
+                    "performCfg": "QuestDialogue/Anecdote/Dahlia_9884/Q6988401",
+                    "loadType": "TALK_STORYBOARD",
+                },
+                {
+                    "questId": 510750101,
+                    "id": 6988402,
+                    "initDialog": 698840201,
+                    "performCfg": "QuestDialogue/Anecdote/Dahlia_9884/Q6988402",
+                    "loadType": "TALK_STORYBOARD",
+                },
+                {
+                    "questId": 510750101,
+                    "id": 6988403,
+                    "initDialog": 698840301,
+                    "performCfg": "QuestDialogue/Anecdote/Dahlia_9884/Q6988403",
+                    "loadType": "TALK_STORYBOARD",
+                },
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    monkeypatch.setattr(quest_source_utils, "DATA_PATH", str(tmp_path))
+    quest_source_utils.reset_quest_source_caches()
+
+    talk_excel_map = quest_source_utils.load_storyboard_talk_excel_by_quest_id()
+    storyboard_file_by_talk_id = quest_source_utils.load_storyboard_file_by_talk_id()
+
+    connection = sqlite3.connect(":memory:")
+    _create_dialogue_tables(connection)
+    _create_quest_tables(connection)
+    _create_text_filter_tables(connection)
+    connection.execute(
+        "INSERT INTO talk_dialogue_link(talkId, coopQuestId, dialogueId) VALUES (?,?,?)",
+        (999999, 0, 99999901),
+    )
+    connection.commit()
+
+    no_talk_rows: list[str] = []
+    mapping_miss_rows: list[str] = []
+
+    monkeypatch.setattr(questImport, "conn", connection)
+    questImport._set_talk_dialogue_link_presence(None)
+
+    quest_id, _is_new = questImport.importAnecdote(
+        {
+            "GBDGFHNLDFF": 107501,
+            "BBOMCGBIOFM": [510750101],
+            "PPANCKHJOGI": 325970011,
+            "AJKAHOPOBJB": 1907257608,
+            "OBLBGMIHBHL": 1917204629,
+        },
+        talk_excel_map=talk_excel_map,
+        storyboard_file_by_talk_id=storyboard_file_by_talk_id,
+        no_talk_collector=no_talk_rows,
+        mapping_miss_collector=mapping_miss_rows,
+    )
+
+    assert quest_id == 107501
+    assert no_talk_rows == []
+    assert mapping_miss_rows == ["107501:510750101"]
+    assert connection.execute("SELECT questId, talkId FROM questTalk").fetchall() == []
