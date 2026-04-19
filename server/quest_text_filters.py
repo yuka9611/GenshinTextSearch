@@ -13,6 +13,56 @@ QUEST_TEXT_FILTER_LANG_CODE = "TextMapCHS.json"
 SHORT_GENERIC_TEXT_MAX_LENGTH = 6
 SHORT_GENERIC_TEXT_INTERJECTION_CHARS = "呀啊哇呜嗯唔哦噢欸诶哼哈嘿呵嗷喂呃咦哟哎"
 SHORT_GENERIC_TEXT_PUNCTUATION_CHARS = "…？！?!～~。．，、·・—-；:（）()「」『』【】《》〈〉"
+SHORT_GENERIC_TEXT_RESPONSE_END_CHARS = "…？！?!～~。．"
+SHORT_GENERIC_TEXT_BROAD_RESPONSE_STEMS: tuple[str, ...] = (
+    "怎么了",
+    "没错",
+    "没问题",
+    "是的",
+    "交给我吧",
+    "再见",
+    "我明白了",
+    "唉",
+    "这",
+    "我",
+    "什么",
+    "好",
+    "真的吗",
+    "为什么",
+    "这是",
+    "你好",
+    "呼",
+    "没有",
+    "谢谢",
+    "好吧",
+    "难道说",
+    "明白了",
+    "好耶",
+    "当然",
+    "什么事",
+    "原来如此",
+    "可是",
+    "好的",
+    "派蒙",
+    "什么意思",
+    "是啊",
+    "你",
+    "好久不见",
+    "准备好了",
+    "呼…呼",
+    "没关系",
+    "这样啊",
+    "咳咳",
+    "噗",
+    "确实",
+    "你们好",
+    "你还好吗",
+    "怎么会这样",
+    "走吧",
+    "这个嘛",
+    "喵",
+    "原来是这样",
+)
 _SHORT_GENERIC_TEXT_TRIM_CHARS_SQL = "' ' || char(9) || char(10) || char(13) || '　'"
 _SHORT_GENERIC_TEXT_SQL_EXTRA_STRIP_TOKENS: tuple[str, ...] = (
     "char(9)",
@@ -20,12 +70,14 @@ _SHORT_GENERIC_TEXT_SQL_EXTRA_STRIP_TOKENS: tuple[str, ...] = (
     "char(13)",
 )
 _SHORT_GENERIC_TEXT_INTERJECTION_SET = frozenset(SHORT_GENERIC_TEXT_INTERJECTION_CHARS)
+_SHORT_GENERIC_TEXT_BROAD_RESPONSE_SET = frozenset(SHORT_GENERIC_TEXT_BROAD_RESPONSE_STEMS)
 _SHORT_GENERIC_TEXT_PUNCTUATION_SET = frozenset(
     SHORT_GENERIC_TEXT_PUNCTUATION_CHARS + " \t\r\n　"
 )
 _SHORT_GENERIC_TEXT_ALLOWED_SET = frozenset(
     SHORT_GENERIC_TEXT_INTERJECTION_CHARS + SHORT_GENERIC_TEXT_PUNCTUATION_CHARS + " \t\r\n　"
 )
+_SHORT_GENERIC_TEXT_RESPONSE_END_STRIP_CHARS = SHORT_GENERIC_TEXT_RESPONSE_END_CHARS + " \t\r\n　"
 
 
 def is_excluded_quest_text(content: object) -> bool:
@@ -38,15 +90,26 @@ def _normalize_short_generic_text(content: object) -> str:
     return text.strip(" \t\r\n　")
 
 
+def _strip_short_generic_response_end(text: str) -> str:
+    return text.rstrip(_SHORT_GENERIC_TEXT_RESPONSE_END_STRIP_CHARS)
+
+
+def _is_broad_short_response_text(text: str) -> bool:
+    response_stem = _strip_short_generic_response_end(text)
+    return response_stem != text and response_stem in _SHORT_GENERIC_TEXT_BROAD_RESPONSE_SET
+
+
 def is_short_generic_text(content: object) -> bool:
     text = _normalize_short_generic_text(content)
     if not text or len(text) > SHORT_GENERIC_TEXT_MAX_LENGTH:
         return False
     if all(char in _SHORT_GENERIC_TEXT_PUNCTUATION_SET for char in text):
         return True
-    return all(char in _SHORT_GENERIC_TEXT_ALLOWED_SET for char in text) and any(
+    if all(char in _SHORT_GENERIC_TEXT_ALLOWED_SET for char in text) and any(
         char in _SHORT_GENERIC_TEXT_INTERJECTION_SET for char in text
-    )
+    ):
+        return True
+    return _is_broad_short_response_text(text)
 
 
 def is_excluded_quest_version_dialogue_text(content: object) -> bool:
@@ -78,6 +141,7 @@ def build_short_generic_text_excluded_sql(
     content_expr: str,
 ) -> tuple[str, tuple[object, ...]]:
     trimmed_expr = _build_trimmed_text_sql(content_expr)
+    response_stem_expr = f"rtrim({trimmed_expr}, {_sql_quote_literal(_SHORT_GENERIC_TEXT_RESPONSE_END_STRIP_CHARS)})"
     punctuation_only_expr = _build_sql_strip_chars(
         trimmed_expr,
         SHORT_GENERIC_TEXT_PUNCTUATION_CHARS + " 　",
@@ -90,13 +154,18 @@ def build_short_generic_text_excluded_sql(
         f"instr({trimmed_expr}, {_sql_quote_literal(char)}) > 0"
         for char in dict.fromkeys(SHORT_GENERIC_TEXT_INTERJECTION_CHARS)
     )
+    broad_response_literals = ", ".join(
+        _sql_quote_literal(stem) for stem in SHORT_GENERIC_TEXT_BROAD_RESPONSE_STEMS
+    )
     sql = (
         "("
         f"{trimmed_expr} <> '' "
         f"AND length({trimmed_expr}) <= {SHORT_GENERIC_TEXT_MAX_LENGTH} "
         "AND ("
         f"{punctuation_only_expr} = '' "
-        f"OR ({allowed_chars_expr} = '' AND ({has_interjection_sql}))"
+        f"OR ({allowed_chars_expr} = '' AND ({has_interjection_sql})) "
+        f"OR ({response_stem_expr} <> {trimmed_expr} "
+        f"AND {response_stem_expr} IN ({broad_response_literals}))"
         ")"
         ")"
     )

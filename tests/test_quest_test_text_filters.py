@@ -301,6 +301,61 @@ def _seed_short_generic_title_quest(connection: sqlite3.Connection, quest_id: in
     connection.commit()
 
 
+def _seed_broad_short_response_regression_quest(connection: sqlite3.Connection, quest_id: int = 6):
+    connection.executemany(
+        "INSERT INTO version_dim(id, raw_version, version_tag, version_sort_key) VALUES (?,?,?,?)",
+        [
+            (57, "Version 5.7", "5.7", 57),
+            (60, "Version 6.0", "6.0", 60),
+        ],
+    )
+    connection.executemany(
+        """
+        INSERT INTO textMap(lang, hash, content, created_version_id, updated_version_id)
+        VALUES (?,?,?,?,?)
+        """,
+        [
+            (1, 610, "Quest Title", 57, 57),
+            (1, 611, "怎么了？", 4, 4),
+            (1, 612, "谢谢。", 2, 2),
+            (1, 613, "Useful dialogue with quest-specific meaning.", 57, 60),
+        ],
+    )
+    connection.execute(
+        """
+        INSERT INTO quest(
+            questId, titleTextMapHash, descTextMapHash, longDescTextMapHash, chapterId,
+            source_type, source_code_raw, created_version_id, git_created_version_id
+        ) VALUES (?,?,?,?,?,?,?,?,?)
+        """,
+        (quest_id, 610, None, None, 10, None, None, 60, 57),
+    )
+    connection.execute(
+        "INSERT INTO questTalk(questId, talkId, stepTitleTextMapHash, coopQuestId) VALUES (?,?,?,?)",
+        (quest_id, 6001, None, 0),
+    )
+    connection.executemany(
+        """
+        INSERT INTO dialogue(dialogueId, talkerType, talkerId, talkId, textHash, coopQuestId)
+        VALUES (?,?,?,?,?,?)
+        """,
+        [
+            (9601, "TALK_ROLE_NPC", 1, 6001, 611, None),
+            (9602, "TALK_ROLE_NPC", 1, 6001, 612, None),
+            (9603, "TALK_ROLE_NPC", 1, 6001, 613, None),
+        ],
+    )
+    connection.executemany(
+        "INSERT INTO talk_dialogue_link(talkId, coopQuestId, dialogueId) VALUES (?,?,?)",
+        [
+            (6001, 0, 9601),
+            (6001, 0, 9602),
+            (6001, 0, 9603),
+        ],
+    )
+    connection.commit()
+
+
 def test_is_excluded_quest_text_matches_only_prefixes():
     from quest_text_filters import is_excluded_quest_text
 
@@ -317,11 +372,25 @@ def test_is_short_generic_text_matches_expected_examples():
         is_short_generic_text,
     )
 
-    for text in ("……", "呀！", "呀呀！", "唔…", "嗯？", "欸？！"):
+    for text in (
+        "……",
+        "呀！",
+        "呀呀！",
+        "唔…",
+        "嗯？",
+        "欸？！",
+        "怎么了？",
+        "没问题。",
+        "谢谢。",
+        "交给我吧。",
+        "可是…",
+        "喵。",
+        "原来是这样…",
+    ):
         assert is_short_generic_text(text)
         assert is_excluded_quest_version_dialogue_text(text)
 
-    for text in ("怎么了？", "没问题。", "谢谢。", "交给我吧。"):
+    for text in ("风起地", "白术", "白垩之章", "请跟我来。"):
         assert not is_short_generic_text(text)
 
     assert is_excluded_quest_version_dialogue_text("(test)Quest")
@@ -365,6 +434,27 @@ def test_refresh_quest_hash_map_keeps_short_generic_titles_but_skips_short_gener
         assert rows == [
             (5, 410, "title"),
             (5, 412, "dialogue"),
+        ]
+    finally:
+        connection.close()
+
+
+def test_refresh_quest_hash_map_skips_broad_short_response_dialogues(monkeypatch):
+    connection = sqlite3.connect(":memory:")
+    try:
+        _bootstrap_quest_db(connection)
+        _patch_modules(monkeypatch, connection)
+        _seed_broad_short_response_regression_quest(connection)
+
+        touched = quest_hash_map_utils.refresh_quest_hash_map_for_quest_ids(connection.cursor(), [6])
+        rows = connection.execute(
+            "SELECT questId, hash, source_type FROM quest_hash_map WHERE questId=6 ORDER BY hash, source_type"
+        ).fetchall()
+
+        assert touched == 1
+        assert rows == [
+            (6, 610, "title"),
+            (6, 613, "dialogue"),
         ]
     finally:
         connection.close()
@@ -473,6 +563,37 @@ def test_authoritative_quest_backfill_ignores_short_generic_dialogues_without_ha
         assert updated_rows == 1
         assert created_version == 50
         assert quest_versions == [(1, 52)]
+    finally:
+        connection.close()
+
+
+def test_authoritative_quest_backfill_ignores_broad_short_response_dialogues(monkeypatch):
+    connection = sqlite3.connect(":memory:")
+    try:
+        _bootstrap_quest_db(connection)
+        _patch_modules(monkeypatch, connection)
+        _seed_broad_short_response_regression_quest(connection)
+
+        quest_hash_map_utils.refresh_quest_hash_map_for_quest_ids(connection.cursor(), [6])
+        created_rows, updated_rows = version_control.backfill_quest_created_version_from_textmap(
+            connection.cursor(),
+            quest_ids=[6],
+            authoritative=True,
+            with_stats=True,
+        )
+        connection.commit()
+
+        created_version = connection.execute(
+            "SELECT created_version_id FROM quest WHERE questId=6"
+        ).fetchone()[0]
+        quest_versions = connection.execute(
+            "SELECT lang, updated_version_id FROM quest_version WHERE questId=6 ORDER BY lang"
+        ).fetchall()
+
+        assert created_rows == 1
+        assert updated_rows == 1
+        assert created_version == 57
+        assert quest_versions == [(1, 60)]
     finally:
         connection.close()
 

@@ -112,7 +112,7 @@ def test_build_versioned_textmap_row_plan_can_reuse_versions_from_another_hash_w
     }
 
 
-def test_build_versioned_textmap_row_plan_still_reuses_semantic_short_sentences_across_hash_change():
+def test_build_versioned_textmap_row_plan_does_not_reuse_broad_short_responses_across_hash_change():
     row_plan = textMapImport._build_versioned_textmap_row_plan(
         current_obj={100: "谢谢。"},
         existing_rows_by_hash={
@@ -122,7 +122,7 @@ def test_build_versioned_textmap_row_plan_still_reuses_semantic_short_sentences_
     )
 
     assert row_plan == {
-        100: ("谢谢。", 10, 10),
+        100: ("谢谢。", 30, 30),
     }
 
 

@@ -74,6 +74,23 @@ def test_match_textmap_lineage_to_previous_skips_cross_hash_same_content_for_sho
     assert matches[200].predecessor_hash is None
 
 
+def test_match_textmap_lineage_to_previous_skips_cross_hash_same_content_for_broad_short_response():
+    matches = match_textmap_lineage_to_previous(
+        {
+            200: TextMapLineageState(
+                snapshot_hash=200,
+                content="谢谢。",
+            )
+        },
+        {
+            100: "谢谢。",
+        },
+    )
+
+    assert matches[200].match_kind == TEXTMAP_MATCH_KIND_NEW
+    assert matches[200].predecessor_hash is None
+
+
 def test_match_textmap_lineage_to_previous_skips_similar_cross_hash_matching_for_short_generic_text():
     matches = match_textmap_lineage_to_previous(
         {
