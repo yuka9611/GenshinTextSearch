@@ -1221,14 +1221,18 @@ def _get_quest_bin_step_list(quest_bin: dict) -> list[dict]:
     return [item for item in steps if isinstance(item, dict)]
 
 
+def _get_quest_bin_step_sub_id(step_obj: dict) -> int | None:
+    for key in ("MPKBGPAKIOA", "subId", "KKMJBEPGLGD"):
+        value = step_obj.get(key)
+        if isinstance(value, int) and value > 0:
+            return value
+    return None
+
+
 def _extract_step_talk_ids_from_quest_bin(quest_bin: dict) -> dict[int, list[int]]:
     result: dict[int, list[int]] = {}
     for step in _get_quest_bin_step_list(quest_bin):
-        sub_id = step.get("MPKBGPAKIOA")
-        if not isinstance(sub_id, int):
-            sub_id = step.get("subId")
-        if not isinstance(sub_id, int):
-            sub_id = step.get("KKMJBEPGLGD")
+        sub_id = _get_quest_bin_step_sub_id(step)
         if not isinstance(sub_id, int):
             continue
 
@@ -1266,6 +1270,74 @@ def _extract_step_talk_ids_from_quest_bin(quest_bin: dict) -> dict[int, list[int
             talk_id = params[0]
             if isinstance(talk_id, int) and talk_id > 0 and talk_id not in result[sub_id]:
                 result[sub_id].append(talk_id)
+    return result
+
+
+def _get_quest_bin_talk_rows(quest_bin: dict) -> list[dict]:
+    for key in ("NFFIGDHFAJG", "talks", "IBEGAHMEABP", "DGJMIPFDEOF", "DCHHEHNNEOO"):
+        value = quest_bin.get(key)
+        if isinstance(value, list):
+            return [item for item in value if isinstance(item, dict)]
+    return []
+
+
+def _get_quest_bin_talk_id(talk_obj: dict) -> int | None:
+    for key in ("NFIEHACCECI", "id", "ILHDNJDDEOP", "BLKKAMEMBBJ", "BPMABFNPCMI"):
+        value = talk_obj.get(key)
+        if isinstance(value, int) and value > 0:
+            return value
+    return None
+
+
+def _get_talk_start_condition_sub_ids(talk_obj: dict) -> list[int]:
+    result: list[int] = []
+    seen: set[int] = set()
+    conditions = talk_obj.get("MPFAEHLBPJE")
+    if not isinstance(conditions, list):
+        conditions = talk_obj.get("beginCond")
+    if not isinstance(conditions, list):
+        return result
+
+    for condition in conditions:
+        if not isinstance(condition, dict):
+            continue
+        cond_type = (
+            condition.get("_type")
+            or condition.get("type")
+            or condition.get("HAHEIAHBPEJ")
+            or condition.get("DLPKMDPABFM")
+        )
+        if cond_type != "QUEST_COND_STATE_EQUAL":
+            continue
+        params = (
+            condition.get("_param")
+            or condition.get("param")
+            or condition.get("paramList")
+            or condition.get("AAHAKNIPEDM")
+        )
+        if not isinstance(params, list) or not params:
+            continue
+        try:
+            sub_id = int(str(params[0]))
+        except (TypeError, ValueError):
+            continue
+        if sub_id > 0 and sub_id not in seen:
+            seen.add(sub_id)
+            result.append(sub_id)
+    return result
+
+
+def _extract_top_level_talk_step_ids_from_quest_bin(quest_bin: dict) -> dict[int, list[int]]:
+    result: dict[int, list[int]] = {}
+    for talk_obj in _get_quest_bin_talk_rows(quest_bin):
+        talk_id = _get_quest_bin_talk_id(talk_obj)
+        if not isinstance(talk_id, int):
+            continue
+        result.setdefault(talk_id, [])
+        result[talk_id].append(talk_id)
+        for sub_id in _get_talk_start_condition_sub_ids(talk_obj):
+            if sub_id not in result[talk_id]:
+                result[talk_id].append(sub_id)
     return result
 
 
@@ -1353,11 +1425,7 @@ def getQuestStepTitleMap(questId: int, langCode: int = 1) -> dict[int, str]:
     quest_bin = _get_quest_bin_output(questId)
     if isinstance(quest_bin, dict):
         for step in _get_quest_bin_step_list(quest_bin):
-            sub_id = step.get("MPKBGPAKIOA")
-            if not isinstance(sub_id, int):
-                sub_id = step.get("subId")
-            if not isinstance(sub_id, int):
-                sub_id = step.get("KKMJBEPGLGD")
+            sub_id = _get_quest_bin_step_sub_id(step)
             if not isinstance(sub_id, int):
                 continue
             if sub_id not in title_by_sub_id:
@@ -1388,6 +1456,16 @@ def getQuestStepTitleMap(questId: int, langCode: int = 1) -> dict[int, str]:
         for talk_id in talk_ids:
             if isinstance(talk_id, int) and talk_id > 0:
                 talk_title_map.setdefault(talk_id, title)
+
+    if isinstance(quest_bin, dict):
+        for talk_id, sub_ids in _extract_top_level_talk_step_ids_from_quest_bin(quest_bin).items():
+            if talk_id in talk_title_map:
+                continue
+            for sub_id in sub_ids:
+                title = title_by_sub_id.get(sub_id) or ""
+                if title:
+                    talk_title_map.setdefault(talk_id, title)
+                    break
 
     _QUEST_STEP_TALK_MAP_CACHE[cache_key] = talk_title_map
     return talk_title_map

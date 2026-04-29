@@ -218,6 +218,14 @@ def get_quest_subquests(obj: dict) -> list[dict]:
     return [item for item in subquests if isinstance(item, dict)]
 
 
+def _get_subquest_id(step_obj: dict) -> int | None:
+    for key in ("MPKBGPAKIOA", "subId", "KKMJBEPGLGD"):
+        value = step_obj.get(key)
+        if isinstance(value, int) and value > 0:
+            return value
+    return None
+
+
 def get_step_desc_text_map_hash(step_obj: dict) -> int | None:
     for key in (
         "AJGGCMPLKHK",
@@ -231,6 +239,60 @@ def get_step_desc_text_map_hash(step_obj: dict) -> int | None:
         if isinstance(value, int) and value != 0:
             return value
     return None
+
+
+def _get_quest_talk_rows(obj: dict) -> list[dict]:
+    for key in ("NFFIGDHFAJG", "talks", "IBEGAHMEABP", "DGJMIPFDEOF", "DCHHEHNNEOO"):
+        value = obj.get(key)
+        if isinstance(value, list):
+            return [item for item in value if isinstance(item, dict)]
+    return []
+
+
+def _get_quest_talk_id(talk_obj: dict) -> int | None:
+    for key in ("NFIEHACCECI", "id", "ILHDNJDDEOP", "BLKKAMEMBBJ", "BPMABFNPCMI"):
+        value = talk_obj.get(key)
+        if isinstance(value, int) and value > 0:
+            return value
+    return None
+
+
+def _get_talk_start_condition_subquest_ids(talk_obj: dict) -> list[int]:
+    result: list[int] = []
+    seen: set[int] = set()
+    conditions = talk_obj.get("MPFAEHLBPJE")
+    if not isinstance(conditions, list):
+        conditions = talk_obj.get("beginCond")
+    if not isinstance(conditions, list):
+        return result
+
+    for condition in conditions:
+        if not isinstance(condition, dict):
+            continue
+        cond_type = (
+            condition.get("_type")
+            or condition.get("type")
+            or condition.get("HAHEIAHBPEJ")
+            or condition.get("DLPKMDPABFM")
+        )
+        if cond_type != "QUEST_COND_STATE_EQUAL":
+            continue
+        params = (
+            condition.get("_param")
+            or condition.get("param")
+            or condition.get("paramList")
+            or condition.get("AAHAKNIPEDM")
+        )
+        if not isinstance(params, list) or not params:
+            continue
+        try:
+            sub_id = int(str(params[0]))
+        except (TypeError, ValueError):
+            continue
+        if sub_id > 0 and sub_id not in seen:
+            seen.add(sub_id)
+            result.append(sub_id)
+    return result
 
 
 def get_step_talk_ids(step_obj: dict) -> list[int]:
@@ -276,12 +338,27 @@ def get_step_talk_ids(step_obj: dict) -> list[int]:
 
 def build_step_title_hash_by_talk_id(obj: dict) -> dict[int, int]:
     mapping: dict[int, int] = {}
+    title_hash_by_subquest_id: dict[int, int] = {}
     for subquest in get_quest_subquests(obj):
         step_hash = get_step_desc_text_map_hash(subquest)
         if not isinstance(step_hash, int) or step_hash == 0:
             continue
+        subquest_id = _get_subquest_id(subquest)
+        if isinstance(subquest_id, int):
+            title_hash_by_subquest_id.setdefault(subquest_id, step_hash)
         for talk_id in get_step_talk_ids(subquest):
             mapping.setdefault(talk_id, step_hash)
+
+    for talk_obj in _get_quest_talk_rows(obj):
+        talk_id = _get_quest_talk_id(talk_obj)
+        if not isinstance(talk_id, int):
+            continue
+        if talk_id in title_hash_by_subquest_id:
+            mapping.setdefault(talk_id, title_hash_by_subquest_id[talk_id])
+        for subquest_id in _get_talk_start_condition_subquest_ids(talk_obj):
+            step_hash = title_hash_by_subquest_id.get(subquest_id)
+            if isinstance(step_hash, int):
+                mapping.setdefault(talk_id, step_hash)
     return mapping
 
 

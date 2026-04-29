@@ -1325,7 +1325,8 @@ def backfillQuestMetadata(*, commit: bool = True, batch_size: int = DEFAULT_BATC
         if brief_talk_rows:
             executemany_batched(
                 cursor,
-                "UPDATE questTalk SET stepTitleTextMapHash=? WHERE questId=? AND talkId=? AND coalesce(coopQuestId, 0)=?",
+                "UPDATE questTalk SET stepTitleTextMapHash=coalesce(?, stepTitleTextMapHash) "
+                "WHERE questId=? AND talkId=? AND coalesce(coopQuestId, 0)=?",
                 brief_talk_rows,
                 batch_size=batch_size,
             )
