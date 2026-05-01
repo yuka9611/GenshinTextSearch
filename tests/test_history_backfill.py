@@ -1,6 +1,8 @@
 import os
 import sqlite3
 import sys
+from contextlib import nullcontext
+from types import SimpleNamespace
 
 
 DBBUILD_DIR = os.path.normpath(
@@ -360,6 +362,138 @@ def test_load_textmap_version_cache_for_current_group_reads_requested_hashes():
             100: (1, 10, 20),
             200: (2, 11, 21),
         }
+    finally:
+        conn.close()
+
+
+def test_load_textmap_version_cache_for_current_group_respects_target_hashes():
+    conn = sqlite3.connect(":memory:")
+    try:
+        cursor = conn.cursor()
+        cursor.execute(
+            """
+            CREATE TABLE textMap (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                hash INTEGER,
+                lang INTEGER,
+                created_version_id INTEGER,
+                updated_version_id INTEGER
+            )
+            """
+        )
+        cursor.executemany(
+            "INSERT INTO textMap(hash, lang, created_version_id, updated_version_id) VALUES (?, ?, ?, ?)",
+            [
+                (100, 1, 10, 20),
+                (200, 1, 11, 21),
+                (300, 1, 12, 22),
+            ],
+        )
+
+        rows = history_backfill._load_textmap_version_cache_for_current_group(
+            cursor,
+            lang_id=1,
+            current_obj={"100": "a", "200": "b"},
+            target_hashes={200, 300, 999},
+            batch_size=2,
+        )
+
+        assert rows == {
+            200: (2, 11, 21),
+        }
+    finally:
+        conn.close()
+
+
+def test_backfill_textmap_versions_from_history_replays_only_scoped_hashes(monkeypatch):
+    conn = sqlite3.connect(":memory:")
+    try:
+        conn.execute(
+            """
+            CREATE TABLE textMap (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                hash INTEGER,
+                lang INTEGER,
+                created_version_id INTEGER,
+                updated_version_id INTEGER
+            )
+            """
+        )
+        conn.executemany(
+            "INSERT INTO textMap(hash, lang, created_version_id, updated_version_id) VALUES (?, ?, ?, ?)",
+            [
+                (100, 1, 10, 10),
+                (200, 1, 10, 10),
+                (300, 2, 10, 10),
+            ],
+        )
+        conn.commit()
+
+        snapshot = history_backfill.VersionSnapshot("6.5", "6.5", 65, "sha65", 65)
+        seen = []
+
+        monkeypatch.setattr(history_backfill, "conn", conn)
+        monkeypatch.setattr(
+            history_backfill,
+            "_resolve_snapshot_replay_range",
+            lambda *_args, **_kwargs: SimpleNamespace(
+                target_snapshot=snapshot,
+                raw_target_commit="sha65",
+            ),
+        )
+        monkeypatch.setattr(
+            history_backfill,
+            "_get_version_snapshot_metadata",
+            lambda _repo_path: {"snapshots": (snapshot,)},
+        )
+        monkeypatch.setattr(
+            history_backfill,
+            "_get_textmap_lang_id_map",
+            lambda: {"TextMapCHS.json": 1, "TextMapEN.json": 2},
+        )
+        monkeypatch.setattr(
+            history_backfill,
+            "_load_worktree_textmap_group",
+            lambda _repo_path, base_name: {
+                "TextMapCHS.json": {"100": "a", "200": "b"},
+                "TextMapEN.json": {"300": "c"},
+            }.get(base_name),
+        )
+
+        def fake_compute(**kwargs):
+            seen.append((kwargs["base_name"], set(kwargs["target_hashes"])))
+            return {hash_value: (65, 65) for hash_value in kwargs["target_hashes"]}
+
+        monkeypatch.setattr(
+            history_backfill,
+            "_compute_textmap_group_authoritative_versions",
+            fake_compute,
+        )
+        monkeypatch.setattr(history_backfill, "fast_import_pragmas", lambda *_args, **_kwargs: nullcontext())
+        monkeypatch.setattr(history_backfill, "_backfill_textmap_git_versions", lambda *_args, **_kwargs: 0)
+        monkeypatch.setattr(
+            history_backfill,
+            "analyze_textmap_version_exceptions",
+            lambda _cursor: {"created_after_updated": 0},
+        )
+        monkeypatch.setattr(history_backfill, "report_version_exceptions", lambda *_args, **_kwargs: None)
+        monkeypatch.setattr(history_backfill, "rebuild_version_catalog", lambda *_args, **_kwargs: {})
+
+        history_backfill.backfill_textmap_versions_from_history(
+            target_commit="sha65",
+            from_commit="sha64",
+            refresh_version_catalog=False,
+            target_hashes_by_base={"TextMapCHS.json": {200, 999}},
+        )
+
+        assert seen == [("TextMapCHS.json", {200})]
+        assert conn.execute(
+            "SELECT hash, created_version_id, updated_version_id FROM textMap ORDER BY hash"
+        ).fetchall() == [
+            (100, 10, 10),
+            (200, 65, 65),
+            (300, 10, 10),
+        ]
     finally:
         conn.close()
 

@@ -133,7 +133,7 @@ def _import_textmap(
     force_reimport: bool = False,
     prune_missing: bool = True,
     version_id: int | None = None,
-):
+) -> set[int]:
     """
     :param baseMapName: Base language config entry name, e.g. TextMapRU.json
     :param fileList: Split files for that base map, e.g. [TextMapRU_0.json, TextMapRU_1.json]
@@ -146,7 +146,7 @@ def _import_textmap(
     if len(ans2) == 0:
         print(f"{baseMapName} (Base for {fileList}) not found in langCode table")
         cursor.close()
-        return
+        return set()
 
     langId = ans2[0][0]
     imported = ans2[0][1]
@@ -157,7 +157,7 @@ def _import_textmap(
         )
         if ans != "y":
             cursor.close()
-            return
+            return set()
 
     print(f"Reimporting {baseMapName} (ID: {langId})...")
     reset_temp_table(
@@ -171,6 +171,7 @@ def _import_textmap(
     import_errors: list[str] = []
     compared_hash_count = 0
     changed_hash_count = 0
+    changed_hashes: set[int] = set()
     merged_textmap: dict[object, object] = {}
 
     with LightweightProgress(len(fileList), desc=f"{baseMapName} files", unit="files") as pbar:
@@ -213,6 +214,7 @@ def _import_textmap(
             old_content = existing_map.get(row_hash)
             if not textmap_values_match(old_content, content):
                 changed_rows.append((row_hash, content, langId))
+                changed_hashes.add(int(row_hash))
         changed_hash_count += executemany_batched(
             cursor,
             sql_upsert,
@@ -243,6 +245,7 @@ def _import_textmap(
             changed_rows.append(
                 (row_hash, content, langId, created_version_id, updated_version_id)
             )
+            changed_hashes.add(int(row_hash))
         changed_hash_count += executemany_batched(
             cursor,
             sql_upsert,
@@ -271,6 +274,7 @@ def _import_textmap(
         f"checked={compared_hash_count}, changed={changed_hash_count}"
     )
     print(f"Done importing {baseMapName}.")
+    return changed_hashes
 
 
 def importTextMap(
@@ -282,7 +286,7 @@ def importTextMap(
     force_reimport: bool = False,
     prune_missing: bool = True,
 ):
-    _import_textmap(
+    return _import_textmap(
         baseMapName,
         fileList,
         commit=commit,
@@ -304,7 +308,7 @@ def importTextMapForDiff(
 ):
     version = current_version or get_current_version()
     version_id = get_or_create_version_id(version)
-    _import_textmap(
+    return _import_textmap(
         baseMapName,
         fileList,
         commit=commit,

@@ -1,4 +1,6 @@
+import json
 import os
+import sqlite3
 import sys
 
 
@@ -138,3 +140,71 @@ def test_build_versioned_textmap_row_plan_inherits_created_from_similar_cross_ha
     assert row_plan == {
         200: ("I wanted to test it out, so I took a related order.", 10, 30),
     }
+
+
+def test_import_textmap_for_diff_returns_actual_changed_hashes(monkeypatch, tmp_path):
+    conn = sqlite3.connect(":memory:")
+    try:
+        conn.execute(
+            "CREATE TABLE langCode(id INTEGER PRIMARY KEY, codeName TEXT, imported INTEGER)"
+        )
+        conn.execute(
+            """
+            CREATE TABLE textMap(
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                hash INTEGER,
+                content TEXT,
+                lang INTEGER,
+                created_version_id INTEGER,
+                updated_version_id INTEGER,
+                UNIQUE(lang, hash)
+            )
+            """
+        )
+        conn.execute(
+            "INSERT INTO langCode(id, codeName, imported) VALUES (1, 'TextMapCHS.json', 1)"
+        )
+        conn.executemany(
+            "INSERT INTO textMap(hash, content, lang, created_version_id, updated_version_id) VALUES (?, ?, ?, ?, ?)",
+            [
+                (100, "old text", 1, 50, 50),
+                (200, "same text", 1, 50, 50),
+            ],
+        )
+        conn.commit()
+
+        lang_dir = tmp_path / "TextMap"
+        lang_dir.mkdir()
+        (lang_dir / "TextMapCHS.json").write_text(
+            json.dumps(
+                {
+                    "100": "new text",
+                    "200": "same text",
+                    "300": "added text",
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        monkeypatch.setattr(textMapImport, "conn", conn)
+        monkeypatch.setattr(textMapImport, "LANG_PATH", str(lang_dir))
+        monkeypatch.setattr(textMapImport, "ensure_version_schema", lambda: None)
+        monkeypatch.setattr(textMapImport, "get_or_create_version_id", lambda _version: 65)
+
+        changed_hashes = textMapImport.importTextMapForDiff(
+            "TextMapCHS.json",
+            ["TextMapCHS.json"],
+            current_version="6.5",
+            force_reimport=True,
+        )
+
+        assert changed_hashes == {100, 300}
+        assert conn.execute(
+            "SELECT hash, content, created_version_id, updated_version_id FROM textMap ORDER BY hash"
+        ).fetchall() == [
+            (100, "new text", 50, 65),
+            (200, "same text", 50, 50),
+            (300, "added text", 65, 65),
+        ]
+    finally:
+        conn.close()

@@ -1568,18 +1568,36 @@ def _load_textmap_version_cache_for_current_group(
     lang_id: int,
     current_obj: Mapping[str, object],
     batch_size: int,
+    target_hashes: Collection[int] | None = None,
 ) -> dict[int, tuple[int, int | None, int | None]]:
-    hash_values: list[int] = []
-    seen_hashes: set[int] = set()
-    for raw_hash in current_obj.keys():
-        try:
-            hash_value = int(_to_hash_value(raw_hash))
-        except Exception:
-            continue
-        if hash_value in seen_hashes:
-            continue
-        seen_hashes.add(hash_value)
-        hash_values.append(hash_value)
+    if target_hashes is None:
+        hash_values: list[int] = []
+        seen_hashes: set[int] = set()
+        for raw_hash in current_obj.keys():
+            try:
+                hash_value = int(_to_hash_value(raw_hash))
+            except Exception:
+                continue
+            if hash_value in seen_hashes:
+                continue
+            seen_hashes.add(hash_value)
+            hash_values.append(hash_value)
+    else:
+        current_hashes: set[int] = set()
+        for raw_hash in current_obj.keys():
+            try:
+                current_hashes.add(int(_to_hash_value(raw_hash)))
+            except Exception:
+                continue
+        target_hash_values: set[int] = set()
+        for raw_hash in target_hashes:
+            try:
+                hash_value = int(raw_hash)
+            except Exception:
+                continue
+            if hash_value in current_hashes:
+                target_hash_values.add(hash_value)
+        hash_values = sorted(target_hash_values)
 
     if not hash_values:
         return {}
@@ -3025,6 +3043,7 @@ def backfill_textmap_versions_from_history(
     fast_db_write: bool = False,
     verbose: bool = False,
     refresh_version_catalog: bool = True,
+    target_hashes_by_base: Mapping[str, Collection[int]] | None = None,
 ):
     """回填 TextMap 历史版本。"""
     repo_path = DATA_PATH
@@ -3065,6 +3084,29 @@ def backfill_textmap_versions_from_history(
         logger.info("TextMap 版本快照回放：为保证 lineage 准确性，将忽略 from_commit 并重算到目标版本。")
 
     textmap_lang_map = _get_textmap_lang_id_map()
+    scoped_hashes_by_base: dict[str, set[int]] | None = None
+    if target_hashes_by_base is not None:
+        scoped_hashes_by_base = {}
+        for base_name, raw_hashes in target_hashes_by_base.items():
+            normalized_hashes: set[int] = set()
+            for raw_hash in raw_hashes or ():
+                try:
+                    normalized_hashes.add(int(raw_hash))
+                except Exception:
+                    continue
+            if normalized_hashes:
+                scoped_hashes_by_base[str(base_name)] = normalized_hashes
+        if not scoped_hashes_by_base:
+            print("TextMap history authoritative replay skipped: empty target hash scope.")
+            return
+        textmap_lang_map = {
+            base_name: lang_id
+            for base_name, lang_id in textmap_lang_map.items()
+            if base_name in scoped_hashes_by_base
+        }
+        if not textmap_lang_map:
+            print("TextMap history authoritative replay skipped: no scoped TextMap language groups found.")
+            return
     changed_total = 0
 
     with fast_import_pragmas(conn, enabled=fast_db_write):
@@ -3074,6 +3116,11 @@ def backfill_textmap_versions_from_history(
                 for group_idx, base_name in enumerate(sorted(textmap_lang_map.keys()), start=1):
                     group_started_at = time.time()
                     lang_id = textmap_lang_map[base_name]
+                    target_hashes = (
+                        scoped_hashes_by_base.get(base_name)
+                        if scoped_hashes_by_base is not None
+                        else None
+                    )
                     current_obj = _load_worktree_textmap_group(repo_path, base_name)
                     if not isinstance(current_obj, dict):
                         pbar.update(postfix=f"{base_name} (missing)")
@@ -3084,9 +3131,10 @@ def backfill_textmap_versions_from_history(
                         lang_id=lang_id,
                         current_obj=current_obj,
                         batch_size=batch_size,
+                        target_hashes=target_hashes,
                     )
                     if not existing_map:
-                        pbar.update(postfix=f"{base_name} (no rows)")
+                        pbar.update(postfix=f"{base_name} (no scoped rows)")
                         continue
 
                     total_group_rows = len(existing_map)

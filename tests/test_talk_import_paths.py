@@ -12,6 +12,7 @@ if DBBUILD_DIR not in sys.path:
 
 import diffUpdate
 import databaseHelper
+import history_backfill
 import questImport
 import quest_source_utils
 
@@ -182,6 +183,80 @@ def test_diff_update_analyze_diff_marks_readable_meta_refresh_triggers():
     )
 
     assert plan["readable_meta"] is True
+
+
+def test_process_textmap_stage_collects_actual_changed_hash_scope(monkeypatch):
+    plan = {
+        "textmap_bases": {"TextMapCHS.json"},
+        "changed_textmap_hashes_by_base": {},
+        "textmap_scope_failed": False,
+    }
+
+    monkeypatch.setattr(
+        diffUpdate,
+        "_collect_textmap_groups",
+        lambda: {"TextMapCHS.json": ["TextMapCHS.json"]},
+    )
+    monkeypatch.setattr(
+        diffUpdate.textMapImport,
+        "importTextMapForDiff",
+        lambda *_args, **_kwargs: {100, "200"},
+    )
+
+    diffUpdate._process_textmap_stage(plan, prune_missing=True, target_version="6.5")
+
+    assert plan["changed_textmap_hashes_by_base"] == {"TextMapCHS.json": {100, 200}}
+    assert plan["textmap_scope_failed"] is False
+
+
+def test_process_quest_by_textmap_stage_uses_changed_textmap_hash_scope(monkeypatch):
+    seen = {}
+
+    class Cursor:
+        rowcount = 0
+
+        def execute(self, *_args, **_kwargs):
+            return self
+
+        def fetchone(self):
+            return (0,)
+
+        def close(self):
+            return None
+
+    class Conn:
+        def cursor(self):
+            return Cursor()
+
+        def commit(self):
+            return None
+
+    def fake_apply(_cursor, **kwargs):
+        seen["changed_hashes"] = kwargs.get("changed_hashes")
+        return {
+            "quest_updated_by_textmap": 0,
+            "quest_created_backfilled": 0,
+            "quest_updated_backfilled": 0,
+        }
+
+    monkeypatch.setattr(diffUpdate, "conn", Conn())
+    monkeypatch.setattr(diffUpdate, "get_or_create_version_id", lambda _version: 65)
+    monkeypatch.setattr(diffUpdate, "_meta_set_many", lambda _payload: None)
+    monkeypatch.setattr(history_backfill, "apply_quest_version_delta_from_textmap", fake_apply)
+
+    diffUpdate._process_quest_by_textmap_stage(
+        {
+            "textmap_bases": {"TextMapCHS.json"},
+            "quest_related": False,
+            "talk_changed": set(),
+            "talk_deleted": set(),
+            "changed_textmap_hashes_by_base": {"TextMapCHS.json": {100, 200}},
+            "textmap_scope_failed": False,
+        },
+        target_version="6.5",
+    )
+
+    assert seen["changed_hashes"] == {100, 200}
 
 
 def test_diff_update_resolve_talk_keys_supports_aadkdkpmgno_schema():

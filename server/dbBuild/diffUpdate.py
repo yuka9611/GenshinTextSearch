@@ -472,6 +472,8 @@ def _analyze_diff(diff_entries: list[dict]) -> dict:
         "subtitle_deleted": set(),  # 删除的subtitle文件
         "subtitle_mapping_changed": False,  # 是否有subtitle映射变更
         "textmap_bases": set(),     # 变更的textmap基础名称
+        "changed_textmap_hashes_by_base": {},  # 实际导入发生变化的 TextMap hash
+        "textmap_scope_failed": False,  # changed hash scope 是否收集失败
         "entity_sources": False,    # 是否有entity_source相关Excel变更
     }
 
@@ -716,13 +718,50 @@ def _process_textmap_stage(plan, prune_missing, target_version):
         for base_name in sorted(plan["textmap_bases"]):
             files = groups.get(base_name, [])
             if files:
-                textMapImport.importTextMapForDiff(
+                changed_hashes = textMapImport.importTextMapForDiff(
                     base_name,
                     files,
                     force_reimport=True,
                     prune_missing=prune_missing,
                     current_version=target_version,
                 )
+                if changed_hashes is None:
+                    plan["textmap_scope_failed"] = True
+                    continue
+                try:
+                    normalized_hashes = {
+                        int(raw_hash)
+                        for raw_hash in changed_hashes
+                    }
+                except Exception:
+                    plan["textmap_scope_failed"] = True
+                    continue
+                if normalized_hashes:
+                    plan["changed_textmap_hashes_by_base"].setdefault(base_name, set()).update(
+                        normalized_hashes
+                    )
+
+
+def _changed_textmap_hashes_by_base(plan) -> dict[str, set[int]]:
+    raw_scope = plan.get("changed_textmap_hashes_by_base") or {}
+    scoped_hashes: dict[str, set[int]] = {}
+    for base_name, raw_hashes in raw_scope.items():
+        normalized_hashes: set[int] = set()
+        for raw_hash in raw_hashes or ():
+            try:
+                normalized_hashes.add(int(raw_hash))
+            except Exception:
+                continue
+        if normalized_hashes:
+            scoped_hashes[str(base_name)] = normalized_hashes
+    return scoped_hashes
+
+
+def _changed_textmap_hashes(plan) -> set[int]:
+    hashes: set[int] = set()
+    for scoped_hashes in _changed_textmap_hashes_by_base(plan).values():
+        hashes.update(scoped_hashes)
+    return hashes
 
 
 def _process_talk_stage(plan, repo_path, base_commit):
@@ -893,11 +932,14 @@ def _process_quest_by_textmap_stage(plan, target_version):
 
         version_id = get_or_create_version_id(target_version)
         if version_id is not None:
+            changed_hashes = None
+            if plan["textmap_bases"] and not plan.get("textmap_scope_failed"):
+                changed_hashes = _changed_textmap_hashes(plan)
             q_cursor = conn.cursor()
             quest_delta_stats = history_backfill.apply_quest_version_delta_from_textmap(
                 q_cursor,
                 version_id=version_id,
-                changed_hashes=None,
+                changed_hashes=changed_hashes,
                 version_label=target_version,
                 show_progress=False,
             )
@@ -1025,12 +1067,28 @@ def _process_version_catalog_stage(plan, target_commit, base_commit):
             import history_backfill as history_backfill_module
 
             history_backfill = history_backfill_module
-        history_backfill.backfill_textmap_versions_from_history(
-            target_commit=target_commit,
-            from_commit=base_commit,
-            force=False,
-            refresh_version_catalog=False,
-        )
+        changed_hashes_by_base = _changed_textmap_hashes_by_base(plan)
+        if plan.get("textmap_scope_failed"):
+            print(
+                "[WARN] TextMap changed-hash scope collection failed; "
+                "falling back to full TextMap lineage replay."
+            )
+            history_backfill.backfill_textmap_versions_from_history(
+                target_commit=target_commit,
+                from_commit=base_commit,
+                force=False,
+                refresh_version_catalog=False,
+            )
+        elif changed_hashes_by_base:
+            history_backfill.backfill_textmap_versions_from_history(
+                target_commit=target_commit,
+                from_commit=base_commit,
+                force=False,
+                refresh_version_catalog=False,
+                target_hashes_by_base=changed_hashes_by_base,
+            )
+        else:
+            print("TextMap history authoritative replay skipped: no changed hashes after diff import.")
     unresolved_count = int(_meta_get("quest_version_unresolved_last_count", "0") or 0)
     unresolved_created_raw = _meta_get("quest_version_unresolved_created_last_count", "")
     if unresolved_created_raw and unresolved_created_raw.strip():
@@ -1333,6 +1391,9 @@ def run_diff_update(
         }
         _meta_set_many(payload)
         state["stage"] = stage_name
+
+    if plan["textmap_bases"] and stage_done("textmap"):
+        plan["textmap_scope_failed"] = True
 
     # Apply textMap changes first so downstream quest version checks can
     # use the latest textMap.updated_version marks for this target version.
