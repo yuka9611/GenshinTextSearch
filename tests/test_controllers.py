@@ -1362,6 +1362,85 @@ class TestReadableCategoryLabels:
         }
 
 
+class TestReadableSourceTitles:
+    def _patch_readable_obj_dependencies(self, monkeypatch, *, title_by_lang=None, fallback_titles=None):
+        title_by_lang = dict(title_by_lang or {})
+        fallback_titles = list(fallback_titles or [])
+        monkeypatch.setattr(controllers.databaseHelper, "getReadableCategoryCode", lambda file_name: "READABLE")
+        monkeypatch.setattr(
+            controllers.databaseHelper,
+            "selectReadableFromFileName",
+            lambda file_name, target_lang_strs: [("正文内容", "CHS")],
+        )
+        monkeypatch.setattr(
+            controllers.databaseHelper,
+            "getTextMapContent",
+            lambda text_hash, lang_code: title_by_lang.get((int(text_hash), int(lang_code))),
+        )
+        monkeypatch.setattr(
+            controllers.databaseHelper,
+            "selectTextMapFromTextHash",
+            lambda text_hash, langs=None: fallback_titles,
+        )
+
+    def test_build_readable_search_obj_uses_resolved_title_for_source_display(self, monkeypatch):
+        self._patch_readable_obj_dependencies(
+            monkeypatch,
+            title_by_lang={(123456, 1): "阅读物标题"},
+        )
+
+        result = controllers._build_readable_obj(
+            "Book999.txt",
+            "命中的正文",
+            123456,
+            20999,
+            None,
+            None,
+            2,
+            1,
+            ["CHS"],
+            {"CHS": 1},
+            {},
+            isSearchPhase=True,
+        )
+
+        assert result["origin"] == "阅读物: 阅读物标题"
+        assert result["primarySource"] == {
+            "sourceType": "readable",
+            "title": "阅读物标题",
+            "subtitle": "阅读物",
+            "detailQuery": {
+                "kind": "readable",
+                "readableId": 20999,
+                "fileName": "Book999.txt",
+            },
+        }
+        assert result["fileName"] == "Book999.txt"
+        assert result["translates"] == {"1": "正文内容"}
+
+    def test_build_readable_search_obj_falls_back_to_file_name_without_title(self, monkeypatch):
+        self._patch_readable_obj_dependencies(monkeypatch)
+
+        result = controllers._build_readable_obj(
+            "BookNoTitle.txt",
+            "命中的正文",
+            None,
+            None,
+            None,
+            None,
+            2,
+            1,
+            ["CHS"],
+            {"CHS": 1},
+            {},
+            isSearchPhase=True,
+        )
+
+        assert result["origin"] == "阅读物: BookNoTitle.txt"
+        assert result["primarySource"]["title"] == "BookNoTitle.txt"
+        assert result["primarySource"]["detailQuery"]["fileName"] == "BookNoTitle.txt"
+
+
 def _patch_search_name_empty_quest_dependencies(monkeypatch):
     monkeypatch.setattr(controllers.config, "getSourceLanguage", lambda: 1)
     monkeypatch.setattr(controllers.databaseHelper, "selectQuestByTitleKeyword", lambda *args, **kwargs: [])

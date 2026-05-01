@@ -1564,6 +1564,18 @@ def _get_text_map_content_with_fallback(
     return None
 
 
+def _resolve_readable_display_title(
+    file_name: str | None,
+    title_text_hash: int | None,
+    preferred_lang: int | None = None,
+    fallback_langs: list[int] | None = None,
+) -> str:
+    title = _get_text_map_content_with_fallback(title_text_hash, preferred_lang, fallback_langs)
+    if title:
+        return title
+    return str(file_name or "")
+
+
 def _get_entity_title_with_fallback(
     source_type: str,
     title_hash: int | None,
@@ -2907,6 +2919,12 @@ def _build_readable_obj(fileName, content, titleTextMapHash, readableId, created
     fileHash = zlib.crc32(fileName.encode('utf-8'))
     readable_category_fields = _build_readable_category_fields(fileName, titleTextMapHash, readableId)
     origin_label = _get_readable_category_label(readable_category_fields["readableCategory"])
+    readable_title = _resolve_readable_display_title(
+        fileName,
+        titleTextMapHash,
+        langCode,
+        [sourceLangCode],
+    )
 
     # 搜索阶段：返回最小化信息
     if isSearchPhase:
@@ -2918,10 +2936,10 @@ def _build_readable_obj(fileName, content, titleTextMapHash, readableId, created
             'isReadable': True,
             'readableId': readableId,
             'fileName': fileName,
-            'origin': f"{origin_label}: {fileName}",
+            'origin': f"{origin_label}: {readable_title}",
             'primarySource': _build_primary_source(
                 "readable",
-                fileName,
+                readable_title,
                 origin_label,
                 {"kind": "readable", "readableId": readableId, "fileName": fileName},
             ),
@@ -2939,15 +2957,10 @@ def _build_readable_obj(fileName, content, titleTextMapHash, readableId, created
         return obj
 
     # 详情页面：获取完整源信息
-    title = _get_text_map_content_with_fallback(
-        titleTextMapHash,
-        sourceLangCode,
-        [langCode],
-    )
-    fallback_origin = f"{origin_label}: {title}" if title else f"{origin_label}: {fileName}"
+    fallback_origin = f"{origin_label}: {readable_title}"
     primary_source = _build_primary_source(
         "readable",
-        title or fileName,
+        readable_title,
         origin_label,
         {"kind": "readable", "readableId": readableId, "fileName": fileName},
     )
@@ -4125,7 +4138,12 @@ def getReadableContent(readableId: int | None, fileName: str | None, searchLang:
     updated_raw = None
     if readableInfo:
         fileName, titleTextMapHash, readableId = readableInfo
-        readableTitle = _get_text_map_content_with_fallback(titleTextMapHash, sourceLangCode, langs)
+        readableTitle = _resolve_readable_display_title(
+            fileName,
+            titleTextMapHash,
+            searchLang,
+            [sourceLangCode, *langs],
+        )
         created_raw, updated_raw = databaseHelper.getReadableVersionInfo(readableId, fileName)
 
     translations = []
