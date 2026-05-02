@@ -63,7 +63,10 @@ const shouldShowVoiceButton = (langCode) => {
 const normalizeCopyText = (text) => {
     if (!text) return "";
     const normalized = text.replace(/\\n/g, "\n");
-    return normalized.replace(/\r\n/g, "\n").replace(/\r/g, "\n");
+    return normalized
+        .replace(/\r\n/g, "\n")
+        .replace(/\r/g, "\n")
+        .replace(/[^\S\n]+(?=\n[^\S\n]*\n)/g, "");
 };
 
 const copyToClipboard = async (text) => {

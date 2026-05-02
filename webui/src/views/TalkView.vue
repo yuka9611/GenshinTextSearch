@@ -367,9 +367,13 @@ const normalizeCopyText = (text) => {
     return normalized.replace(/\r\n/g, "\n").replace(/\r/g, "\n")
 }
 
+const normalizeReadableCopyText = (text) => {
+    return normalizeCopyText(text).replace(/[^\S\n]+(?=\n[^\S\n]*\n)/g, "")
+}
+
 const copyReadableContent = async (langCode) => {
     const rawText = readableTranslates.value?.[langCode] || ""
-    const text = normalizeCopyText(rawText)
+    const text = normalizeReadableCopyText(rawText)
     if (!text) {
         ElMessage.warning(UI_TEXT.noTextToCopy)
         return

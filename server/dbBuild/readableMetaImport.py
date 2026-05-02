@@ -247,13 +247,24 @@ def resolve_readable_category(
     item_desc_hash = lookup["item_desc_hash_by_item_id"].get(item_id)
     item_name = preferred_text_by_hash.get(int(item_name_hash)) if item_name_hash else None
     readable_title = preferred_text_by_hash.get(int(title_text_map_hash)) if title_text_map_hash else None
+    normalized_item_name = _normalize_item_match_text(item_name)
+    normalized_readable_title = _normalize_item_match_text(readable_title)
     if (
-        _normalize_item_match_text(item_name)
-        and _normalize_item_match_text(readable_title)
-        and _normalize_item_match_text(item_name) != _normalize_item_match_text(readable_title)
+        normalized_item_name
+        and normalized_readable_title
+        and normalized_item_name != normalized_readable_title
     ):
         return "ITEM"
-    if item_desc_hash is not None and int(item_desc_hash) in visible_hashes:
+
+    if item_desc_hash is None or int(item_desc_hash) not in visible_hashes:
+        return "READABLE"
+    item_desc = preferred_text_by_hash.get(int(item_desc_hash))
+    normalized_item_desc = _normalize_item_match_text(item_desc)
+    if (
+        normalized_item_desc
+        and (not normalized_readable_title or normalized_item_desc != normalized_readable_title)
+        and (not normalized_item_name or normalized_item_desc != normalized_item_name)
+    ):
         return "ITEM"
     return "READABLE"
 

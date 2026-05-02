@@ -53,6 +53,7 @@ def _seed_readable_meta_fixture(connection: sqlite3.Connection, tmp_path) -> Non
         [
             ("Book2000.txt", "CHS", "书籍正文", 99887766, 200001),
             ("Book1140.txt", "CHS", "道具正文", 3377011063, 201140),
+            ("Book1213.txt", "CHS", "便签正文", 1901419711, 201213),
             ("Book1039.txt", "CHS", "阅读物正文", 297568295, 201039),
             ("Book1039_EN.txt", "EN", "Readable body", 297568295, 201039),
             ("Weapon11431_2.txt", "CHS", "武器故事", None, None),
@@ -66,6 +67,7 @@ def _seed_readable_meta_fixture(connection: sqlite3.Connection, tmp_path) -> Non
             (297568295, "审议之庭-至高领主共识评议会记录", 1),
             (359516492, "审议之庭-至高领主共识评议会记录", 1),
             (2842036365, "Gift description", 4),
+            (1901419711, "便签", 1),
         ],
     )
     readableMetaImport.ensure_readable_meta_schema(connection)
@@ -81,6 +83,7 @@ def _seed_readable_meta_fixture(connection: sqlite3.Connection, tmp_path) -> Non
         [
             {"id": 121001, "nameTextMapHash": 10001, "descTextMapHash": 10002},
             {"id": 121414, "nameTextMapHash": 3377011063, "descTextMapHash": 2842036365},
+            {"id": 121564, "nameTextMapHash": 1901419711, "descTextMapHash": 1901419711},
             {"id": 121221, "nameTextMapHash": 359516492},
         ],
     )
@@ -95,6 +98,7 @@ def _seed_readable_meta_fixture(connection: sqlite3.Connection, tmp_path) -> Non
         [
             {"id": 200001, "enPath": "Readable/EN/Book2000.txt"},
             {"id": 201140, "enPath": "Readable/EN/Book1140.txt"},
+            {"id": 201213, "enPath": "Readable/EN/Book1213_EN.txt"},
             {"id": 201039, "enPath": "Readable/EN/Book1039_EN.txt"},
         ],
     )
@@ -104,6 +108,7 @@ def _seed_readable_meta_fixture(connection: sqlite3.Connection, tmp_path) -> Non
         [
             {"id": 121001, "titleTextMapHash": 99887766, "questIDList": [200001]},
             {"id": 121414, "titleTextMapHash": 3377011063, "questIDList": [201140]},
+            {"id": 121564, "titleTextMapHash": 1901419711, "questIDList": [201213]},
             {"id": 121221, "titleTextMapHash": 297568295, "questIDList": [201039]},
         ],
     )
@@ -142,6 +147,7 @@ def test_refresh_readable_meta_rebuilds_categories_and_cleans_stale_rows(tmp_pat
     assert rows == [
         ("Book1039.txt", 201039, 297568295, "READABLE"),
         ("Book1140.txt", 201140, 3377011063, "ITEM"),
+        ("Book1213.txt", 201213, 1901419711, "READABLE"),
         ("Book2000.txt", 200001, 99887766, "BOOK"),
         ("Weapon11431_2.txt", None, None, "WEAPON"),
     ]
