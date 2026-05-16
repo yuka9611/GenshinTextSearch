@@ -598,6 +598,81 @@ def test_authoritative_quest_backfill_ignores_broad_short_response_dialogues(mon
         connection.close()
 
 
+def test_authoritative_quest_backfill_uses_created_version_with_most_texts(monkeypatch):
+    connection = sqlite3.connect(":memory:")
+    try:
+        _bootstrap_quest_db(connection)
+        _patch_modules(monkeypatch, connection)
+        connection.executemany(
+            """
+            INSERT INTO textMap(lang, hash, content, created_version_id, updated_version_id)
+            VALUES (?,?,?,?,?)
+            """,
+            [
+                (1, 701, "嗯？", 1, 1),
+                (1, 702, "The first substantial quest line.", 3, 4),
+                (1, 703, "The second substantial quest line.", 3, 4),
+                (1, 704, "The third substantial quest line.", 3, 4),
+            ],
+        )
+        connection.execute(
+            """
+            INSERT INTO quest(
+                questId, titleTextMapHash, descTextMapHash, longDescTextMapHash, chapterId,
+                source_type, source_code_raw, created_version_id, git_created_version_id
+            ) VALUES (?,?,?,?,?,?,?,?,?)
+            """,
+            (7, 701, None, None, 10, None, None, 1, 3),
+        )
+        connection.execute(
+            "INSERT INTO questTalk(questId, talkId, stepTitleTextMapHash, coopQuestId) VALUES (?,?,?,?)",
+            (7, 7001, None, 0),
+        )
+        connection.executemany(
+            """
+            INSERT INTO dialogue(dialogueId, talkerType, talkerId, talkId, textHash, coopQuestId)
+            VALUES (?,?,?,?,?,?)
+            """,
+            [
+                (9701, "TALK_ROLE_NPC", 1, 7001, 702, None),
+                (9702, "TALK_ROLE_NPC", 1, 7001, 703, None),
+                (9703, "TALK_ROLE_NPC", 1, 7001, 704, None),
+            ],
+        )
+        connection.executemany(
+            "INSERT INTO talk_dialogue_link(talkId, coopQuestId, dialogueId) VALUES (?,?,?)",
+            [
+                (7001, 0, 9701),
+                (7001, 0, 9702),
+                (7001, 0, 9703),
+            ],
+        )
+        connection.commit()
+
+        quest_hash_map_utils.refresh_quest_hash_map_for_quest_ids(connection.cursor(), [7])
+        created_rows, updated_rows = version_control.backfill_quest_created_version_from_textmap(
+            connection.cursor(),
+            quest_ids=[7],
+            authoritative=True,
+            with_stats=True,
+        )
+        connection.commit()
+
+        created_version = connection.execute(
+            "SELECT created_version_id FROM quest WHERE questId=7"
+        ).fetchone()[0]
+        quest_versions = connection.execute(
+            "SELECT lang, updated_version_id FROM quest_version WHERE questId=7 ORDER BY lang"
+        ).fetchall()
+
+        assert created_rows == 1
+        assert updated_rows == 1
+        assert created_version == 3
+        assert quest_versions == [(1, 4)]
+    finally:
+        connection.close()
+
+
 def test_database_helper_keeps_test_titles_visible_but_filters_non_title_texts(monkeypatch):
     connection = sqlite3.connect(":memory:")
     try:

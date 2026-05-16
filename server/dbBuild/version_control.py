@@ -17,6 +17,7 @@ from versioning import (
 )
 
 quest_text_filters = import_server_module("quest_text_filters")
+build_quest_text_not_excluded_sql = quest_text_filters.build_quest_text_not_excluded_sql
 build_quest_version_dialogue_not_excluded_sql = quest_text_filters.build_quest_version_dialogue_not_excluded_sql
 get_quest_text_filter_lang_id = quest_text_filters.get_quest_text_filter_lang_id
 
@@ -725,29 +726,45 @@ def backfill_quest_created_version_from_textmap(
         created_lang_sql = "tm.lang = (SELECT id FROM langCode WHERE codeName = 'TextMapCHS.json' LIMIT 1)"
         if chs_lang_id is not None:
             created_lang_sql = "tm.lang = ?"
+            created_text_not_excluded_sql, created_text_not_excluded_params = (
+                build_quest_text_not_excluded_sql("tm.content")
+            )
             created_dialogue_filter_sql, created_not_excluded_params = (
                 build_quest_version_dialogue_not_excluded_sql("tm.content")
             )
             created_dialogue_filter_sql = (
-                " AND (qh.source_type <> 'dialogue' OR "
+                " AND "
+                + created_text_not_excluded_sql
+                + " AND (qh.source_type <> 'dialogue' OR "
                 + created_dialogue_filter_sql
                 + ")"
             )
-            created_filter_params = (chs_lang_id, *created_not_excluded_params)
+            created_filter_params = (
+                chs_lang_id,
+                *created_text_not_excluded_params,
+                *created_not_excluded_params,
+            )
 
         created_sql = f"""
         WITH candidates AS (
             SELECT
                 qh.questId AS questId,
-                tm.created_version_id AS created_version_id,
-                vd.version_sort_key AS version_sort_key
+                qh.hash AS hash,
+                tm.created_version_id AS created_version_id
             FROM _quest_hash_source qh
             JOIN textMap tm ON tm.hash = qh.hash
-            LEFT JOIN version_dim vd ON vd.id = tm.created_version_id
             WHERE tm.created_version_id IS NOT NULL
               AND qh.hash <> 0
               AND {created_lang_sql}
               {created_dialogue_filter_sql}
+        ),
+        version_counts AS (
+            SELECT
+                questId,
+                created_version_id,
+                COUNT(DISTINCT hash) AS text_count
+            FROM candidates
+            GROUP BY questId, created_version_id
         ),
         ranked AS (
             SELECT
@@ -756,9 +773,10 @@ def backfill_quest_created_version_from_textmap(
                 ROW_NUMBER() OVER (
                     PARTITION BY questId
                     ORDER BY
+                        text_count DESC,
                         {_build_version_order_by_sql("created_version_id", True)}
                 ) AS rn
-            FROM candidates
+            FROM version_counts
         )
         """
 
@@ -781,10 +799,7 @@ def backfill_quest_created_version_from_textmap(
                     target.questId,
                     CASE
                         WHEN inferred.inferred_created_version_id IS NULL THEN quest.git_created_version_id
-                        WHEN quest.git_created_version_id IS NULL THEN inferred.inferred_created_version_id
-                        WHEN {_version_precedes_sql('inferred.inferred_created_version_id', 'quest.git_created_version_id')}
-                        THEN inferred.inferred_created_version_id
-                        ELSE quest.git_created_version_id
+                        ELSE inferred.inferred_created_version_id
                     END AS final_created_version_id
                 FROM _target_quest_id target
                 JOIN quest ON quest.questId = target.questId
