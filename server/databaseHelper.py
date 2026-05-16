@@ -2723,6 +2723,69 @@ def getAllVersionValues() -> list[str]:
     return list(values)
 
 
+def getVersionFilterValues() -> dict[str, list[str]]:
+    values: dict[str, set[str]] = {
+        "created": set(),
+        "updated": set(),
+    }
+
+    def add_rows(target: str, rows):
+        for (raw_value,) in rows:
+            if raw_value is None:
+                continue
+            text = str(raw_value).strip()
+            if text:
+                values[target].add(text)
+
+    with closing(conn.cursor()) as cursor:
+        if not _has_version_dim():
+            return {"created": [], "updated": []}
+
+        for table_name in _VERSION_SOURCE_TABLES:
+            if not _table_exists(table_name) or not _table_has_column(table_name, "created_version_id"):
+                continue
+
+            rows = cursor.execute(
+                f"""
+                SELECT DISTINCT vd.raw_version
+                FROM {table_name} t
+                JOIN {_VERSION_DIM_TABLE} vd ON vd.id = t.created_version_id
+                WHERE t.created_version_id IS NOT NULL
+                  AND COALESCE(vd.raw_version, '') <> ''
+                """
+            ).fetchall()
+            add_rows("created", rows)
+
+            if table_name == "quest":
+                if _table_exists("quest_version") and _table_has_column("quest_version", "updated_version_id"):
+                    rows = cursor.execute(
+                        f"""
+                        SELECT DISTINCT vd.raw_version
+                        FROM quest_version qv
+                        JOIN {_VERSION_DIM_TABLE} vd ON vd.id = qv.updated_version_id
+                        WHERE qv.updated_version_id IS NOT NULL
+                          AND COALESCE(vd.raw_version, '') <> ''
+                        """
+                    ).fetchall()
+                    add_rows("updated", rows)
+            elif table_name != "npc" and _table_has_column(table_name, "updated_version_id"):
+                rows = cursor.execute(
+                    f"""
+                    SELECT DISTINCT vd.raw_version
+                    FROM {table_name} t
+                    JOIN {_VERSION_DIM_TABLE} vd ON vd.id = t.updated_version_id
+                    WHERE t.updated_version_id IS NOT NULL
+                      AND COALESCE(vd.raw_version, '') <> ''
+                    """
+                ).fetchall()
+                add_rows("updated", rows)
+
+    return {
+        "created": list(values["created"]),
+        "updated": list(values["updated"]),
+    }
+
+
 def getSourceFromFetter(textHash: int, langCode: int = 1):
     with closing(conn.cursor()) as cursor:
         sql1 = ('select avatarId, content from fetters, textMap '

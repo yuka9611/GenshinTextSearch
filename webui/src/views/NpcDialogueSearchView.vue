@@ -45,7 +45,8 @@ const {
 } = useLanguage()
 
 const {
-  versionOptions,
+  createdVersionOptions,
+  updatedVersionOptions,
   loadVersionOptions
 } = useVersion()
 
@@ -281,13 +282,13 @@ const clearAllDialogueFilters = () => {
         <div class="filterItem">
           <span class="filterLabel">{{ uiText.npcCreatedVersion }}</span>
           <el-select v-model="npcCreatedVersionFilter" :placeholder="uiText.npcCreatedVersion" clearable filterable>
-            <el-option v-for="version in versionOptions" :key="`npc-created-${version}`" :label="version" :value="version" />
+            <el-option v-for="version in createdVersionOptions" :key="`npc-created-${version}`" :label="version" :value="version" />
           </el-select>
         </div>
         <div class="filterItem">
           <span class="filterLabel">{{ uiText.npcUpdatedVersion }}</span>
           <el-select v-model="npcUpdatedVersionFilter" :placeholder="uiText.npcUpdatedVersion" clearable filterable>
-            <el-option v-for="version in versionOptions" :key="`npc-updated-${version}`" :label="version" :value="version" />
+            <el-option v-for="version in updatedVersionOptions" :key="`npc-updated-${version}`" :label="version" :value="version" />
           </el-select>
         </div>
       </div>
@@ -329,13 +330,13 @@ const clearAllDialogueFilters = () => {
         <div class="filterItem">
           <span class="filterLabel">{{ uiText.dialogueCreatedVersion }}</span>
           <el-select v-model="dialogueCreatedVersionFilter" :placeholder="uiText.dialogueCreatedVersion" clearable filterable>
-            <el-option v-for="version in versionOptions" :key="`dialogue-created-${version}`" :label="version" :value="version" />
+            <el-option v-for="version in createdVersionOptions" :key="`dialogue-created-${version}`" :label="version" :value="version" />
           </el-select>
         </div>
         <div class="filterItem">
           <span class="filterLabel">{{ uiText.dialogueUpdatedVersion }}</span>
           <el-select v-model="dialogueUpdatedVersionFilter" :placeholder="uiText.dialogueUpdatedVersion" clearable filterable>
-            <el-option v-for="version in versionOptions" :key="`dialogue-updated-${version}`" :label="version" :value="version" />
+            <el-option v-for="version in updatedVersionOptions" :key="`dialogue-updated-${version}`" :label="version" :value="version" />
           </el-select>
         </div>
       </div>

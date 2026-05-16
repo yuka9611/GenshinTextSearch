@@ -60,7 +60,8 @@ const {
 } = useLanguage()
 
 const {
-  versionOptions,
+  createdVersionOptions,
+  updatedVersionOptions,
   loadVersionOptions
 } = useVersion()
 
@@ -467,13 +468,13 @@ const clearAllFilters = () => {
         <div class="filterItem">
           <span class="filterLabel">{{ uiText.createdVersion }}</span>
           <el-select v-model="createdVersionFilter" :placeholder="uiText.createdVersion" clearable filterable>
-            <el-option v-for="version in versionOptions" :key="`created-${version}`" :label="version" :value="version" />
+            <el-option v-for="version in createdVersionOptions" :key="`created-${version}`" :label="version" :value="version" />
           </el-select>
         </div>
         <div class="filterItem">
           <span class="filterLabel">{{ uiText.updatedVersion }}</span>
           <el-select v-model="updatedVersionFilter" :placeholder="uiText.updatedVersion" clearable filterable>
-            <el-option v-for="version in versionOptions" :key="`updated-${version}`" :label="version" :value="version" />
+            <el-option v-for="version in updatedVersionOptions" :key="`updated-${version}`" :label="version" :value="version" />
           </el-select>
         </div>
       </div>

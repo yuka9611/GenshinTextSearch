@@ -508,6 +508,21 @@ class TestImportedEndpoints:
         assert resp.status_code == 200
         assert data["data"] == ["4.0", "4.1", "4.2"]
 
+    def test_available_version_filters(self, monkeypatch):
+        monkeypatch.setattr(
+            api.controllers_module,
+            "getAvailableVersionFilters",
+            lambda: {"created": ["4.0", "4.2"], "updated": ["4.1", "4.2"]},
+        )
+
+        app = _app()
+        with _request_context(app, "/api/getAvailableVersionFilters"):
+            resp = api.getAvailableVersionFilters()
+
+        data = resp.get_json()
+        assert resp.status_code == 200
+        assert data["data"] == {"created": ["4.0", "4.2"], "updated": ["4.1", "4.2"]}
+
     def test_imported_text_languages(self, monkeypatch):
         monkeypatch.setattr(api.controllers_module, "getImportedTextMapLangs", lambda: [1, 4, 9])
 

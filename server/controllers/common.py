@@ -4394,7 +4394,36 @@ def getAvailableVersions():
     if cached_result:
         return cached_result
 
-    versions = databaseHelper.getAllVersionValues()
+    sorted_versions = _build_sorted_version_tags(databaseHelper.getAllVersionValues())
+
+    # 缓存结果
+    search_cache.set(cache_key, sorted_versions)
+
+    return sorted_versions
+
+
+def getAvailableVersionFilters():
+    """
+    获取按创建/更新用途拆分的可用版本列表
+    """
+    cache_key = "available_version_filters"
+
+    cached_result = search_cache.get(cache_key)
+    if cached_result:
+        return cached_result
+
+    raw_filters = databaseHelper.getVersionFilterValues()
+    result = {
+        "created": _build_sorted_version_tags(raw_filters.get("created", [])),
+        "updated": _build_sorted_version_tags(raw_filters.get("updated", [])),
+    }
+
+    search_cache.set(cache_key, result)
+
+    return result
+
+
+def _build_sorted_version_tags(versions):
     # 提取版本标签并去重
     version_tags = set()
     for version in versions:
@@ -4402,12 +4431,7 @@ def getAvailableVersions():
         if tag:
             version_tags.add(tag)
     # 按版本号排序
-    sorted_versions = sorted(version_tags, key=lambda x: [int(part) for part in x.split('.')], reverse=True)
-
-    # 缓存结果
-    search_cache.set(cache_key, sorted_versions)
-
-    return sorted_versions
+    return sorted(version_tags, key=lambda x: [int(part) for part in x.split('.')], reverse=True)
 
 
 def getConfig():

@@ -442,6 +442,14 @@ def getAvailableVersions():
         "msg": "ok"
     })
 
+@api_bp.route("/api/getAvailableVersionFilters")
+def getAvailableVersionFilters():
+    return jsonify({
+        "data": controllers_module.getAvailableVersionFilters(), # type: ignore
+        "code": 200,
+        "msg": "ok"
+    })
+
 @api_bp.route("/api/keywordQuery", methods=["POST"])
 def keywordQuery():
     import time

@@ -16,6 +16,10 @@ const getAvailableVersions = () => {
   return request.get('/api/getAvailableVersions', { timeout: 30000 })
 }
 
+const getAvailableVersionFilters = () => {
+  return request.get('/api/getAvailableVersionFilters', { timeout: 30000 })
+}
+
 const saveConfig = (resultLanguages, defaultSearchLanguage, sourceLanguage, isMale) => {
   const normalizedLanguages = []
   for (const code of resultLanguages) {
@@ -40,6 +44,7 @@ export default {
   getImportedTextLanguages,
   getImportedVoiceLanguages,
   getAvailableVersions,
+  getAvailableVersionFilters,
   getConfig,
   saveConfig,
 }

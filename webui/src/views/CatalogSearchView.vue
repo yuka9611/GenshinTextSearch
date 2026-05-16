@@ -11,7 +11,12 @@ import ActiveFilterTags from '@/components/ActiveFilterTags.vue'
 
 const router = useRouter()
 const { selectedInputLanguage, supportedInputLanguage, loadLanguages } = useLanguage()
-const { versionOptions, loadVersionOptions } = useVersion()
+const {
+  versionOptions,
+  createdVersionOptions,
+  updatedVersionOptions,
+  loadVersionOptions
+} = useVersion()
 
 const keyword = ref('')
 const createdVersionFilter = ref('')
@@ -266,6 +271,8 @@ const clearAllFilters = () => {
 
         <VersionFilter
           :versionOptions="versionOptions"
+          :createdVersionOptions="createdVersionOptions"
+          :updatedVersionOptions="updatedVersionOptions"
           v-model:createdVersion="createdVersionFilter"
           v-model:updatedVersion="updatedVersionFilter"
           @search="handleSearch"

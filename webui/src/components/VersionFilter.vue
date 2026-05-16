@@ -9,7 +9,7 @@
         clearable
         filterable
       >
-        <el-option v-for="version in versionOptions" :key="`created-${version}`" :label="version" :value="version" />
+        <el-option v-for="version in createdOptions" :key="`created-${version}`" :label="version" :value="version" />
       </el-select>
     </div>
     <div class="versionFilterItem">
@@ -21,14 +21,14 @@
         clearable
         filterable
       >
-        <el-option v-for="version in versionOptions" :key="`updated-${version}`" :label="version" :value="version" />
+        <el-option v-for="version in updatedOptions" :key="`updated-${version}`" :label="version" :value="version" />
       </el-select>
     </div>
   </div>
 </template>
 
 <script setup>
-import { ref, watch } from 'vue'
+import { computed, ref, watch } from 'vue'
 
 const props = defineProps({
   createdVersion: {
@@ -42,6 +42,14 @@ const props = defineProps({
   versionOptions: {
     type: Array,
     default: () => []
+  },
+  createdVersionOptions: {
+    type: Array,
+    default: () => []
+  },
+  updatedVersionOptions: {
+    type: Array,
+    default: () => []
   }
 })
 
@@ -49,6 +57,8 @@ const emit = defineEmits(['update:createdVersion', 'update:updatedVersion', 'sea
 
 const localCreatedVersion = ref(props.createdVersion)
 const localUpdatedVersion = ref(props.updatedVersion)
+const createdOptions = computed(() => props.createdVersionOptions.length ? props.createdVersionOptions : props.versionOptions)
+const updatedOptions = computed(() => props.updatedVersionOptions.length ? props.updatedVersionOptions : props.versionOptions)
 
 watch(localCreatedVersion, (newValue) => {
   emit('update:createdVersion', newValue)

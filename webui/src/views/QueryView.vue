@@ -62,6 +62,8 @@
                     v-model:createdVersion="createdVersionFilter"
                     v-model:updatedVersion="updatedVersionFilter"
                     :versionOptions="versionOptions"
+                    :createdVersionOptions="createdVersionOptions"
+                    :updatedVersionOptions="updatedVersionOptions"
                     @search="handleSearch"
                 />
             </div>
@@ -159,6 +161,8 @@ const {
   createdVersionFilter,
   updatedVersionFilter,
   versionOptions,
+  createdVersionOptions,
+  updatedVersionOptions,
   sourceTypeOptions,
   selectedInputLanguage,
   supportedInputLanguage,

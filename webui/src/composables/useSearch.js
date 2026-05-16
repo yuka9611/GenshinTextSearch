@@ -6,7 +6,12 @@ import { matchVersionFilters } from '@/utils/versionFilters'
 
 const useSearch = () => {
   const { selectedInputLanguage, supportedInputLanguage, loadLanguages } = useLanguage()
-  const { versionOptions, loadVersionOptions } = useVersion()
+  const {
+    versionOptions,
+    createdVersionOptions,
+    updatedVersionOptions,
+    loadVersionOptions
+  } = useVersion()
 
   // 初始化时加载语言列表和版本选项
   loadLanguages().catch(console.error)
@@ -186,6 +191,8 @@ const useSearch = () => {
     createdVersionFilter,
     updatedVersionFilter,
     versionOptions,
+    createdVersionOptions,
+    updatedVersionOptions,
     sourceTypeOptions,
     selectedInputLanguage,
     supportedInputLanguage,
