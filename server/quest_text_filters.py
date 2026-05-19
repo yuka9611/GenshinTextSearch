@@ -10,7 +10,7 @@ QUEST_TEST_TEXT_GLOB_PREFIXES: tuple[str, ...] = tuple(
     f"{prefix}*" for prefix in QUEST_TEST_TEXT_PREFIXES
 )
 QUEST_TEXT_FILTER_LANG_CODE = "TextMapCHS.json"
-SHORT_GENERIC_TEXT_MAX_LENGTH = 6
+SHORT_GENERIC_TEXT_MAX_LENGTH = 8
 SHORT_GENERIC_TEXT_INTERJECTION_CHARS = "呀啊哇呜嗯唔哦噢欸诶哼哈嘿呵嗷喂呃咦哟哎"
 SHORT_GENERIC_TEXT_PUNCTUATION_CHARS = "…？！?!～~。．，、·・—-；:（）()「」『』【】《》〈〉"
 SHORT_GENERIC_TEXT_RESPONSE_END_CHARS = "…？！?!～~。．"
@@ -59,6 +59,7 @@ SHORT_GENERIC_TEXT_BROAD_RESPONSE_STEMS: tuple[str, ...] = (
     "你还好吗",
     "怎么会这样",
     "走吧",
+    "一起走吧",
     "这个嘛",
     "喵",
     "原来是这样",

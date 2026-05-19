@@ -383,6 +383,7 @@ def test_is_short_generic_text_matches_expected_examples():
         "没问题。",
         "谢谢。",
         "交给我吧。",
+        "一起走吧。",
         "可是…",
         "喵。",
         "原来是这样…",
