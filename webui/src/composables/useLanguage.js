@@ -2,6 +2,8 @@ import { ref, computed, watch } from 'vue'
 import global from '@/global/global'
 import basicInfoApi from '@/api/basicInfo'
 
+let loadLanguagesPromise = null
+
 const toLanguageMap = (payload) => {
   if (!payload) return {}
   if (Array.isArray(payload)) {
@@ -44,16 +46,24 @@ const useLanguage = () => {
 
   const loadLanguages = async () => {
     try {
-      const textLanguages = (await basicInfoApi.getImportedTextLanguages()).json
-      global.languages = toLanguageMap(textLanguages)
+      if (!loadLanguagesPromise) {
+        loadLanguagesPromise = (async () => {
+          const textLanguages = (await basicInfoApi.getImportedTextLanguages()).json
+          global.languages = toLanguageMap(textLanguages)
 
-      const voiceLanguages = (await basicInfoApi.getImportedVoiceLanguages()).json
-      global.voiceLanguages = toLanguageMap(voiceLanguages)
+          const voiceLanguages = (await basicInfoApi.getImportedVoiceLanguages()).json
+          global.voiceLanguages = toLanguageMap(voiceLanguages)
 
-      const config = (await basicInfoApi.getConfig()).json
-      global.config = config
-      if (config.defaultSearchLanguage !== undefined && config.defaultSearchLanguage !== null && config.defaultSearchLanguage !== '') {
-        selectedInputLanguage.value = String(config.defaultSearchLanguage)
+          const config = (await basicInfoApi.getConfig()).json
+          global.config = config
+        })().finally(() => {
+          loadLanguagesPromise = null
+        })
+      }
+      await loadLanguagesPromise
+      const defaultLanguage = global.config.defaultSearchLanguage
+      if (defaultLanguage !== undefined && defaultLanguage !== null && defaultLanguage !== '') {
+        selectedInputLanguage.value = String(defaultLanguage)
       }
     } catch (_) {
       console.error('failed to load language settings')

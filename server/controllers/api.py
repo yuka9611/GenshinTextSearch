@@ -1,9 +1,9 @@
 import os
 import sqlite3
+import importlib
+import time
 from flask import Blueprint, current_app, request, jsonify
 
-import controllers as controllers_module
-from databaseHelper import selectTextMapFromKeywordPaged, selectVoiceFromKeywordPaged, getVoicePath, getTextMapByHash, getVersionData, getLangCodeMap
 from utils.browser_session import (
     disconnect_browser_client,
     is_browser_auto_shutdown_enabled,
@@ -11,6 +11,71 @@ from utils.browser_session import (
 )
 from utils.helpers import getLangFromRequest, normalizeSearchTerm, getLanguageName
 from utils.cache import search_cache
+
+_controllers_module = None
+_database_helper_module = None
+
+
+def _startup_profile_enabled() -> bool:
+    return os.environ.get("GTS_STARTUP_PROFILE", "").strip() == "1"
+
+
+def _log_startup_profile(label: str, elapsed_seconds: float) -> None:
+    if not _startup_profile_enabled():
+        return
+    message = f"[startup-profile] {label}: {elapsed_seconds * 1000:.1f} ms"
+    print(message, flush=True)
+
+
+def _get_controllers():
+    global _controllers_module
+    if _controllers_module is None:
+        started = time.perf_counter()
+        _controllers_module = importlib.import_module("controllers.common")
+        _log_startup_profile("import controllers.common", time.perf_counter() - started)
+    return _controllers_module
+
+
+def _get_database_helper():
+    global _database_helper_module
+    if _database_helper_module is None:
+        started = time.perf_counter()
+        _database_helper_module = importlib.import_module("databaseHelper")
+        _log_startup_profile("import databaseHelper", time.perf_counter() - started)
+    return _database_helper_module
+
+
+def selectTextMapFromKeywordPaged(*args, **kwargs):
+    return _get_database_helper().selectTextMapFromKeywordPaged(*args, **kwargs)
+
+
+def selectVoiceFromKeywordPaged(*args, **kwargs):
+    return _get_database_helper().selectVoiceFromKeywordPaged(*args, **kwargs)
+
+
+def getVoicePath(*args, **kwargs):
+    return _get_database_helper().getVoicePath(*args, **kwargs)
+
+
+def getTextMapByHash(*args, **kwargs):
+    return _get_database_helper().getTextMapByHash(*args, **kwargs)
+
+
+def getVersionData(*args, **kwargs):
+    return _get_database_helper().getVersionData(*args, **kwargs)
+
+
+def getLangCodeMap(*args, **kwargs):
+    return _get_database_helper().getLangCodeMap(*args, **kwargs)
+
+
+def _get_config_payload():
+    import config
+
+    cfg = dict(config.config)
+    cfg["assetDirValid"] = config.isAssetDirValid()
+    return cfg
+
 
 # 构建语言代码到语言ID的映射
 lang_code_map = None
@@ -369,9 +434,10 @@ def pickAssetDir():
     import config
     import languagePackReader
 
-    dialog_error = getattr(controllers_module, "AssetDirDialogUnavailableError", RuntimeError)
+    controllers = _get_controllers()
+    dialog_error = getattr(controllers, "AssetDirDialogUnavailableError", RuntimeError)
     try:
-        picked = controllers_module.pickAssetDirViaDialog() # type: ignore
+        picked = controllers.pickAssetDirViaDialog() # type: ignore
     except dialog_error as exc:
         current_app.logger.warning("Asset directory dialog is unavailable: %s", exc)
         return jsonify({
@@ -421,7 +487,7 @@ def pickAssetDir():
 @api_bp.route("/api/getImportedTextLanguages")
 def getImportedTextLanguages():
     return jsonify({
-        "data": controllers_module.getImportedTextMapLangs(), # type: ignore
+        "data": _get_controllers().getImportedTextMapLangs(), # type: ignore
         "code": 200,
         "msg": "ok"
     })
@@ -429,7 +495,7 @@ def getImportedTextLanguages():
 @api_bp.route("/api/getImportedVoiceLanguages")
 def getImportedVoiceLanguages():
     return jsonify({
-        "data": controllers_module.getLoadedVoicePacks(), # type: ignore
+        "data": _get_controllers().getLoadedVoicePacks(), # type: ignore
         "code": 200,
         "msg": "ok"
     })
@@ -437,7 +503,7 @@ def getImportedVoiceLanguages():
 @api_bp.route("/api/getAvailableVersions")
 def getAvailableVersions():
     return jsonify({
-        "data": controllers_module.getAvailableVersions(), # type: ignore
+        "data": _get_controllers().getAvailableVersions(), # type: ignore
         "code": 200,
         "msg": "ok"
     })
@@ -445,7 +511,7 @@ def getAvailableVersions():
 @api_bp.route("/api/getAvailableVersionFilters")
 def getAvailableVersionFilters():
     return jsonify({
-        "data": controllers_module.getAvailableVersionFilters(), # type: ignore
+        "data": _get_controllers().getAvailableVersionFilters(), # type: ignore
         "code": 200,
         "msg": "ok"
     })
@@ -490,7 +556,7 @@ def keywordQuery():
         })
 
     start = time.time()
-    contents, total = controllers_module.getTranslateObj( # type: ignore
+    contents, total = _get_controllers().getTranslateObj( # type: ignore
         keyword,
         langCode,
         speaker,
@@ -525,7 +591,7 @@ def getVoiceOver():
         return jsonify({"data": None, "code": 400, "msg": "Invalid langCode"})
 
     voicePath = request.json["voicePath"]
-    wemStream = controllers_module.getVoiceBinStream(voicePath, langCode) # type: ignore
+    wemStream = _get_controllers().getVoiceBinStream(voicePath, langCode) # type: ignore
 
     if wemStream is None:
         resp = make_response("Audio File Not Found")
@@ -565,7 +631,7 @@ def getTalkFromHash():
 
     try:
         start = time.time()
-        contents = controllers_module.getTalkFromHash( # type: ignore
+        contents = _get_controllers().getTalkFromHash( # type: ignore
             textHash,
             searchLang,
             page=page,
@@ -631,7 +697,7 @@ def getDialogueGroup():
 
     try:
         start = time.time()
-        contents = controllers_module.getDialogueGroup(  # type: ignore
+        contents = _get_controllers().getDialogueGroup(  # type: ignore
             talkId,
             coopQuestId=coopQuestId,
             dialogueIdFallback=dialogueIdFallback,
@@ -670,7 +736,7 @@ def getSubtitleContext():
         subtitleId = None
 
     start = time.time()
-    contents = controllers_module.getSubtitleContext(fileName, subtitleId, searchLang) # type: ignore
+    contents = _get_controllers().getSubtitleContext(fileName, subtitleId, searchLang) # type: ignore
     end = time.time()
 
     return jsonify({
@@ -714,7 +780,7 @@ def nameSearch():
         })
 
     start = time.time()
-    contents = controllers_module.searchNameEntries( # type: ignore
+    contents = _get_controllers().searchNameEntries( # type: ignore
         keyword,
         langCode,
         created_version=createdVersion,
@@ -759,7 +825,7 @@ def npcDialogueSearch():
         })
 
     start = time.time()
-    contents = controllers_module.searchNpcDialogueEntries(  # type: ignore
+    contents = _get_controllers().searchNpcDialogueEntries(  # type: ignore
         keyword,
         langCode,
         npc_created_version=npcCreatedVersion,
@@ -813,7 +879,7 @@ def npcDialogues():
         pageSize = 20
 
     start = time.time()
-    contents = controllers_module.getNpcDialogues(  # type: ignore
+    contents = _get_controllers().getNpcDialogues(  # type: ignore
         npcId,
         npcIds=npcIds,
         searchLang=searchLang,
@@ -850,7 +916,7 @@ def avatarSearch():
         })
 
     start = time.time()
-    contents = controllers_module.searchAvatarEntries(keyword, langCode) # type: ignore
+    contents = _get_controllers().searchAvatarEntries(keyword, langCode) # type: ignore
     end = time.time()
 
     return jsonify({
@@ -877,7 +943,7 @@ def avatarVoice():
     avatarId = int(avatarId)
 
     start = time.time()
-    contents = controllers_module.getAvatarVoices(avatarId, searchLang) # type: ignore
+    contents = _get_controllers().getAvatarVoices(avatarId, searchLang) # type: ignore
     end = time.time()
 
     return jsonify({
@@ -916,7 +982,7 @@ def avatarVoiceSearch():
         })
 
     start = time.time()
-    contents = controllers_module.searchAvatarVoicesByFilters( # type: ignore
+    contents = _get_controllers().searchAvatarVoicesByFilters( # type: ignore
         title_keyword=titleKeyword,
         searchLang=searchLang,
         created_version=createdVersion,
@@ -948,7 +1014,7 @@ def avatarStory():
     avatarId = int(avatarId)
 
     start = time.time()
-    contents = controllers_module.getAvatarStories(avatarId, searchLang) # type: ignore
+    contents = _get_controllers().getAvatarStories(avatarId, searchLang) # type: ignore
     end = time.time()
 
     return jsonify({
@@ -987,7 +1053,7 @@ def avatarStorySearch():
         })
 
     start = time.time()
-    contents = controllers_module.searchAvatarStoriesByFilters( # type: ignore
+    contents = _get_controllers().searchAvatarStoriesByFilters( # type: ignore
         title_keyword=titleKeyword,
         searchLang=searchLang,
         created_version=createdVersion,
@@ -1017,7 +1083,7 @@ def getReadableContent():
         readableId = int(readableId)
 
     start = time.time()
-    contents = controllers_module.getReadableContent(readableId, fileName, searchLang) # type: ignore
+    contents = _get_controllers().getReadableContent(readableId, fileName, searchLang) # type: ignore
     end = time.time()
 
     return jsonify({
@@ -1058,7 +1124,7 @@ def getQuestDialogues():
         pageSize = 200
 
     start = time.time()
-    contents, total = controllers_module.getQuestDialogues(questId, searchLang, page, pageSize) # type: ignore
+    contents, total = _get_controllers().getQuestDialogues(questId, searchLang, page, pageSize) # type: ignore
     end = time.time()
 
     return jsonify({
@@ -1088,7 +1154,7 @@ def getEntityTexts():
         return jsonify({"data": None, "code": 400, "msg": "sourceTypeCode and entityId are required"})
 
     start = time.time()
-    contents = controllers_module.getEntityTexts(int(sourceTypeCode), int(entityId), searchLang) # type: ignore
+    contents = _get_controllers().getEntityTexts(int(sourceTypeCode), int(entityId), searchLang) # type: ignore
     end = time.time()
 
     return jsonify({
@@ -1114,7 +1180,7 @@ def getTextEntitySources():
         return jsonify({"data": None, "code": 400, "msg": "textHash is required"})
 
     start = time.time()
-    contents = controllers_module.getTextEntitySources(int(textHash), searchLang) # type: ignore
+    contents = _get_controllers().getTextEntitySources(int(textHash), searchLang) # type: ignore
     end = time.time()
 
     return jsonify({
@@ -1149,7 +1215,7 @@ def catalogSearch():
     if not keyword and stc is None and sub is None and not has_created and not has_updated:
         return jsonify({"data": None, "code": 400, "msg": "keyword or a filter is required"})
 
-    result = controllers_module.searchCatalog(
+    result = _get_controllers().searchCatalog(
         keyword, int(langCode), stc, sub, page, pageSize,
         createdVersion=createdVersion or None,
         updatedVersion=updatedVersion or None,
@@ -1159,12 +1225,13 @@ def catalogSearch():
 
 @api_bp.route("/api/catalogMeta", methods=["GET"])
 def catalogMeta():
+    controllers = _get_controllers()
     return jsonify({
         "data": {
-            "mainCategories": controllers_module.getCatalogMainCategories(),  # type: ignore
-            "subCategories": controllers_module.getCatalogSubCategories(),  # type: ignore
-            "subCategoryGroups": controllers_module.getCatalogSubCategoryGroups(),  # type: ignore
-            "uncategorizedSubCategory": controllers_module.getCatalogUncategorizedSubCategory(),  # type: ignore
+            "mainCategories": controllers.getCatalogMainCategories(),  # type: ignore
+            "subCategories": controllers.getCatalogSubCategories(),  # type: ignore
+            "subCategoryGroups": controllers.getCatalogSubCategoryGroups(),  # type: ignore
+            "uncategorizedSubCategory": controllers.getCatalogUncategorizedSubCategory(),  # type: ignore
         },
         "code": 200,
         "msg": "ok"
@@ -1172,23 +1239,24 @@ def catalogMeta():
 
 @api_bp.route("/api/saveSettings", methods=["POST"])
 def saveSettings():
+    import config
 
     newConfig = request.json["config"]
     if "defaultSearchLanguage" in newConfig:
-        controllers_module.setDefaultSearchLanguage(newConfig["defaultSearchLanguage"]) # type: ignore
+        config.setDefaultSearchLanguage(newConfig["defaultSearchLanguage"])
 
     if "resultLanguages" in newConfig:
-        controllers_module.setResultLanguages(newConfig["resultLanguages"]) # type: ignore
+        config.setResultLanguages(newConfig["resultLanguages"])
 
     if "sourceLanguage" in newConfig:
-        controllers_module.setSourceLanguage(newConfig["sourceLanguage"]) # type: ignore
+        config.setSourceLanguage(newConfig["sourceLanguage"])
 
     if "isMale" in newConfig:
-        controllers_module.setIsMale(newConfig["isMale"]) # type: ignore
+        config.setIsMale(newConfig["isMale"])
 
-    controllers_module.saveConfig() # type: ignore
+    config.saveConfig()
     return jsonify({
-        "data": controllers_module.getConfig(), # type: ignore
+        "data": _get_config_payload(),
         "code": 200,
         "msg": "ok"
     })
@@ -1196,7 +1264,7 @@ def saveSettings():
 @api_bp.route("/api/getSettings")
 def getConfigApi():
     return jsonify({
-        "data": controllers_module.getConfig(), # type: ignore
+        "data": _get_config_payload(),
         "code": 200,
         "msg": "ok"
     })

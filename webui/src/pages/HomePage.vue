@@ -4,8 +4,8 @@ import router from "@/router";
 import { nextTick, onMounted, reactive, ref, watch, computed } from "vue";
 import { ElMenuItem, ElSubMenu } from "element-plus";
 import global from "@/global/global";
-import api from "@/api/basicInfo";
 import { toggleTheme, getTheme } from "@/assets/changeTheme";
+import useLanguage from "@/composables/useLanguage";
 
 const menuItemClick = (ke) => {
     router.push(ke.index)
@@ -85,6 +85,7 @@ const menu = ref();
 let contentDom = undefined;
 const loaded = ref(false)
 const initError = ref("")
+const { loadLanguages } = useLanguage()
 const scrollPositions = new Map()
 const detailOriginRouteKey = ref(null)
 const detailRouteNames = new Set(["talkView", "entityView"])
@@ -128,9 +129,7 @@ onMounted(async () => {
     })()
 
     try {
-        global.languages = (await api.getImportedTextLanguages()).json
-        global.voiceLanguages = (await api.getImportedVoiceLanguages()).json
-        global.config = (await api.getConfig()).json
+        await loadLanguages()
     } catch (error) {
         initError.value = getInitErrorMessage(error)
         if (error?.defaultHandler) {

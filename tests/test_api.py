@@ -3,8 +3,10 @@ import io
 import json
 import sqlite3
 import sys
+import types
 from urllib.parse import urlencode
 
+import pytest
 from flask import Flask
 
 import controllers.api as api
@@ -43,6 +45,59 @@ def _request_context(app: Flask, path: str, method: str = "GET", query_string=No
         "wsgi.run_once": False,
     }
     return app.request_context(environ)
+
+
+class _FakeControllers(types.SimpleNamespace):
+    def __getattr__(self, name):
+        def _missing(*_args, **_kwargs):
+            raise AssertionError(f"unexpected controller call: {name}")
+        return _missing
+
+
+@pytest.fixture(autouse=True)
+def _stub_lazy_controllers(monkeypatch):
+    fake = _FakeControllers()
+    monkeypatch.setattr(api, "_controllers_module", None)
+    monkeypatch.setattr(api, "_database_helper_module", None)
+    monkeypatch.setattr(api, "_get_controllers", lambda: fake)
+    monkeypatch.setattr(api, "controllers_module", fake, raising=False)
+    return fake
+
+
+class TestStartupAndSettingsEndpoints:
+    def test_startup_status_does_not_load_database_or_controllers(self, monkeypatch):
+        import config
+
+        monkeypatch.setattr(api, "_get_controllers", lambda: (_ for _ in ()).throw(AssertionError("controllers loaded")))
+        monkeypatch.setattr(api, "_get_database_helper", lambda: (_ for _ in ()).throw(AssertionError("database loaded")))
+        monkeypatch.setattr(config, "getAssetDir", lambda: "/game/GenshinImpact_Data")
+        monkeypatch.setattr(config, "isAssetDirValid", lambda: True)
+
+        app = _app()
+        with _request_context(app, "/api/startupStatus"):
+            resp = api.startupStatus()
+
+        data = resp.get_json()
+        assert resp.status_code == 200
+        assert data["code"] == 200
+        assert data["data"]["assetDirValid"] is True
+
+    def test_get_settings_uses_config_without_loading_database_or_controllers(self, monkeypatch):
+        import config
+
+        monkeypatch.setattr(api, "_get_controllers", lambda: (_ for _ in ()).throw(AssertionError("controllers loaded")))
+        monkeypatch.setattr(api, "_get_database_helper", lambda: (_ for _ in ()).throw(AssertionError("database loaded")))
+        monkeypatch.setattr(config, "config", {"defaultSearchLanguage": 1, "resultLanguages": [1, 4]})
+        monkeypatch.setattr(config, "isAssetDirValid", lambda: False)
+
+        app = _app()
+        with _request_context(app, "/api/getSettings"):
+            resp = api.getConfigApi()
+
+        data = resp.get_json()
+        assert resp.status_code == 200
+        assert data["data"]["defaultSearchLanguage"] == 1
+        assert data["data"]["assetDirValid"] is False
 
 
 class TestSearchEndpoint:

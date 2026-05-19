@@ -35,19 +35,35 @@ from utils.helpers import resource_path
 from utils.browser_session import start_browser_session_watchdog
 
 
+def _startup_profile_enabled() -> bool:
+    return os.environ.get("GTS_STARTUP_PROFILE", "").strip() == "1"
+
+
+def _log_startup_profile(label: str, elapsed_seconds: float) -> None:
+    if _startup_profile_enabled():
+        print(f"[startup-profile] {label}: {elapsed_seconds * 1000:.1f} ms", flush=True)
+
+
 def create_app() -> Flask:
     """
     工厂模式：把重 import/初始化从模块顶层挪走，提升 PyInstaller 启动速度
     """
+    started = time.perf_counter()
     app = Flask(__name__)
 
     # 延迟导入 CORS（减少顶层 import）
+    cors_started = time.perf_counter()
     from flask_cors import CORS
     CORS(app)
+    _log_startup_profile("configure CORS", time.perf_counter() - cors_started)
 
     # 导入并注册API蓝图
+    api_started = time.perf_counter()
     from controllers.api import api_bp
+    _log_startup_profile("import API blueprint", time.perf_counter() - api_started)
+    register_started = time.perf_counter()
     app.register_blueprint(api_bp)
+    _log_startup_profile("register API blueprint", time.perf_counter() - register_started)
 
     # ----------------------------
     # Static frontend (webui/dist)
@@ -65,6 +81,7 @@ def create_app() -> Flask:
             return send_from_directory(staticDir, path)
         return send_from_directory(staticDir, "index.html")
 
+    _log_startup_profile("create_app", time.perf_counter() - started)
     return app
 
 
@@ -76,10 +93,14 @@ def maybe_open_browser(url: str):
     """
     if os.environ.get("GTS_NO_BROWSER", "").strip() == "1":
         return
+    try:
+        open_delay = max(0.0, float(os.environ.get("GTS_BROWSER_OPEN_DELAY", "0.3")))
+    except ValueError:
+        open_delay = 0.3
 
     def _open():
-        # 给 Flask 多一点时间起来（onefile 解压 + 初始化）
-        time.sleep(1.5)
+        # Give serve_forever a short moment to enter its accept loop.
+        time.sleep(open_delay)
         try:
             webbrowser.open(url, new=1)
         except Exception:
@@ -101,6 +122,98 @@ def run_local_server(app: Flask, host: str, port: int) -> None:
         server.server_close()
 
 
+class AssetDirPromptUnavailableError(RuntimeError):
+    """Raised when the startup asset-dir prompt cannot be shown."""
+
+
+def _pick_asset_dir_via_tkinter() -> str | None:
+    try:
+        import tkinter as tk
+        from tkinter import filedialog
+    except ModuleNotFoundError as exc:
+        if exc.name == "_tkinter":
+            raise AssetDirPromptUnavailableError("_tkinter module is unavailable") from exc
+        raise AssetDirPromptUnavailableError("tkinter is unavailable") from exc
+    except Exception as exc:
+        raise AssetDirPromptUnavailableError("tkinter is unavailable") from exc
+
+    root = None
+    try:
+        root = tk.Tk()
+        root.withdraw()
+        try:
+            root.attributes("-topmost", True)
+        except Exception:
+            pass
+        return filedialog.askdirectory(title="请选择原神资源目录（包含 StreamingAssets 或 Persistent）") or None
+    except Exception as exc:
+        raise AssetDirPromptUnavailableError("failed to open directory picker") from exc
+    finally:
+        if root is not None:
+            try:
+                root.destroy()
+            except Exception:
+                pass
+
+
+def _prompt_for_asset_dir_if_needed(config_module) -> None:
+    if config_module.getAssetDir() and config_module.isAssetDirValid():
+        return
+
+    try:
+        import tkinter as tk
+        from tkinter import messagebox
+    except ModuleNotFoundError as exc:
+        if exc.name == "_tkinter":
+            return
+        return
+    except Exception:
+        return
+
+    root = None
+    try:
+        root = tk.Tk()
+        root.withdraw()
+        result = messagebox.askyesno("提示", "未找到有效的原神资源目录，是否现在选择？")
+    except Exception:
+        return
+    finally:
+        if root is not None:
+            try:
+                root.destroy()
+            except Exception:
+                pass
+
+    if not result:
+        return
+
+    try:
+        picked = _pick_asset_dir_via_tkinter()
+        if not picked:
+            return
+        config_module.setAssetDir(picked)
+        config_module.saveConfig()
+        if config_module.isAssetDirValid():
+            return
+
+        root = tk.Tk()
+        root.withdraw()
+        try:
+            messagebox.showerror("错误", "所选路径不是有效的原神资源目录！\n请在设置页面重新选择。")
+        finally:
+            root.destroy()
+    except Exception:
+        try:
+            root = tk.Tk()
+            root.withdraw()
+            try:
+                messagebox.showerror("错误", "无法打开目录选择对话框！\n请在设置页面手动选择资源目录。")
+            finally:
+                root.destroy()
+        except Exception:
+            pass
+
+
 if __name__ == "__main__":
     # 检查游戏目录是否存在且有效
     import config
@@ -110,41 +223,7 @@ if __name__ == "__main__":
     search_cache.increment_version()
 
     # 如果没有游戏目录或目录无效，弹出提示框让用户选择
-    if not config.getAssetDir() or not config.isAssetDirValid():
-        # 尝试导入tkinter和controllers模块
-        try:
-            import tkinter as tk
-            from tkinter import messagebox
-            import controllers as controllers_module
-
-            # 询问用户是否选择游戏目录
-            root = tk.Tk()
-            root.withdraw()
-            result = messagebox.askyesno("提示", "未找到有效的原神资源目录，是否现在选择？")
-            root.destroy()
-
-            if result:
-                # 弹出目录选择对话框
-                try:
-                    picked = controllers_module.pickAssetDirViaDialog() # type: ignore
-                    if picked:
-                        config.setAssetDir(picked)
-                        config.saveConfig()
-                        # 再次检查目录是否有效
-                        if not config.isAssetDirValid():
-                            root = tk.Tk()
-                            root.withdraw()
-                            messagebox.showerror("错误", "所选路径不是有效的原神资源目录！\n请在设置页面重新选择。")
-                            root.destroy()
-                except Exception:
-                    # 如果pickAssetDirViaDialog调用失败，显示错误信息
-                    root = tk.Tk()
-                    root.withdraw()
-                    messagebox.showerror("错误", "无法打开目录选择对话框！\n请在设置页面手动选择游戏目录。")
-                    root.destroy()
-        except Exception:
-            # 如果导入或操作失败，忽略错误
-            pass
+    _prompt_for_asset_dir_if_needed(config)
 
     app = create_app()
     # 桌面发行版建议只监听本机

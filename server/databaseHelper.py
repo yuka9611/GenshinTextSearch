@@ -2747,10 +2747,13 @@ def getVersionFilterValues() -> dict[str, list[str]]:
 
             rows = cursor.execute(
                 f"""
-                SELECT DISTINCT vd.raw_version
-                FROM {table_name} t
-                JOIN {_VERSION_DIM_TABLE} vd ON vd.id = t.created_version_id
-                WHERE t.created_version_id IS NOT NULL
+                SELECT vd.raw_version
+                FROM {_VERSION_DIM_TABLE} vd
+                WHERE vd.id IN (
+                    SELECT DISTINCT t.created_version_id
+                    FROM {table_name} t
+                    WHERE t.created_version_id IS NOT NULL
+                )
                   AND COALESCE(vd.raw_version, '') <> ''
                 """
             ).fetchall()
@@ -2760,10 +2763,13 @@ def getVersionFilterValues() -> dict[str, list[str]]:
                 if _table_exists("quest_version") and _table_has_column("quest_version", "updated_version_id"):
                     rows = cursor.execute(
                         f"""
-                        SELECT DISTINCT vd.raw_version
-                        FROM quest_version qv
-                        JOIN {_VERSION_DIM_TABLE} vd ON vd.id = qv.updated_version_id
-                        WHERE qv.updated_version_id IS NOT NULL
+                        SELECT vd.raw_version
+                        FROM {_VERSION_DIM_TABLE} vd
+                        WHERE vd.id IN (
+                            SELECT DISTINCT qv.updated_version_id
+                            FROM quest_version qv
+                            WHERE qv.updated_version_id IS NOT NULL
+                        )
                           AND COALESCE(vd.raw_version, '') <> ''
                         """
                     ).fetchall()
@@ -2771,10 +2777,13 @@ def getVersionFilterValues() -> dict[str, list[str]]:
             elif table_name != "npc" and _table_has_column(table_name, "updated_version_id"):
                 rows = cursor.execute(
                     f"""
-                    SELECT DISTINCT vd.raw_version
-                    FROM {table_name} t
-                    JOIN {_VERSION_DIM_TABLE} vd ON vd.id = t.updated_version_id
-                    WHERE t.updated_version_id IS NOT NULL
+                    SELECT vd.raw_version
+                    FROM {_VERSION_DIM_TABLE} vd
+                    WHERE vd.id IN (
+                        SELECT DISTINCT t.updated_version_id
+                        FROM {table_name} t
+                        WHERE t.updated_version_id IS NOT NULL
+                    )
                       AND COALESCE(vd.raw_version, '') <> ''
                     """
                 ).fetchall()
