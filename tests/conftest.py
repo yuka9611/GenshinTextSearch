@@ -32,21 +32,3 @@ def tmp_config(tmp_path, monkeypatch):
     # Restore original config dict
     config.config.clear()
     config.config.update(original)
-
-
-@pytest.fixture()
-def flask_app():
-    """Create a Flask test app with the API blueprint registered."""
-    from flask import Flask
-    from controllers.api import api_bp
-
-    app = Flask(__name__)
-    app.config["TESTING"] = True
-    app.register_blueprint(api_bp)
-    return app
-
-
-@pytest.fixture()
-def client(flask_app):
-    """Flask test client."""
-    return flask_app.test_client()
