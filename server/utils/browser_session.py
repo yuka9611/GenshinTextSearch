@@ -14,7 +14,18 @@ def _read_seconds(name: str, default: float, minimum: float) -> float:
         return default
 
 
-_AUTO_STOP_ENABLED = os.environ.get("GTS_AUTO_STOP_ON_LAST_PAGE", "").strip() == "1"
+def _read_bool(name: str, default: bool) -> bool:
+    raw_value = os.environ.get(name, "").strip().lower()
+    if not raw_value:
+        return default
+    if raw_value in {"1", "true", "yes", "on"}:
+        return True
+    if raw_value in {"0", "false", "no", "off"}:
+        return False
+    return default
+
+
+_AUTO_STOP_ENABLED = _read_bool("GTS_AUTO_STOP_ON_LAST_PAGE", True)
 _HEARTBEAT_TTL_SECONDS = _read_seconds("GTS_BROWSER_HEARTBEAT_TTL", 75.0, 15.0)
 _EMPTY_GRACE_SECONDS = _read_seconds("GTS_BROWSER_EMPTY_GRACE", 10.0, 5.0)
 _WATCH_INTERVAL_SECONDS = _read_seconds("GTS_BROWSER_WATCH_INTERVAL", 1.0, 0.5)

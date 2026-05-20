@@ -1,5 +1,6 @@
 """Tests for browser-session auto shutdown behavior."""
 import time
+import importlib
 
 import utils.browser_session as browser_session
 
@@ -48,3 +49,21 @@ def test_watchdog_invokes_shutdown_callback_once(monkeypatch):
         time.sleep(0.02)
 
     assert shutdown_calls == ["stop"]
+
+
+def test_auto_stop_defaults_to_enabled(monkeypatch):
+    monkeypatch.delenv("GTS_AUTO_STOP_ON_LAST_PAGE", raising=False)
+    reloaded = importlib.reload(browser_session)
+    try:
+        assert reloaded.is_browser_auto_shutdown_enabled() is True
+    finally:
+        importlib.reload(reloaded)
+
+
+def test_auto_stop_can_be_disabled_by_env(monkeypatch):
+    monkeypatch.setenv("GTS_AUTO_STOP_ON_LAST_PAGE", "0")
+    reloaded = importlib.reload(browser_session)
+    try:
+        assert reloaded.is_browser_auto_shutdown_enabled() is False
+    finally:
+        importlib.reload(reloaded)
