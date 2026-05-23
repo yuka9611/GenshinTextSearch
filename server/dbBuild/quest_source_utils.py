@@ -50,17 +50,15 @@ def extract_anecdote_core_fields(row: dict) -> dict | None:
     if not isinstance(row, dict):
         return None
 
-    anecdote_id = _extract_first_positive_int(row, "GBDGFHNLDFF", "DBGCFNMLHAJ")
+    anecdote_id = _extract_first_positive_int(row, "IDEHFGDCPDL")
     if anecdote_id is None:
         return None
 
-    title_text_map_hash = _extract_first_positive_int(row, "PPANCKHJOGI", "EJMLGHMLPLD")
-    desc_text_map_hash = _extract_first_positive_int(row, "AJKAHOPOBJB", "JKNBFACAMCF")
-    long_desc_text_map_hash = _extract_first_positive_int(row, "OBLBGMIHBHL")
+    title_text_map_hash = _extract_first_positive_int(row, "IMFFKDPOGGK")
+    desc_text_map_hash = _extract_first_positive_int(row, "EBDFJDKDDFJ")
+    long_desc_text_map_hash = None
 
-    group_ids = normalize_unique_ints(row.get("BBOMCGBIOFM"), positive_only=True)
-    if not group_ids:
-        group_ids = normalize_unique_ints(row.get("LIIPHELCPKJ"), positive_only=True)
+    group_ids = normalize_unique_ints(row.get("BHAGNOEMPHL"), positive_only=True)
 
     return {
         "quest_id": anecdote_id,
@@ -112,7 +110,9 @@ def load_quest_source_raw_by_id() -> dict[int, str]:
             if not isinstance(quest_id, int) or quest_id <= 0:
                 continue
             mapping[quest_id] = normalize_source_code_raw(
-                obj.get("HAHEIAHBPEJ") or obj.get("DLPKMDPABFM")
+                obj.get("HAHEIAHBPEJ")
+                or obj.get("DLPKMDPABFM")
+                or obj.get("MEGMIMEDODJ")
             )
 
     _QUEST_SOURCE_RAW_BY_ID = mapping
@@ -214,12 +214,14 @@ def get_quest_subquests(obj: dict) -> list[dict]:
     if not isinstance(subquests, list):
         subquests = obj.get("GFLHMKOOHHA")
     if not isinstance(subquests, list):
+        subquests = obj.get("IKECHKLEFFK")
+    if not isinstance(subquests, list):
         return []
     return [item for item in subquests if isinstance(item, dict)]
 
 
 def _get_subquest_id(step_obj: dict) -> int | None:
-    for key in ("MPKBGPAKIOA", "subId", "KKMJBEPGLGD"):
+    for key in ("MPKBGPAKIOA", "subId", "KKMJBEPGLGD", "LAFBPKMMBHD"):
         value = step_obj.get(key)
         if isinstance(value, int) and value > 0:
             return value
@@ -234,6 +236,7 @@ def get_step_desc_text_map_hash(step_obj: dict) -> int | None:
         "BMBANCMPPOM",
         "NAEMBIJFJCA",
         "HMLBMECMBGA",
+        "JDFENJAFCPF",
     ):
         value = step_obj.get(key)
         if isinstance(value, int) and value != 0:
@@ -307,6 +310,8 @@ def get_step_talk_ids(step_obj: dict) -> list[int]:
     if not isinstance(conditions, list):
         conditions = step_obj.get("KBFJAAFDHKJ")
     if not isinstance(conditions, list):
+        conditions = step_obj.get("PGELADPAKLA")
+    if not isinstance(conditions, list):
         return talk_ids
 
     for condition in conditions:
@@ -317,6 +322,7 @@ def get_step_talk_ids(step_obj: dict) -> list[int]:
             or condition.get("DLPKMDPABFM")
             or condition.get("type")
             or condition.get("PAINLIBBLDK")
+            or condition.get("MEGMIMEDODJ")
         )
         if cond_type not in _STEP_TALK_CONDITION_TYPES:
             continue
@@ -326,6 +332,7 @@ def get_step_talk_ids(step_obj: dict) -> list[int]:
             or condition.get("param")
             or condition.get("paramList")
             or condition.get("LNHLPKELCAL")
+            or condition.get("KFDJJBPNIHG")
         )
         if not isinstance(params, list) or not params:
             continue
@@ -365,7 +372,7 @@ def build_step_title_hash_by_talk_id(obj: dict) -> dict[int, int]:
 def resolve_main_quest_id_for_subquest(subquest: dict, fallback_quest_id: int | None = None) -> int | None:
     if isinstance(fallback_quest_id, int) and fallback_quest_id > 0:
         return fallback_quest_id
-    for key in ("JPBOKMKMHCJ", "mainQuestId", "GNGFBMPFBOK", "JKHGFFKOFFN"):
+    for key in ("JPBOKMKMHCJ", "mainQuestId", "GNGFBMPFBOK", "JKHGFFKOFFN", "CBOGAFHNHNI"):
         value = subquest.get(key)
         if isinstance(value, int) and value > 0:
             return value
