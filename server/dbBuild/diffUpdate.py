@@ -346,6 +346,8 @@ def _resolve_talk_keys(obj: dict):
         return "LBPGKDMGFBN"
     if "AADKDKPMGNO" in obj and "GALIDJOEHOC" in obj:
         return "AADKDKPMGNO"
+    if "KFCNJPJOJLA" in obj and "IOEDPLCPFFB" in obj:
+        return "KFCNJPJOJLA"
     return None
 
 
@@ -596,7 +598,6 @@ def _analyze_diff(diff_entries: list[dict]) -> dict:
 
         if rel == "ExcelBinOutput/MaterialExcelConfigData.json":
             plan["readable_meta"] = True
-            return
 
         if rel == "ExcelBinOutput/BooksCodexExcelConfigData.json":
             plan["readable_meta"] = True
@@ -1164,6 +1165,18 @@ def _process_version_catalog_stage(plan, target_commit, base_commit):
             force=False,
             refresh_version_catalog=False,
         )
+    if plan["entity_sources"]:
+        if history_backfill is None:
+            import history_backfill as history_backfill_module
+
+            history_backfill = history_backfill_module
+
+        history_backfill.backfill_catalog_entity_versions_from_history(
+            target_commit=target_commit,
+            from_commit=base_commit,
+            force=False,
+            refresh_version_catalog=False,
+        )
 
     # 添加版本异常验证和修复
     if history_backfill is None:
@@ -1299,6 +1312,8 @@ def _process_version_catalog_stage(plan, target_commit, base_commit):
         version_scopes.append("readable")
     if plan["npc"]:
         version_scopes.append("npc")
+    if plan["entity_sources"]:
+        version_scopes.append("text_source_entity")
 
     if version_scopes:
         catalog_stats = rebuild_version_catalog(version_scopes)

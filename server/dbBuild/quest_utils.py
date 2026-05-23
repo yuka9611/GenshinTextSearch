@@ -39,6 +39,14 @@ _QUEST_SCHEMA_VARIANTS = [
         "talks_key": "DCHHEHNNEOO",
         "talk_id": "BPMABFNPCMI",
     },
+    {
+        "quest_id": "GMOMCKNPBGE",
+        "title_hash": "ALLMCLJBBDM",
+        "chapter_id": "JILHIMLENJK",
+        "chapter_id_fallback": None,
+        "talks_key": "EOHJIHHMBAN",
+        "talk_id": None,
+    },
 ]
 
 
@@ -87,6 +95,10 @@ def extract_quest_talk_ids(obj: dict) -> list:
     talk_id_key = schema["talk_id"]
     result = []
     for talk in talks:
+        if talk_id_key is None:
+            if isinstance(talk, int):
+                result.append(talk)
+            continue
         if isinstance(talk, dict) and talk_id_key in talk:
             result.append(talk[talk_id_key])
     return result

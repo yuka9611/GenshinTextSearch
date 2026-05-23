@@ -183,6 +183,7 @@ def test_diff_update_analyze_diff_marks_readable_meta_refresh_triggers():
     )
 
     assert plan["readable_meta"] is True
+    assert plan["entity_sources"] is True
 
 
 def test_process_textmap_stage_collects_actual_changed_hash_scope(monkeypatch):
@@ -273,6 +274,32 @@ def test_diff_update_resolve_talk_keys_supports_aadkdkpmgno_schema():
     assert diffUpdate._resolve_talk_keys(obj) == "AADKDKPMGNO"
 
 
+def test_diff_update_resolve_talk_keys_supports_kfcnjpjojla_schema():
+    obj = {
+        "KFCNJPJOJLA": 7051603,
+        "MEGMIMEDODJ": "FREE",
+        "IOEDPLCPFFB": [
+            {
+                "GMOMCKNPBGE": 705160301,
+                "HJJLLECCCPI": 2329597154,
+                "DGGDDIMMIDO": {
+                    "_id": "1561",
+                    "_type": "TALK_ROLE_NPC",
+                },
+            }
+        ],
+    }
+
+    assert diffUpdate._resolve_talk_keys(obj) == "KFCNJPJOJLA"
+
+
+def test_new_storyboard_group_schema_is_non_dialog_talk_obj():
+    obj = {"ANCLPHMACIF": 0, "CIAOBJHFJJM": []}
+
+    assert questImport._is_non_dialog_talk_obj(obj)
+    assert diffUpdate._resolve_talk_keys(obj) is None
+
+
 def test_replace_talk_file_from_local_normalizes_rel_path(monkeypatch, tmp_path):
     talk_dir = tmp_path / "BinOutput" / "Talk" / "Quest"
     talk_dir.mkdir(parents=True)
@@ -360,6 +387,63 @@ def test_import_talk_populates_and_clears_talk_dialogue_links(monkeypatch, tmp_p
         encoding="utf-8",
     )
     assert questImport.importTalk("Quest/foo.json", refresh_hash_map=False) == 0
+    assert connection.execute("SELECT * FROM talk_dialogue_link").fetchall() == []
+    assert connection.execute("SELECT * FROM dialogue").fetchall() == []
+
+
+def test_import_talk_supports_kfcnjpjojla_schema(monkeypatch, tmp_path):
+    connection = sqlite3.connect(":memory:")
+    _create_dialogue_tables(connection)
+
+    talk_dir = tmp_path / "BinOutput" / "Talk" / "Npc"
+    talk_dir.mkdir(parents=True)
+    talk_file = talk_dir / "foo.json"
+    talk_file.write_text(
+        json.dumps(
+            {
+                "KFCNJPJOJLA": 7051603,
+                "MEGMIMEDODJ": "FREE",
+                "IOEDPLCPFFB": [
+                    {
+                        "GMOMCKNPBGE": 705160301,
+                        "HJJLLECCCPI": 2329597154,
+                        "DGGDDIMMIDO": {"_id": "1561", "_type": "TALK_ROLE_NPC"},
+                    },
+                    {
+                        "GMOMCKNPBGE": 705160302,
+                        "HJJLLECCCPI": 2436563274,
+                        "DGGDDIMMIDO": {"_id": "", "_type": "TALK_ROLE_PLAYER"},
+                    },
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    monkeypatch.setattr(questImport, "DATA_PATH", str(tmp_path))
+    monkeypatch.setattr(questImport, "conn", connection)
+    monkeypatch.setattr(questImport, "_refresh_quest_hash_map_for_talk_ids", lambda *args, **kwargs: None)
+    questImport._set_talk_dialogue_link_presence(None)
+
+    assert questImport.importTalk("Npc/foo.json", refresh_hash_map=False) == 2
+    assert connection.execute(
+        "SELECT talkId, coopQuestId, dialogueId FROM talk_dialogue_link ORDER BY dialogueId"
+    ).fetchall() == [
+        (7051603, 0, 705160301),
+        (7051603, 0, 705160302),
+    ]
+    assert connection.execute(
+        "SELECT dialogueId, talkId, textHash, talkerId, talkerType FROM dialogue ORDER BY dialogueId"
+    ).fetchall() == [
+        (705160301, 7051603, 2329597154, 1561, "TALK_ROLE_NPC"),
+        (705160302, 7051603, 2436563274, "", "TALK_ROLE_PLAYER"),
+    ]
+
+    talk_file.write_text(
+        json.dumps({"KFCNJPJOJLA": 7051603, "MEGMIMEDODJ": "FREE", "IOEDPLCPFFB": []}),
+        encoding="utf-8",
+    )
+    assert questImport.importTalk("Npc/foo.json", refresh_hash_map=False) == 0
     assert connection.execute("SELECT * FROM talk_dialogue_link").fetchall() == []
     assert connection.execute("SELECT * FROM dialogue").fetchall() == []
 

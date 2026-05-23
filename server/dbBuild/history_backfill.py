@@ -75,6 +75,7 @@ from version_control import (
     get_or_create_version_id,
     should_update_version,
 )
+import entitySourceImport
 from versioning import (
     _extract_version_tag,
     _version_tag_to_sort_key,
@@ -242,6 +243,15 @@ READABLE_ONLY_PATHS = ["Readable"]
 SUBTITLE_ONLY_PATHS = ["Subtitle"]
 ANECDOTE_CONFIG_PATH = "ExcelBinOutput/AnecdoteExcelConfigData.json"
 MAIN_COOP_CONFIG_PATH = "ExcelBinOutput/MainCoopExcelConfigData.json"
+TEXTMAP_SIMILARITY_ENABLED_BASES = {
+    "TextMapCHS.json",
+    "TextMapJP.json",
+    "TextMapKR.json",
+}
+
+
+def _textmap_similarity_enabled_for_base(base_name: str) -> bool:
+    return str(base_name) in TEXTMAP_SIMILARITY_ENABLED_BASES
 
 
 @dataclass(frozen=True)
@@ -883,6 +893,7 @@ def _backfill_textmap_git_versions(
                     current_obj=current_obj,
                     target_hashes=[hash_value for _lang_id, hash_value, _content in unresolved_rows],
                     snapshots=snapshots,
+                    enable_similarity=_textmap_similarity_enabled_for_base(base_name),
                 )
                 for lang_id, hash_value, _content in unresolved_rows:
                     created_version, updated_version = version_plan.get(hash_value, (None, None))
@@ -1394,6 +1405,7 @@ def _compute_textmap_group_authoritative_versions(
     target_hashes: Collection[int],
     snapshots: tuple[VersionSnapshot, ...],
     progress_callback: Callable[..., None] | None = None,
+    enable_similarity: bool = True,
 ) -> dict[int, tuple[int | None, int | None]]:
     current_states = build_textmap_lineage_states(current_obj, allowed_hashes=target_hashes)
     if not current_states:
@@ -1429,6 +1441,7 @@ def _compute_textmap_group_authoritative_versions(
             active_states,
             previous_obj=None,
             previous_index=previous_snapshot_index,
+            enable_similarity=enable_similarity,
         )
         next_active_states: dict[int, TextMapLineageState] = {}
 
@@ -2596,11 +2609,11 @@ def _has_any_version_data(table_name: str) -> bool:
                 "SELECT 1 FROM quest_version WHERE updated_version_id IS NOT NULL LIMIT 1"
             ).fetchone()
             return quest_version_row is not None
-        if table_name == "npc":
+        if table_name in ("npc", "text_source_entity"):
             if "created_version_id" not in cols:
                 return False
             row = cursor.execute(
-                "SELECT 1 FROM npc WHERE created_version_id IS NOT NULL LIMIT 1"
+                f"SELECT 1 FROM {table_name} WHERE created_version_id IS NOT NULL LIMIT 1"
             ).fetchone()
             return row is not None
 
@@ -2950,7 +2963,7 @@ def backfill_versions_from_history(
 
     try:
         if not force and resolved_from is None and get_meta("db_history_versions_commit") == resolved_target:
-            version_tables = ("textMap", "readable", "subtitle", "quest", "npc")
+            version_tables = ("textMap", "readable", "subtitle", "quest", "npc", "text_source_entity")
             try:
                 if all(_has_any_version_data(t) for t in version_tables):
                     logger.info(
@@ -2972,6 +2985,7 @@ def backfill_versions_from_history(
         ("Readable", backfill_readable_versions_from_history),
         ("Subtitle", backfill_subtitle_versions_from_history),
         ("Npc", backfill_npc_versions_from_history),
+        ("EntitySource", backfill_catalog_entity_versions_from_history),
         ("Quest", backfill_quest_versions_from_history),
     ]
 
@@ -3005,7 +3019,7 @@ def backfill_versions_from_history(
             set_meta("db_history_versions_commit", resolved_target)
         set_meta(resume_target_key, "")
         set_meta(resume_done_key, "")
-        rebuild_version_catalog(["textMap", "quest", "subtitle", "readable", "npc"])
+        rebuild_version_catalog(["textMap", "quest", "subtitle", "readable", "npc", "text_source_entity"])
     except Exception as e:
         logger.error(f"Error finalizing metadata: {e}")
     logger.info("版本快照回放元数据已刷新，版本目录已重建")
@@ -3138,11 +3152,14 @@ def backfill_textmap_versions_from_history(
                         continue
 
                     total_group_rows = len(existing_map)
+                    enable_similarity = _textmap_similarity_enabled_for_base(base_name)
+                    similarity_label = "on" if enable_similarity else "off"
                     pbar.update(
                         0,
                         postfix=(
                             f"{group_idx}/{len(textmap_lang_map)} {base_name} "
-                            f"rows={total_group_rows:,} 准备回放"
+                            f"rows={total_group_rows:,} "
+                            f"similarity={similarity_label} 准备回放"
                         ),
                     )
 
@@ -3159,6 +3176,7 @@ def backfill_textmap_versions_from_history(
                             postfix=(
                                 f"{group_idx}/{len(textmap_lang_map)} {base_name} "
                                 f"rows={total_group_rows:,} "
+                                f"similarity={similarity_label} "
                                 f"snap={snapshot_idx}/{total_snapshots} {snapshot.version_tag} "
                                 f"active={active_count:,}->{continuing_count:,}"
                             ),
@@ -3171,6 +3189,7 @@ def backfill_textmap_versions_from_history(
                         target_hashes=existing_map.keys(),
                         snapshots=snapshots,
                         progress_callback=_report_group_snapshot_progress,
+                        enable_similarity=enable_similarity,
                     )
                     group_patch_rows = _collect_textmap_version_patch_rows(
                         lang_id=lang_id,
@@ -3191,13 +3210,15 @@ def backfill_textmap_versions_from_history(
                         1,
                         postfix=(
                             f"{base_name} rows={total_group_rows:,} "
+                            f"similarity={similarity_label} "
                             f"changed={group_changed:,} "
                             f"elapsed={group_elapsed:.1f}s"
                         ),
                     )
                     print(
                         f"[{group_idx}/{len(textmap_lang_map)}] {base_name}: "
-                        f"rows={total_group_rows:,} changed={group_changed:,} elapsed={group_elapsed:.1f}s"
+                        f"rows={total_group_rows:,} similarity={similarity_label} "
+                        f"changed={group_changed:,} elapsed={group_elapsed:.1f}s"
                     )
                     _clear_textmap_replay_runtime_buffers()
                     gc.collect()
@@ -3605,6 +3626,189 @@ def backfill_npc_versions_from_history(
         resume_done_key="db_history_versions_commit_npc_resume_done",
         process_entry_fn=process_npc_entry,
         pbar_desc="NPC backfill",
+        commit_batch_size=10,
+        refresh_version_catalog=refresh_version_catalog,
+    )
+
+
+_ENTITY_SNAPSHOT_FILE_KEYS = {
+    "MaterialExcelConfigData.json": "materials",
+    "HomeWorldFurnitureExcelConfigData.json": "furnitures",
+    "BeyondCostumeExcelConfigData.json": "costumes",
+    "BeyondCostumeSuitExcelConfigData.json": "suits",
+    "BeyondEmojiExcelConfigData.json": "emojis",
+    "BeyondPoseExcelConfigData.json": "poses",
+    "BeyondTransferEffectExcelConfigData.json": "effects",
+    "BeyondHallExcelConfigData.json": "halls",
+    "BeyondHallFacilityExcelConfigData.json": "hall_facilities",
+    "AvatarCostumeExcelConfigData.json": "avatar_costumes",
+    "WeaponExcelConfigData.json": "weapons",
+    "ReliquaryExcelConfigData.json": "reliquaries",
+    "AnimalCodexExcelConfigData.json": "codex",
+    "AnimalDescribeExcelConfigData.json": "animal_describes",
+    "MonsterDescribeExcelConfigData.json": "monster_describes",
+    "AchievementExcelConfigData.json": "achievements",
+    "ViewCodexExcelConfigData.json": "viewpoints",
+    "DungeonExcelConfigData.json": "dungeons",
+    "MaterialCodexExcelConfigData.json": "material_codex",
+    "LoadingTipsExcelConfigData.json": "loading_tips",
+}
+
+
+def _load_entity_snapshot_data(repo_path: str, commit_sha: str) -> dict[str, object]:
+    rows_by_key: dict[str, list[dict]] = {}
+    for file_name, key in _ENTITY_SNAPSHOT_FILE_KEYS.items():
+        rel_path = f"ExcelBinOutput/{file_name}"
+        rows = _git_show_json(repo_path, commit_sha, rel_path)
+        if not isinstance(rows, list):
+            rows = []
+        rows_by_key[key] = [row for row in rows if isinstance(row, dict)]
+
+    return {
+        "materials": rows_by_key.get("materials", []),
+        "furnitures": rows_by_key.get("furnitures", []),
+        "costumes": rows_by_key.get("costumes", []),
+        "suits": rows_by_key.get("suits", []),
+        "emojis": rows_by_key.get("emojis", []),
+        "poses": rows_by_key.get("poses", []),
+        "effects": rows_by_key.get("effects", []),
+        "halls": rows_by_key.get("halls", []),
+        "hall_facilities": rows_by_key.get("hall_facilities", []),
+        "avatar_costumes": rows_by_key.get("avatar_costumes", []),
+        "weapons": rows_by_key.get("weapons", []),
+        "reliquaries": rows_by_key.get("reliquaries", []),
+        "codex": rows_by_key.get("codex", []),
+        "achievements": rows_by_key.get("achievements", []),
+        "viewpoints": rows_by_key.get("viewpoints", []),
+        "dungeons": rows_by_key.get("dungeons", []),
+        "loading_tips": rows_by_key.get("loading_tips", []),
+        "describe_title_map": entitySourceImport._build_describe_title_map(
+            rows_by_key.get("animal_describes", []),
+            rows_by_key.get("monster_describes", []),
+        ),
+        "codex_desc_map": entitySourceImport._build_codex_desc_map(
+            rows_by_key.get("material_codex", [])
+        ),
+    }
+
+
+def _snapshot_entity_keys(repo_path: str, commit_sha: str | None) -> set[tuple[int, int]]:
+    if not commit_sha:
+        return set()
+    data = _load_entity_snapshot_data(repo_path, commit_sha)
+    overrides = entitySourceImport._load_overrides()[0]
+    return entitySourceImport.build_entity_key_set(data, overrides)
+
+
+def backfill_catalog_entity_versions_from_history(
+    *,
+    target_commit: str = "HEAD",
+    from_commit: str | None = None,
+    force: bool = False,
+    batch_size: int = DEFAULT_BATCH_SIZE,
+    verbose: bool = False,
+    refresh_version_catalog: bool = True,
+):
+    """回填图鉴实体在对应 Excel 配置中首次出现的版本。"""
+    entity_rel_paths = {
+        f"ExcelBinOutput/{file_name}"
+        for file_name in entitySourceImport._ENTITY_EXCEL_FILES
+    }
+    current_entity_keys: set[tuple[int, int]] | None = None
+    processed_commits: set[str] = set()
+
+    def _has_unresolved_entity_versions() -> bool:
+        cursor = conn.cursor()
+        try:
+            row = cursor.execute(
+                "SELECT 1 FROM text_source_entity WHERE created_version_id IS NULL LIMIT 1"
+            ).fetchone()
+            return row is not None
+        finally:
+            cursor.close()
+
+    def _get_current_entity_keys(cursor) -> set[tuple[int, int]]:
+        nonlocal current_entity_keys
+        if current_entity_keys is not None:
+            return current_entity_keys
+        rows = cursor.execute(
+            "SELECT DISTINCT source_type_code, entity_id FROM text_source_entity"
+        ).fetchall()
+        current_entity_keys = {
+            (int(row[0]), int(row[1]))
+            for row in rows
+            if row and row[0] is not None and row[1] is not None
+        }
+        return current_entity_keys
+
+    def process_entity_entry(cursor, repo_path, commit_sha, parent_sha, entry, version_id, version_label, batch_size):
+        rel_path = (entry.get("new_path") or entry.get("old_path") or "").replace("\\", "/")
+        if rel_path not in entity_rel_paths:
+            return
+        if commit_sha in processed_commits:
+            return
+        processed_commits.add(commit_sha)
+        if version_id is None:
+            return
+
+        valid_keys = _get_current_entity_keys(cursor)
+        if not valid_keys:
+            return
+
+        current_keys = _snapshot_entity_keys(repo_path, commit_sha)
+        previous_keys = _snapshot_entity_keys(repo_path, parent_sha)
+        candidate_keys = sorted((current_keys - previous_keys) & valid_keys)
+        if not candidate_keys:
+            return
+
+        update_rows = [
+            (int(version_id), source_type_code, entity_id, int(version_id))
+            for source_type_code, entity_id in candidate_keys
+        ]
+        executemany_batched(
+            cursor,
+            f"""
+            UPDATE text_source_entity
+            SET created_version_id=?
+            WHERE source_type_code=?
+              AND entity_id=?
+              AND (
+                created_version_id IS NULL
+                OR {_version_precedes_sql('?', 'created_version_id')}
+              )
+            """,
+            update_rows,
+            batch_size=batch_size,
+        )
+        entitySourceImport._sync_entity_created_versions(cursor)
+
+    schema_cursor = conn.cursor()
+    try:
+        entitySourceImport._ensure_entity_source_schema(schema_cursor)
+        conn.commit()
+    finally:
+        schema_cursor.close()
+    effective_from_commit = from_commit
+    if from_commit and _has_unresolved_entity_versions():
+        print(
+            "Entity source snapshot replay: unresolved created_version_id rows found; "
+            "replaying full entity history."
+        )
+        effective_from_commit = None
+    _backfill_versions_from_history(
+        target_commit=target_commit,
+        from_commit=effective_from_commit,
+        force=force,
+        batch_size=batch_size,
+        verbose=verbose,
+        include_paths=sorted(entity_rel_paths),
+        table_name="text_source_entity",
+        meta_commit_key="db_history_versions_commit_entity",
+        meta_title_key="db_history_versions_commit_title_entity",
+        resume_target_key="db_history_versions_commit_entity_resume_target",
+        resume_done_key="db_history_versions_commit_entity_resume_done",
+        process_entry_fn=process_entity_entry,
+        pbar_desc="Entity source backfill",
         commit_batch_size=10,
         refresh_version_catalog=refresh_version_catalog,
     )
@@ -4216,7 +4420,7 @@ def reset_history_version_marks(*, scope: str = "all"):
     normalized_scope = (scope or "all").strip().lower()
     scope_map: dict[str, tuple[tuple[str, ...], tuple[str, ...]]] = {
         "all": (
-            ("textMap", "readable", "subtitle", "quest", "npc"),
+            ("textMap", "readable", "subtitle", "quest", "npc", "text_source_entity"),
             (
                 "db_history_versions_commit",
                 "db_history_versions_commit_title",
@@ -4242,6 +4446,10 @@ def reset_history_version_marks(*, scope: str = "all"):
                 "db_history_versions_commit_title_npc",
                 "db_history_versions_commit_npc_resume_target",
                 "db_history_versions_commit_npc_resume_done",
+                "db_history_versions_commit_entity",
+                "db_history_versions_commit_title_entity",
+                "db_history_versions_commit_entity_resume_target",
+                "db_history_versions_commit_entity_resume_done",
             ),
         ),
         "textmap": (
@@ -4289,6 +4497,15 @@ def reset_history_version_marks(*, scope: str = "all"):
                 "db_history_versions_commit_npc_resume_done",
             ),
         ),
+        "entity": (
+            ("text_source_entity",),
+            (
+                "db_history_versions_commit_entity",
+                "db_history_versions_commit_title_entity",
+                "db_history_versions_commit_entity_resume_target",
+                "db_history_versions_commit_entity_resume_done",
+            ),
+        ),
     }
     if normalized_scope not in scope_map:
         raise ValueError(f"Unsupported reset scope: {scope}")
@@ -4300,7 +4517,7 @@ def reset_history_version_marks(*, scope: str = "all"):
             if table_name == 'quest':
                 cursor.execute(f"UPDATE {table_name} SET created_version_id=NULL, git_created_version_id=NULL")
                 cursor.execute("DELETE FROM quest_version")
-            elif table_name == 'npc':
+            elif table_name in ('npc', 'text_source_entity'):
                 cursor.execute(f"UPDATE {table_name} SET created_version_id=NULL")
             else:
                 cursor.execute(f"UPDATE {table_name} SET created_version_id=NULL, updated_version_id=NULL")

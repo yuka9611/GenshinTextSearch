@@ -304,7 +304,7 @@ def test_compute_textmap_group_authoritative_versions_recovers_created_version_f
     monkeypatch.setattr(
         history_backfill,
         "match_textmap_lineage_to_previous",
-        lambda current_states, previous_obj=None, previous_index=None: textmap_match_utils.match_textmap_lineage_to_previous(
+        lambda current_states, previous_obj=None, previous_index=None, **_kwargs: textmap_match_utils.match_textmap_lineage_to_previous(
             current_states,
             previous_obj,
             previous_index=previous_index,
@@ -325,6 +325,54 @@ def test_compute_textmap_group_authoritative_versions_recovers_created_version_f
     assert version_plan == {
         3642337407: (63, 65),
     }
+
+
+def test_textmap_similarity_strategy_is_enabled_only_for_cjk_textmaps():
+    enabled = ["TextMapCHS.json", "TextMapJP.json", "TextMapKR.json"]
+    disabled = ["TextMapCHT.json", "TextMapEN.json", "TextMapDE.json", "TextMapFR.json"]
+
+    assert all(history_backfill._textmap_similarity_enabled_for_base(base_name) for base_name in enabled)
+    assert not any(history_backfill._textmap_similarity_enabled_for_base(base_name) for base_name in disabled)
+
+
+def test_compute_textmap_group_authoritative_versions_passes_similarity_flag(monkeypatch):
+    history_backfill._clear_history_runtime_caches()
+    snapshots = (
+        history_backfill.VersionSnapshot("6.4", "6.4", 64, "sha64", 64),
+        history_backfill.VersionSnapshot("6.5", "6.5", 65, "sha65", 65),
+    )
+    seen_similarity_flags = []
+
+    monkeypatch.setattr(
+        history_backfill,
+        "_load_snapshot_textmap_group_index",
+        lambda *_args, **_kwargs: textmap_match_utils.build_textmap_content_index({"100": "old"}),
+    )
+
+    def fake_match(current_states, previous_obj, *, previous_index=None, enable_similarity=True, **_kwargs):
+        seen_similarity_flags.append(enable_similarity)
+        return {
+            current_hash: textmap_match_utils.TextMapLineageMatch(
+                current_hash=current_hash,
+                predecessor_hash=None,
+                predecessor_content=None,
+                match_kind=textmap_match_utils.TEXTMAP_MATCH_KIND_NEW,
+            )
+            for current_hash in current_states
+        }
+
+    monkeypatch.setattr(history_backfill, "match_textmap_lineage_to_previous", fake_match)
+
+    history_backfill._compute_textmap_group_authoritative_versions(
+        repo_path="/tmp/fake-repo",
+        base_name="TextMapEN.json",
+        current_obj={"200": "new"},
+        target_hashes=[200],
+        snapshots=snapshots,
+        enable_similarity=False,
+    )
+
+    assert seen_similarity_flags == [False]
 
 
 def test_load_textmap_version_cache_for_current_group_reads_requested_hashes():
@@ -493,6 +541,93 @@ def test_backfill_textmap_versions_from_history_replays_only_scoped_hashes(monke
             (100, 10, 10),
             (200, 65, 65),
             (300, 10, 10),
+        ]
+    finally:
+        conn.close()
+
+
+def test_backfill_textmap_versions_from_history_uses_language_similarity_strategy(monkeypatch):
+    conn = sqlite3.connect(":memory:")
+    try:
+        conn.execute(
+            """
+            CREATE TABLE textMap (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                hash INTEGER,
+                lang INTEGER,
+                created_version_id INTEGER,
+                updated_version_id INTEGER
+            )
+            """
+        )
+        conn.executemany(
+            "INSERT INTO textMap(hash, lang, created_version_id, updated_version_id) VALUES (?, ?, ?, ?)",
+            [
+                (100, 1, 10, 10),
+                (200, 4, 10, 10),
+            ],
+        )
+        conn.commit()
+
+        snapshot = history_backfill.VersionSnapshot("6.5", "6.5", 65, "sha65", 65)
+        seen = []
+
+        monkeypatch.setattr(history_backfill, "conn", conn)
+        monkeypatch.setattr(
+            history_backfill,
+            "_resolve_snapshot_replay_range",
+            lambda *_args, **_kwargs: SimpleNamespace(
+                target_snapshot=snapshot,
+                raw_target_commit="sha65",
+            ),
+        )
+        monkeypatch.setattr(
+            history_backfill,
+            "_get_version_snapshot_metadata",
+            lambda _repo_path: {"snapshots": (snapshot,)},
+        )
+        monkeypatch.setattr(
+            history_backfill,
+            "_get_textmap_lang_id_map",
+            lambda: {"TextMapCHS.json": 1, "TextMapEN.json": 4},
+        )
+        monkeypatch.setattr(
+            history_backfill,
+            "_load_worktree_textmap_group",
+            lambda _repo_path, base_name: {
+                "TextMapCHS.json": {"100": "a"},
+                "TextMapEN.json": {"200": "b"},
+            }.get(base_name),
+        )
+
+        def fake_compute(**kwargs):
+            seen.append((kwargs["base_name"], kwargs["enable_similarity"]))
+            return {hash_value: (65, 65) for hash_value in kwargs["target_hashes"]}
+
+        monkeypatch.setattr(
+            history_backfill,
+            "_compute_textmap_group_authoritative_versions",
+            fake_compute,
+        )
+        monkeypatch.setattr(history_backfill, "fast_import_pragmas", lambda *_args, **_kwargs: nullcontext())
+        monkeypatch.setattr(history_backfill, "_backfill_textmap_git_versions", lambda *_args, **_kwargs: 0)
+        monkeypatch.setattr(
+            history_backfill,
+            "analyze_textmap_version_exceptions",
+            lambda _cursor: {"created_after_updated": 0},
+        )
+        monkeypatch.setattr(history_backfill, "report_version_exceptions", lambda *_args, **_kwargs: None)
+        monkeypatch.setattr(history_backfill, "rebuild_version_catalog", lambda *_args, **_kwargs: {})
+
+        history_backfill.backfill_textmap_versions_from_history(
+            target_commit="sha65",
+            from_commit="sha64",
+            refresh_version_catalog=False,
+        )
+
+        assert seen == [
+            ("TextMapCHS.json", True),
+            ("TextMapEN.json", False),
         ]
     finally:
         conn.close()

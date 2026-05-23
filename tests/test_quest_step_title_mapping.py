@@ -12,6 +12,7 @@ if DBBUILD_DIR not in sys.path:
 
 import databaseHelper
 import questImport
+from quest_utils import extract_quest_id, extract_quest_talk_ids
 from quest_source_utils import build_step_title_hash_by_talk_id, get_step_talk_ids
 
 
@@ -90,6 +91,52 @@ def test_get_step_talk_ids_supports_finish_plot_and_skips_lua_notify():
     }
 
     assert get_step_talk_ids(step_obj) == [1000701, 1000702]
+
+
+def test_quest_utils_supports_6_6_quest_brief_schema():
+    obj = {
+        "GMOMCKNPBGE": 70065,
+        "ALLMCLJBBDM": 2595721583,
+        "JILHIMLENJK": 0,
+        "EOHJIHHMBAN": [7006501, 7006502],
+    }
+
+    assert extract_quest_id(obj) == 70065
+    assert extract_quest_talk_ids(obj) == [7006501, 7006502]
+
+
+def test_build_step_title_hash_by_talk_id_supports_6_6_quest_brief_schema():
+    obj = {
+        "IKECHKLEFFK": [
+            {
+                "CBOGAFHNHNI": 70065,
+                "LAFBPKMMBHD": 7006501,
+                "JDFENJAFCPF": 1374941308,
+                "PGELADPAKLA": [
+                    {
+                        "KFDJJBPNIHG": [7006519, 0],
+                        "MEGMIMEDODJ": "QUEST_CONTENT_COMPLETE_TALK",
+                    }
+                ],
+            },
+            {
+                "CBOGAFHNHNI": 70065,
+                "LAFBPKMMBHD": 7006502,
+                "JDFENJAFCPF": 2033502460,
+                "PGELADPAKLA": [
+                    {
+                        "KFDJJBPNIHG": [7006520, 0],
+                        "MEGMIMEDODJ": "QUEST_CONTENT_FINISH_PLOT",
+                    }
+                ],
+            },
+        ]
+    }
+
+    mapping = build_step_title_hash_by_talk_id(obj)
+
+    assert mapping[7006519] == 1374941308
+    assert mapping[7006520] == 2033502460
 
 
 def test_build_step_title_hash_by_talk_id_keeps_first_match_for_conflicts():

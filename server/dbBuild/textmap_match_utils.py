@@ -329,6 +329,7 @@ def match_textmap_lineage_to_previous(
     similarity_threshold: float = DEFAULT_TEXTMAP_SIMILARITY_THRESHOLD,
     similarity_margin: float = DEFAULT_TEXTMAP_SIMILARITY_MARGIN,
     max_similarity_pairs: int = DEFAULT_TEXTMAP_MAX_SIMILARITY_PAIRS,
+    enable_similarity: bool = True,
 ) -> dict[int, TextMapLineageMatch]:
     if not current_states:
         return {}
@@ -417,7 +418,7 @@ def match_textmap_lineage_to_previous(
     remaining_current_hashes = [
         current_hash for current_hash in remaining_current_hashes if current_hash not in matched
     ]
-    if remaining_current_hashes:
+    if enable_similarity and remaining_current_hashes:
         if len(remaining_current_hashes) * len(previous_hash_to_content) <= max_similarity_pairs:
             previous_items_iter = sorted(previous_hash_to_content.items())
         else:
@@ -429,7 +430,7 @@ def match_textmap_lineage_to_previous(
         ]
     else:
         remaining_previous_rows = []
-    if remaining_current_hashes:
+    if enable_similarity and remaining_current_hashes:
         candidate_limit_per_current = min(
             DEFAULT_TEXTMAP_MAX_SIMILARITY_CANDIDATES_PER_CURRENT,
             max(

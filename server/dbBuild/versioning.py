@@ -19,7 +19,7 @@ _FTS_DETAIL_MODE = "none"
 _FTS_COLUMNSIZE = 0
 VERSION_CATALOG_TABLE = "version_catalog"
 VERSION_DIM_TABLE = "version_dim"
-VERSION_SOURCE_TABLES: tuple[str, ...] = ("textMap", "quest", "subtitle", "readable", "npc")
+VERSION_SOURCE_TABLES: tuple[str, ...] = ("textMap", "quest", "subtitle", "readable", "npc", "text_source_entity")
 _VERSION_TAG_RE = re.compile(r"(\d+)\.(\d+)(?:\.\d+)?")
 
 
@@ -924,6 +924,7 @@ def ensure_version_schema():
     _ensure_column("quest", "created_version_id", "INTEGER")
     _ensure_column("quest", "git_created_version_id", "INTEGER")
     _ensure_column("npc", "created_version_id", "INTEGER")
+    _ensure_column("text_source_entity", "created_version_id", "INTEGER")
     _ensure_column("quest", "source_type", "TEXT")
     _ensure_column("quest", "source_code_raw", "TEXT")
     _ensure_column("questTalk", "coopQuestId", "INTEGER NOT NULL DEFAULT 0")
@@ -977,6 +978,8 @@ def ensure_version_schema():
     _ensure_index_for_table("quest", "CREATE INDEX IF NOT EXISTS quest_created_version_id_index ON quest(created_version_id)")
     _ensure_index_for_table("quest", "CREATE INDEX IF NOT EXISTS quest_git_created_version_id_index ON quest(git_created_version_id)")
     _ensure_index_for_table("npc", "CREATE INDEX IF NOT EXISTS npc_created_version_id_index ON npc(created_version_id)")
+    _ensure_index_for_table("text_source_entity", "CREATE INDEX IF NOT EXISTS text_source_entity_created_version_id_index ON text_source_entity(created_version_id)")
+    _ensure_index_for_table("text_source_entity", "CREATE INDEX IF NOT EXISTS text_source_entity_entity_version_index ON text_source_entity(source_type_code, entity_id, created_version_id)")
     _ensure_index_for_table("quest", "CREATE INDEX IF NOT EXISTS quest_source_type_index ON quest(source_type)")
     _ensure_index_for_table("questTalk", "CREATE INDEX IF NOT EXISTS questTalk_talkId_coopQuestId_index ON questTalk(talkId, coopQuestId)")
     # 不再为quest表的updated_version_id列创建索引，因为它现在存储在quest_version表中

@@ -1019,6 +1019,7 @@ if __name__ == "__main__":
                         "history_backfill_textmap",
                         "history_backfill_readable",
                         "history_backfill_subtitle",
+                        "history_backfill_entity_sources",
                         "history_backfill_quest"
                     ]
                     history_skip_decisions = ask_all_stages_skip(history_stages)
@@ -1058,6 +1059,17 @@ if __name__ == "__main__":
                                 history_stage_timer,
                                 "history_backfill_subtitle",
                                 history_backfill.backfill_subtitle_versions_from_history,
+                                target_commit=head_commit,
+                                force=args.force,
+                                verbose=args.verbose,
+                                skip_asking=True
+                            )
+
+                        if not history_skip_decisions["history_backfill_entity_sources"]:
+                            _run_stage(
+                                history_stage_timer,
+                                "history_backfill_entity_sources",
+                                history_backfill.backfill_catalog_entity_versions_from_history,
                                 target_commit=head_commit,
                                 force=args.force,
                                 verbose=args.verbose,

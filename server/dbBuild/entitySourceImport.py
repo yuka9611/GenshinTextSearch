@@ -6,12 +6,18 @@ from typing import Any
 
 from DBConfig import DATA_PATH, conn
 from import_utils import DEFAULT_BATCH_SIZE, executemany_batched, load_json_file
+from version_control import (
+    _build_version_preference_case_sql,
+    ensure_version_schema,
+    get_current_version,
+    get_or_create_version_id,
+)
 
 import entity_constants
 from entity_constants import (
     # 大分类
     SOURCE_TYPE_ITEM, SOURCE_TYPE_FOOD, SOURCE_TYPE_FURNISHING,
-    SOURCE_TYPE_COSTUME, SOURCE_TYPE_WEAPON, SOURCE_TYPE_RELIQUARY,
+    SOURCE_TYPE_COSTUME, SOURCE_TYPE_SUIT, SOURCE_TYPE_WEAPON, SOURCE_TYPE_RELIQUARY,
     SOURCE_TYPE_MONSTER, SOURCE_TYPE_CREATURE,
     SOURCE_TYPE_DRESSING,
     SOURCE_TYPE_ACHIEVEMENT, SOURCE_TYPE_VIEWPOINT, SOURCE_TYPE_DUNGEON, SOURCE_TYPE_LOADING_TIP,
@@ -451,6 +457,20 @@ def _build_rows_iter(data: dict[str, Any], overrides: dict[str, tuple[int, int]]
     )
 
 
+def build_entity_key_set(data: dict[str, Any], overrides: dict[str, tuple[int, int]] | None = None) -> set[tuple[int, int]]:
+    """Return the entity identity set represented by loaded entity Excel data."""
+    keys: set[tuple[int, int]] = set()
+    for row in _build_rows_iter(data, overrides):
+        if len(row) < 3:
+            continue
+        source_type_code = row[1]
+        entity_id = row[2]
+        if source_type_code is None or entity_id is None:
+            continue
+        keys.add((int(source_type_code), int(entity_id)))
+    return keys
+
+
 def _as_nonzero_int(value) -> int | None:
     if isinstance(value, int) and value != 0:
         return value
@@ -465,6 +485,7 @@ def _load_rows(path: str) -> list[dict[str, Any]]:
 
 
 def _ensure_entity_source_schema(cursor):
+    ensure_version_schema()
     cursor.execute(
         """
         CREATE TABLE IF NOT EXISTS text_source_entity (
@@ -474,6 +495,7 @@ def _ensure_entity_source_schema(cursor):
             title_hash INTEGER NOT NULL,
             extra INTEGER NOT NULL DEFAULT 0,
             sub_category INTEGER NOT NULL DEFAULT 0,
+            created_version_id INTEGER,
             PRIMARY KEY (text_hash, source_type_code, entity_id)
         )
         """
@@ -489,6 +511,48 @@ def _ensure_entity_source_schema(cursor):
         cursor.execute("ALTER TABLE text_source_entity ADD COLUMN sub_category INTEGER NOT NULL DEFAULT 0")
     except Exception:
         pass
+    try:
+        cursor.execute("ALTER TABLE text_source_entity ADD COLUMN created_version_id INTEGER")
+    except Exception:
+        pass
+    cursor.execute(
+        "CREATE INDEX IF NOT EXISTS text_source_entity_created_version_id_index "
+        "ON text_source_entity(created_version_id)"
+    )
+    cursor.execute(
+        "CREATE INDEX IF NOT EXISTS text_source_entity_entity_version_index "
+        "ON text_source_entity(source_type_code, entity_id, created_version_id)"
+    )
+
+
+def _sync_entity_created_versions(cursor):
+    cursor.execute(
+        f"""
+        UPDATE text_source_entity
+        SET created_version_id = (
+            SELECT chosen.created_version_id
+            FROM text_source_entity chosen
+            LEFT JOIN version_dim vd ON vd.id = chosen.created_version_id
+            WHERE chosen.source_type_code = text_source_entity.source_type_code
+              AND chosen.entity_id = text_source_entity.entity_id
+              AND chosen.created_version_id IS NOT NULL
+            ORDER BY COALESCE(vd.version_sort_key, 2147483647), chosen.created_version_id
+            LIMIT 1
+        )
+        WHERE EXISTS (
+            SELECT 1
+            FROM text_source_entity chosen
+            WHERE chosen.source_type_code = text_source_entity.source_type_code
+              AND chosen.entity_id = text_source_entity.entity_id
+              AND chosen.created_version_id IS NOT NULL
+        )
+        """
+    )
+
+
+def _current_entity_version_id() -> int | None:
+    version = get_current_version()
+    return get_or_create_version_id(version)
 
 
 def _classify_material(row: dict[str, Any], overrides: dict[str, tuple[int, int]] | None = None) -> tuple[int, int]:
@@ -566,7 +630,7 @@ def _gender_code(body_types: Any) -> int:
 
 
 def _get_body_types(row: dict[str, Any]) -> Any:
-    for key in ("BKBPADANEOC", "IAHOEKGIPPJ"):
+    for key in ("BKBPADANEOC", "IAHOEKGIPPJ", "AFAENJLHMOD"):
         if key in row:
             return row.get(key)
     return None
@@ -624,7 +688,7 @@ def _iter_suit_mappings(rows: list[dict[str, Any]]):
         gender = _gender_code(_get_body_types(row))
         yield (
             text_hash,
-            SOURCE_TYPE_COSTUME,
+            SOURCE_TYPE_SUIT,
             suit_id,
             title_hash,
             _pack_extra(FIELD_DESC, gender),
@@ -684,19 +748,19 @@ def _iter_effect_mappings(rows: list[dict[str, Any]]):
 
 
 def _get_hall_style_id(row: dict[str, Any]) -> int | None:
-    return _extract_first_int(row, "COGKFPLDLLL", "DCOBMNILGJL")
+    return _extract_first_int(row, "COGKFPLDLLL", "DCOBMNILGJL", "OCHDBIAAHIO")
 
 
 def _get_hall_name_text_hash(row: dict[str, Any]) -> int | None:
-    return _extract_first_int(row, "LDCAAIEKMOE", "KMMKMJLOFGC")
+    return _extract_first_int(row, "LDCAAIEKMOE", "KMMKMJLOFGC", "CAMAHAEKAIH")
 
 
 def _get_hall_desc_text_hash(row: dict[str, Any]) -> int | None:
-    return _extract_first_int(row, "BPKNEMEJEPF", "DKBHBHOOGAP")
+    return _extract_first_int(row, "BPKNEMEJEPF", "DKBHBHOOGAP", "PEODHMPDKNF")
 
 
 def _is_public_hall(row: dict[str, Any]) -> bool:
-    hall_type = _extract_first_str(row, "PEMNJBEBBOG", "BMIILBDKBIO")
+    hall_type = _extract_first_str(row, "PEMNJBEBBOG", "BMIILBDKBIO", "KMDBAGPDKNG")
     return hall_type == "BEYOND_HALL_PUBLIC"
 
 
@@ -705,6 +769,7 @@ def _get_hall_facility_style_id(row: dict[str, Any]) -> int | None:
         row,
         "OJGEAGGJALA", "DGBOKBNOJKE", "LGGBFCPPBBJ",
         "OEFKFFGKKKP", "DOPFMOKHIIC", "JPGMJHBCOGK",
+        "FEIJJDIAHFJ", "KJJPGPAKCIF",
     )
 
 
@@ -892,6 +957,7 @@ def importEntitySources(*, commit: bool = True, batch_size: int = DEFAULT_BATCH_
     try:
         _ensure_entity_source_schema(cursor)
         cursor.execute("DELETE FROM text_source_entity")
+        version_id = _current_entity_version_id()
 
         excel_root = os.path.join(DATA_PATH, "ExcelBinOutput")
         data = _load_all_entity_data(excel_root)
@@ -900,14 +966,21 @@ def importEntitySources(*, commit: bool = True, batch_size: int = DEFAULT_BATCH_
         overrides = check_and_classify_interactive(data["materials"], interactive=interactive)
 
         sql = (
-            "INSERT INTO text_source_entity(text_hash, source_type_code, entity_id, title_hash, extra, sub_category) "
-            "VALUES (?,?,?,?,?,?) "
+            "INSERT INTO text_source_entity(text_hash, source_type_code, entity_id, title_hash, extra, sub_category, created_version_id) "
+            "VALUES (?,?,?,?,?,?,?) "
             "ON CONFLICT(text_hash, source_type_code, entity_id) DO UPDATE SET "
-            "title_hash=excluded.title_hash, extra=excluded.extra, sub_category=excluded.sub_category"
+            "title_hash=excluded.title_hash, extra=excluded.extra, sub_category=excluded.sub_category, "
+            "created_version_id="
+            + _build_version_preference_case_sql(
+                existing_expr="text_source_entity.created_version_id",
+                candidate_expr="excluded.created_version_id",
+                is_created=True,
+            )
         )
 
-        rows_iter = _build_rows_iter(data, overrides)
+        rows_iter = ((*row, version_id) for row in _build_rows_iter(data, overrides))
         executemany_batched(cursor, sql, rows_iter, batch_size=batch_size)
+        _sync_entity_created_versions(cursor)
     finally:
         cursor.close()
     if commit:
@@ -918,6 +991,7 @@ def insertEntitySourcesDelta(*, commit: bool = True, batch_size: int = DEFAULT_B
     cursor = conn.cursor()
     try:
         _ensure_entity_source_schema(cursor)
+        version_id = _current_entity_version_id()
 
         excel_root = os.path.join(DATA_PATH, "ExcelBinOutput")
         data = _load_all_entity_data(excel_root)
@@ -926,13 +1000,14 @@ def insertEntitySourcesDelta(*, commit: bool = True, batch_size: int = DEFAULT_B
         overrides = check_and_classify_interactive(data["materials"], interactive=interactive)
 
         sql = (
-            "INSERT INTO text_source_entity(text_hash, source_type_code, entity_id, title_hash, extra, sub_category) "
-            "VALUES (?,?,?,?,?,?) "
+            "INSERT INTO text_source_entity(text_hash, source_type_code, entity_id, title_hash, extra, sub_category, created_version_id) "
+            "VALUES (?,?,?,?,?,?,?) "
             "ON CONFLICT(text_hash, source_type_code, entity_id) DO NOTHING"
         )
 
-        rows_iter = _build_rows_iter(data, overrides)
+        rows_iter = ((*row, version_id) for row in _build_rows_iter(data, overrides))
         executemany_batched(cursor, sql, rows_iter, batch_size=batch_size)
+        _sync_entity_created_versions(cursor)
     finally:
         cursor.close()
     if commit:

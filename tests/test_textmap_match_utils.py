@@ -11,6 +11,8 @@ if DBBUILD_DIR not in sys.path:
 from textmap_match_utils import (
     TEXTMAP_MATCH_KIND_CROSS_HASH_SIMILAR,
     TEXTMAP_MATCH_KIND_NEW,
+    TEXTMAP_MATCH_KIND_SAME_CONTENT,
+    TEXTMAP_MATCH_KIND_SAME_HASH_CHANGED,
     TextMapLineageState,
     allocate_textmap_current_matches,
     build_textmap_content_index,
@@ -37,6 +39,58 @@ def test_match_textmap_lineage_to_previous_keeps_similar_cross_hash_matching_whe
 
     assert matches[200].match_kind == TEXTMAP_MATCH_KIND_CROSS_HASH_SIMILAR
     assert matches[200].predecessor_hash == 100
+
+
+def test_match_textmap_lineage_to_previous_can_skip_similar_cross_hash_matching():
+    previous_obj = {
+        100: "I wanted to test it, so I took a related order.",
+    }
+
+    matches = match_textmap_lineage_to_previous(
+        {
+            200: TextMapLineageState(
+                snapshot_hash=200,
+                content="I wanted to test it out, so I took a related order.",
+            )
+        },
+        previous_obj,
+        enable_similarity=False,
+    )
+
+    assert matches[200].match_kind == TEXTMAP_MATCH_KIND_NEW
+    assert matches[200].predecessor_hash is None
+
+
+def test_match_textmap_lineage_to_previous_keeps_deterministic_matches_when_similarity_is_disabled():
+    same_hash_matches = match_textmap_lineage_to_previous(
+        {
+            100: TextMapLineageState(
+                snapshot_hash=100,
+                content="new text",
+            )
+        },
+        {
+            100: "old text",
+        },
+        enable_similarity=False,
+    )
+    same_content_matches = match_textmap_lineage_to_previous(
+        {
+            200: TextMapLineageState(
+                snapshot_hash=200,
+                content="same text",
+            )
+        },
+        {
+            100: "same text",
+        },
+        enable_similarity=False,
+    )
+
+    assert same_hash_matches[100].match_kind == TEXTMAP_MATCH_KIND_SAME_HASH_CHANGED
+    assert same_hash_matches[100].predecessor_hash == 100
+    assert same_content_matches[200].match_kind == TEXTMAP_MATCH_KIND_SAME_CONTENT
+    assert same_content_matches[200].predecessor_hash == 100
 
 
 def test_allocate_textmap_current_matches_keeps_same_hash_for_short_generic_text():

@@ -2275,6 +2275,14 @@ def importTalk(
         talkRoleTypeKey = "_type"
         talkRoleIdKey = "_id"
         talkContentTextMapHashKey = "AIGJBMCHCJG"
+    elif "KFCNJPJOJLA" in obj and "IOEDPLCPFFB" in obj:
+        talkIdKey = "KFCNJPJOJLA"
+        dialogueListKey = "IOEDPLCPFFB"
+        dialogueIdKey = "GMOMCKNPBGE"
+        talkRoleKey = "DGGDDIMMIDO"
+        talkRoleTypeKey = "_type"
+        talkRoleIdKey = "_id"
+        talkContentTextMapHashKey = "HJJLLECCCPI"
     else:
         if skip_collector is not None:
             skip_collector.append(fileName)
@@ -2406,6 +2414,9 @@ def _is_non_dialog_talk_obj(obj: object) -> bool:
             or "npcId" in obj
         ):
             return True
+
+    if keys == {"ANCLPHMACIF", "CIAOBJHFJJM"} and isinstance(obj.get("CIAOBJHFJJM"), list):
+        return True
 
     if "DLPKMDPABFM" in obj and "LBPGKDMGFBN" in obj:
         if not isinstance(obj.get("LOJEOMAPIIM"), list):
