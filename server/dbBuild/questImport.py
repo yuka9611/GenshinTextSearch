@@ -1633,6 +1633,14 @@ def importAllAnecdotes(
                     new_quest_ids.add(quest_id)
                 pbar.update()
 
+        if sync_delete and not imported_quest_ids and rows:
+            raise RuntimeError(
+                f"Anecdote import: all {len(rows)} rows were skipped "
+                f"(skipped={len(skipped_rows)}, skipped_samples={skipped_rows[:10]}); "
+                f"aborting to avoid deleting all existing ANECDOTE quests. "
+                f"Check field mapping in extract_anecdote_core_fields / extract_anecdote_payload."
+            )
+
         if sync_delete:
             if imported_quest_ids:
                 placeholders = ",".join(["?"] * len(imported_quest_ids))
@@ -1737,6 +1745,14 @@ def importAllAnecdotesForDiff(
                 if is_new_quest and quest_id is not None:
                     new_quest_ids.add(quest_id)
                 pbar.update()
+
+        if sync_delete and not imported_quest_ids and rows:
+            raise RuntimeError(
+                f"Anecdote diff import: all {len(rows)} rows were skipped "
+                f"(skipped={len(skipped_rows)}, skipped_samples={skipped_rows[:10]}); "
+                f"aborting to avoid deleting all existing ANECDOTE quests. "
+                f"Check field mapping in extract_anecdote_core_fields / extract_anecdote_payload."
+            )
 
         if sync_delete:
             if imported_quest_ids:

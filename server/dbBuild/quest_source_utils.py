@@ -50,22 +50,29 @@ def extract_anecdote_core_fields(row: dict) -> dict | None:
     if not isinstance(row, dict):
         return None
 
-    anecdote_id = _extract_first_positive_int(row, "IDEHFGDCPDL")
+    anecdote_id = _extract_first_positive_int(row, "IDEHFGDCPDL", "GBDGFHNLDFF", "DBGCFNMLHAJ")
     if anecdote_id is None:
         return None
 
-    title_text_map_hash = _extract_first_positive_int(row, "IMFFKDPOGGK")
-    desc_text_map_hash = _extract_first_positive_int(row, "EBDFJDKDDFJ")
+    title_text_map_hash = _extract_first_positive_int(row, "IBGEKMBPNNO", "titleTextMapHash")
+    desc_text_map_hash = _extract_first_positive_int(row, "EBDFJDKDDFJ", "descTextMapHash")
     long_desc_text_map_hash = None
 
-    group_ids = normalize_unique_ints(row.get("BHAGNOEMPHL"), positive_only=True)
+    story_quest_ids = normalize_unique_ints(row.get("MCGGPAGBGKO"), positive_only=True)
+    if not story_quest_ids:
+        story_quest_ids = normalize_unique_ints(row.get("BBOMCGBIOFM"), positive_only=True)
+    if not story_quest_ids:
+        story_quest_ids = normalize_unique_ints(row.get("LIIPHELCPKJ"), positive_only=True)
+
+    legacy_group_ids = normalize_unique_ints(row.get("BHAGNOEMPHL"), positive_only=True)
 
     return {
         "quest_id": anecdote_id,
         "title_text_map_hash": title_text_map_hash,
         "desc_text_map_hash": desc_text_map_hash,
         "long_desc_text_map_hash": long_desc_text_map_hash,
-        "group_ids": group_ids,
+        "story_quest_ids": story_quest_ids,
+        "legacy_group_ids": legacy_group_ids,
     }
 
 
@@ -497,7 +504,8 @@ def extract_anecdote_payload(
     title_text_map_hash = core_fields["title_text_map_hash"]
     desc_text_map_hash = core_fields["desc_text_map_hash"]
     long_desc_text_map_hash = core_fields["long_desc_text_map_hash"]
-    group_ids = core_fields["group_ids"]
+    story_quest_ids = core_fields.get("story_quest_ids") or []
+    legacy_group_ids = core_fields.get("legacy_group_ids") or []
     if talk_excel_map is None:
         talk_excel_map = load_storyboard_talk_excel_by_quest_id()
     if storyboard_file_by_talk_id is None:
@@ -509,8 +517,13 @@ def extract_anecdote_payload(
     group_statuses: list[str] = []
     storyboard_group_root = os.path.join(DATA_PATH, "BinOutput", "Talk", "StoryboardGroup")
 
-    for group_id in group_ids:
-        latest_talk_ids = talk_excel_map.get(group_id) or []
+    def _append_mapping_miss(ref_id: int) -> None:
+        ref = f"{anecdote_id}:{ref_id}"
+        if ref not in mapping_miss_refs:
+            mapping_miss_refs.append(ref)
+
+    def _collect_talk_ids(ref_id: int) -> None:
+        latest_talk_ids = talk_excel_map.get(ref_id) or []
         if latest_talk_ids:
             importable_talk_ids = [
                 talk_id
@@ -526,35 +539,42 @@ def extract_anecdote_payload(
                     talk_ids.append(talk_id)
             else:
                 group_statuses.append(ANECDOTE_SOURCE_STATUS_MAPPING_MISS)
-                mapping_miss_refs.append(f"{anecdote_id}:{group_id}")
-            continue
+                _append_mapping_miss(ref_id)
+            return
 
-        group_path = os.path.join(storyboard_group_root, f"{group_id}.json")
+        group_path = os.path.join(storyboard_group_root, f"{ref_id}.json")
         if not os.path.isfile(group_path):
             group_statuses.append(ANECDOTE_SOURCE_STATUS_MAPPING_MISS)
-            mapping_miss_refs.append(f"{anecdote_id}:{group_id}")
-            continue
+            _append_mapping_miss(ref_id)
+            return
         try:
             group_obj = load_json_file(group_path)
         except Exception:
             group_statuses.append(ANECDOTE_SOURCE_STATUS_MAPPING_MISS)
-            mapping_miss_refs.append(f"{anecdote_id}:{group_id}")
-            continue
+            _append_mapping_miss(ref_id)
+            return
         if not isinstance(group_obj, dict):
             group_statuses.append(ANECDOTE_SOURCE_STATUS_MAPPING_MISS)
-            mapping_miss_refs.append(f"{anecdote_id}:{group_id}")
-            continue
+            _append_mapping_miss(ref_id)
+            return
         group_talk_ids = extract_storyboard_group_talk_ids(group_obj)
         if not group_talk_ids:
             group_statuses.append(ANECDOTE_SOURCE_STATUS_MAPPING_MISS)
-            mapping_miss_refs.append(f"{anecdote_id}:{group_id}")
-            continue
+            _append_mapping_miss(ref_id)
+            return
         group_statuses.append(ANECDOTE_SOURCE_STATUS_IMPORTABLE)
         for talk_id in group_talk_ids:
             if talk_id in seen_talk_ids:
                 continue
             seen_talk_ids.add(talk_id)
             talk_ids.append(talk_id)
+
+    for group_id in story_quest_ids:
+        _collect_talk_ids(group_id)
+
+    if ANECDOTE_SOURCE_STATUS_IMPORTABLE not in group_statuses:
+        for group_id in legacy_group_ids:
+            _collect_talk_ids(group_id)
 
     source_status = ANECDOTE_SOURCE_STATUS_MAPPING_MISS
     if ANECDOTE_SOURCE_STATUS_IMPORTABLE in group_statuses:

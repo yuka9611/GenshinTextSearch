@@ -548,6 +548,74 @@ def test_load_storyboard_file_by_talk_id_indexes_hashed_storyboard_files(monkeyp
     }
 
 
+def test_extract_anecdote_core_fields_supports_current_anecdote_keys():
+    core_fields = quest_source_utils.extract_anecdote_core_fields(
+        {
+            "IDEHFGDCPDL": 106401,
+            "IBGEKMBPNNO": 2416311523,
+            "EBDFJDKDDFJ": 3876969701,
+            "MCGGPAGBGKO": [510640101],
+            "BHAGNOEMPHL": [9878, 9864, 7010],
+        }
+    )
+
+    assert core_fields == {
+        "quest_id": 106401,
+        "title_text_map_hash": 2416311523,
+        "desc_text_map_hash": 3876969701,
+        "long_desc_text_map_hash": None,
+        "story_quest_ids": [510640101],
+        "legacy_group_ids": [9878, 9864, 7010],
+    }
+
+
+def test_extract_anecdote_payload_prefers_story_quest_ids_for_current_data(monkeypatch, tmp_path):
+    excel_dir = tmp_path / "ExcelBinOutput"
+    excel_dir.mkdir(parents=True)
+    (excel_dir / "TalkExcelConfigData_1.json").write_text(
+        json.dumps(
+            [
+                {
+                    "questId": 510640101,
+                    "id": 6987801,
+                    "initDialog": 698780101,
+                    "performCfg": "QuestDialogue/Anecdote/Varka_9878/Q6987801",
+                    "loadType": "TALK_STORYBOARD",
+                }
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    storyboard_dir = tmp_path / "BinOutput" / "Talk" / "Storyboard"
+    storyboard_dir.mkdir(parents=True)
+    (storyboard_dir / "hashed.json").write_text(
+        json.dumps({"AADKDKPMGNO": 6987801, "GALIDJOEHOC": []}),
+        encoding="utf-8",
+    )
+
+    monkeypatch.setattr(quest_source_utils, "DATA_PATH", str(tmp_path))
+    quest_source_utils.reset_quest_source_caches()
+
+    payload = quest_source_utils.extract_anecdote_payload(
+        {
+            "IDEHFGDCPDL": 106401,
+            "IBGEKMBPNNO": 2416311523,
+            "EBDFJDKDDFJ": 3876969701,
+            "MCGGPAGBGKO": [510640101],
+            "BHAGNOEMPHL": [9878, 9864, 7010],
+        }
+    )
+
+    assert payload is not None
+    assert payload["quest_id"] == 106401
+    assert payload["title_text_map_hash"] == 2416311523
+    assert payload["desc_text_map_hash"] == 3876969701
+    assert payload["talk_rows"] == [(6987801, None, 0)]
+    assert payload["source_status"] == quest_source_utils.ANECDOTE_SOURCE_STATUS_IMPORTABLE
+    assert payload["mapping_miss_refs"] == []
+
+
 def test_extract_anecdote_payload_uses_hashed_storyboard_file_for_107601(monkeypatch, tmp_path):
     excel_dir = tmp_path / "ExcelBinOutput"
     excel_dir.mkdir(parents=True)
