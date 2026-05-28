@@ -19,14 +19,14 @@ from entity_constants import (
     SOURCE_TYPE_ITEM, SOURCE_TYPE_FOOD, SOURCE_TYPE_FURNISHING,
     SOURCE_TYPE_COSTUME, SOURCE_TYPE_SUIT, SOURCE_TYPE_WEAPON, SOURCE_TYPE_RELIQUARY,
     SOURCE_TYPE_MONSTER, SOURCE_TYPE_CREATURE,
-    SOURCE_TYPE_DRESSING,
+    SOURCE_TYPE_DRESSING, SOURCE_TYPE_GCG,
     SOURCE_TYPE_ACHIEVEMENT, SOURCE_TYPE_VIEWPOINT, SOURCE_TYPE_DUNGEON, SOURCE_TYPE_LOADING_TIP,
     SOURCE_TYPE_QIANXING_EMOJI, SOURCE_TYPE_QIANXING_POSE, SOURCE_TYPE_QIANXING_EFFECT,
     SOURCE_TYPE_QIANXING_HALL,
     # 字段
-    FIELD_DESC, FIELD_EFFECT_DESC, FIELD_SPECIAL_DESC, FIELD_TYPE_DESC, FIELD_TITLE, FIELD_CODEX_DESC,
+    FIELD_DESC, FIELD_EFFECT_DESC, FIELD_SPECIAL_DESC, FIELD_TYPE_DESC, FIELD_TITLE, FIELD_CODEX_DESC, FIELD_SKILL_DESC,
     # 二级分类
-    SUB_NONE,
+    SUB_NONE, SUB_CARD,
     SUB_COSTUME_DRESS, SUB_QIANXING_PARADOX, SUB_QIANXING_SUIT,
     SUB_QIANXING_EMOJI, SUB_QIANXING_POSE, SUB_QIANXING_EFFECT, SUB_QIANXING_HALL,
     # 映射与标签
@@ -362,6 +362,9 @@ _ENTITY_EXCEL_FILES = [
     "DungeonExcelConfigData.json",
     "MaterialCodexExcelConfigData.json",
     "LoadingTipsExcelConfigData.json",
+    "GCGCardExcelConfigData.json",
+    "GCGCharExcelConfigData.json",
+    "GCGSkillExcelConfigData.json",
 ]
 
 
@@ -387,6 +390,9 @@ def _load_all_entity_data(excel_root: str) -> dict[str, Any]:
     dungeons = _load_rows(os.path.join(excel_root, "DungeonExcelConfigData.json"))
     material_codex = _load_rows(os.path.join(excel_root, "MaterialCodexExcelConfigData.json"))
     loading_tips = _load_rows(os.path.join(excel_root, "LoadingTipsExcelConfigData.json"))
+    gcg_cards = _load_rows(os.path.join(excel_root, "GCGCardExcelConfigData.json"))
+    gcg_chars = _load_rows(os.path.join(excel_root, "GCGCharExcelConfigData.json"))
+    gcg_skills = _load_rows(os.path.join(excel_root, "GCGSkillExcelConfigData.json"))
 
     describe_title_map = _build_describe_title_map(animal_describes, monster_describes)
     codex_desc_map = _build_codex_desc_map(material_codex)
@@ -409,6 +415,9 @@ def _load_all_entity_data(excel_root: str) -> dict[str, Any]:
         "viewpoints": viewpoints,
         "dungeons": dungeons,
         "loading_tips": loading_tips,
+        "gcg_cards": gcg_cards,
+        "gcg_chars": gcg_chars,
+        "gcg_skills": gcg_skills,
         "describe_title_map": describe_title_map,
         "codex_desc_map": codex_desc_map,
     }
@@ -423,7 +432,8 @@ def _print_entity_source_summary(data: dict[str, Any]):
         ("avatar_costumes", "角色装扮"),
         ("weapons", "武器"), ("reliquaries", "圣遗物"), ("codex", "图鉴"),
         ("achievements", "成就"), ("viewpoints", "观景点"), ("dungeons", "秘境"),
-        ("loading_tips", "过场提示"),
+        ("loading_tips", "过场提示"), ("gcg_cards", "七圣召唤卡牌"),
+        ("gcg_chars", "七圣召唤角色牌"), ("gcg_skills", "七圣召唤技能"),
     ]
     parts = []
     for key, label in names:
@@ -454,6 +464,13 @@ def _build_rows_iter(data: dict[str, Any], overrides: dict[str, tuple[int, int]]
         _iter_viewpoint_mappings(data["viewpoints"]),
         _iter_dungeon_mappings(data["dungeons"]),
         _iter_loading_tip_mappings(data["loading_tips"]),
+        _iter_gcg_card_skill_mappings(
+            data["materials"],
+            data["gcg_cards"],
+            data["gcg_chars"],
+            data["gcg_skills"],
+            data["codex_desc_map"],
+        ),
     )
 
 
@@ -600,6 +617,112 @@ def _iter_material_mappings(rows: list[dict[str, Any]], codex_desc_map: dict[int
             codex_desc_hash = codex_desc_map.get(material_id)
             if codex_desc_hash and codex_desc_hash not in yielded_hashes:
                 yield (codex_desc_hash, source_type_code, material_id, title_hash, _pack_extra(FIELD_CODEX_DESC), sub_category)
+
+
+def _parse_nonzero_int(value: Any) -> int | None:
+    if isinstance(value, int):
+        return value if value != 0 else None
+    if isinstance(value, str):
+        try:
+            parsed = int(value.strip())
+        except ValueError:
+            return None
+        return parsed if parsed != 0 else None
+    return None
+
+
+def _extract_gcg_card_id_from_material(row: dict[str, Any]) -> int | None:
+    item_uses = row.get("itemUse")
+    if not isinstance(item_uses, list):
+        return None
+    for item_use in item_uses:
+        if not isinstance(item_use, dict):
+            continue
+        if item_use.get("useOp") != "ITEM_USE_GAIN_GCG_CARD":
+            continue
+        use_params = item_use.get("useParam")
+        if not isinstance(use_params, list) or not use_params:
+            continue
+        card_id = _parse_nonzero_int(use_params[0])
+        if card_id is not None:
+            return card_id
+    return None
+
+
+def _build_gcg_card_skill_map(*card_tables: list[dict[str, Any]]) -> dict[int, list[int]]:
+    card_skill_map: dict[int, list[int]] = {}
+    for row in chain.from_iterable(card_tables):
+        card_id = _as_nonzero_int(row.get("id"))
+        skill_list = row.get("skillList")
+        if card_id is None or not isinstance(skill_list, list):
+            continue
+        skills = card_skill_map.setdefault(card_id, [])
+        for raw_skill_id in skill_list:
+            skill_id = _parse_nonzero_int(raw_skill_id)
+            if skill_id is not None and skill_id not in skills:
+                skills.append(skill_id)
+    return card_skill_map
+
+
+def _build_gcg_skill_desc_map(skill_rows: list[dict[str, Any]]) -> dict[int, int]:
+    result: dict[int, int] = {}
+    for row in skill_rows:
+        skill_id = _as_nonzero_int(row.get("id"))
+        desc_hash = _as_nonzero_int(row.get("descTextMapHash"))
+        if skill_id is not None and desc_hash is not None:
+            result[skill_id] = desc_hash
+    return result
+
+
+def _material_text_hashes(row: dict[str, Any], codex_desc_map: dict[int, int] | None = None) -> set[int]:
+    result: set[int] = set()
+    for key in ("descTextMapHash", "effectDescTextMapHash", "specialDescTextMapHash", "typeDescTextMapHash"):
+        text_hash = _as_nonzero_int(row.get(key))
+        if text_hash is not None:
+            result.add(text_hash)
+    if codex_desc_map:
+        material_id = _as_nonzero_int(row.get("id"))
+        if material_id is not None:
+            codex_hash = codex_desc_map.get(material_id)
+            if codex_hash:
+                result.add(codex_hash)
+    return result
+
+
+def _iter_gcg_card_skill_mappings(
+    material_rows: list[dict[str, Any]],
+    gcg_card_rows: list[dict[str, Any]],
+    gcg_char_rows: list[dict[str, Any]],
+    gcg_skill_rows: list[dict[str, Any]],
+    codex_desc_map: dict[int, int] | None = None,
+):
+    card_skill_map = _build_gcg_card_skill_map(gcg_card_rows, gcg_char_rows)
+    skill_desc_map = _build_gcg_skill_desc_map(gcg_skill_rows)
+
+    for row in material_rows:
+        if row.get("materialType") != "MATERIAL_GCG_CARD":
+            continue
+        material_id = _as_nonzero_int(row.get("id"))
+        title_hash = _as_nonzero_int(row.get("nameTextMapHash"))
+        card_id = _extract_gcg_card_id_from_material(row)
+        if material_id is None or title_hash is None or card_id is None:
+            continue
+
+        existing_hashes = _material_text_hashes(row, codex_desc_map)
+        yielded_hashes: set[int] = set()
+        for skill_id in card_skill_map.get(card_id, []):
+            desc_hash = skill_desc_map.get(skill_id)
+            if not desc_hash or desc_hash in existing_hashes or desc_hash in yielded_hashes:
+                continue
+            yielded_hashes.add(desc_hash)
+            yield (
+                desc_hash,
+                SOURCE_TYPE_GCG,
+                material_id,
+                title_hash,
+                _pack_extra(FIELD_SKILL_DESC),
+                SUB_CARD,
+            )
 
 
 def _iter_furniture_mappings(rows: list[dict[str, Any]]):

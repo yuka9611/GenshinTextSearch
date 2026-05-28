@@ -1785,12 +1785,13 @@ def _extract_anecdote_history_row(
     core_fields = extract_anecdote_core_fields(row)
     if core_fields is None:
         return None
+    group_ids = core_fields.get("story_quest_ids") or core_fields.get("legacy_group_ids") or []
     return (
         core_fields["quest_id"],
         core_fields["title_text_map_hash"],
         core_fields["desc_text_map_hash"],
         core_fields["long_desc_text_map_hash"],
-        core_fields["group_ids"],
+        group_ids,
     )
 
 
@@ -3652,6 +3653,9 @@ _ENTITY_SNAPSHOT_FILE_KEYS = {
     "DungeonExcelConfigData.json": "dungeons",
     "MaterialCodexExcelConfigData.json": "material_codex",
     "LoadingTipsExcelConfigData.json": "loading_tips",
+    "GCGCardExcelConfigData.json": "gcg_cards",
+    "GCGCharExcelConfigData.json": "gcg_chars",
+    "GCGSkillExcelConfigData.json": "gcg_skills",
 }
 
 
@@ -3682,6 +3686,9 @@ def _load_entity_snapshot_data(repo_path: str, commit_sha: str) -> dict[str, obj
         "viewpoints": rows_by_key.get("viewpoints", []),
         "dungeons": rows_by_key.get("dungeons", []),
         "loading_tips": rows_by_key.get("loading_tips", []),
+        "gcg_cards": rows_by_key.get("gcg_cards", []),
+        "gcg_chars": rows_by_key.get("gcg_chars", []),
+        "gcg_skills": rows_by_key.get("gcg_skills", []),
         "describe_title_map": entitySourceImport._build_describe_title_map(
             rows_by_key.get("animal_describes", []),
             rows_by_key.get("monster_describes", []),

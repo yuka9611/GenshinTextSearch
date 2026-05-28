@@ -455,6 +455,10 @@ def load_storyboard_file_by_talk_id() -> dict[int, str]:
         if not isinstance(talk_id, int) or talk_id <= 0:
             talk_id = obj.get("LBPGKDMGFBN")
         if not isinstance(talk_id, int) or talk_id <= 0:
+            stem = os.path.splitext(os.path.basename(path))[0]
+            if stem.isdigit():
+                talk_id = int(stem)
+        if not isinstance(talk_id, int) or talk_id <= 0:
             continue
         rel_path = os.path.relpath(path, DATA_PATH).replace(os.sep, "/")
         mapping.setdefault(talk_id, rel_path)

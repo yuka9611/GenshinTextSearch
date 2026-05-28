@@ -1261,6 +1261,7 @@ def _build_entity_detail_payload(
                 4: "类型",
                 5: "标题",
                 6: "图鉴描述",
+                7: "技能效果",
             }
             field_label = field_label_map.get(field_code, "描述")
 

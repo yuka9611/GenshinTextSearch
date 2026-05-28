@@ -536,6 +536,10 @@ def test_load_storyboard_file_by_talk_id_indexes_hashed_storyboard_files(monkeyp
         json.dumps({"LBPGKDMGFBN": 7002, "BLMFMJHINJN": []}),
         encoding="utf-8",
     )
+    (storyboard_dir / "6980101.json").write_text(
+        json.dumps({"IOEDPLCPFFB": []}),
+        encoding="utf-8",
+    )
 
     monkeypatch.setattr(quest_source_utils, "DATA_PATH", str(tmp_path))
     quest_source_utils.reset_quest_source_caches()
@@ -545,6 +549,7 @@ def test_load_storyboard_file_by_talk_id_indexes_hashed_storyboard_files(monkeyp
     assert mapping == {
         6987810: "BinOutput/Talk/Storyboard/a8e1ffaf.json",
         7002: "BinOutput/Talk/Storyboard/legacy.json",
+        6980101: "BinOutput/Talk/Storyboard/6980101.json",
     }
 
 
@@ -569,6 +574,26 @@ def test_extract_anecdote_core_fields_supports_current_anecdote_keys():
     }
 
 
+def test_extract_anecdote_history_row_supports_current_story_keys():
+    history_row = history_backfill._extract_anecdote_history_row(
+        {
+            "IDEHFGDCPDL": 106401,
+            "IBGEKMBPNNO": 2416311523,
+            "EBDFJDKDDFJ": 3876969701,
+            "MCGGPAGBGKO": [510640101],
+            "BHAGNOEMPHL": [9878, 9864, 7010],
+        }
+    )
+
+    assert history_row == (
+        106401,
+        2416311523,
+        3876969701,
+        None,
+        [510640101],
+    )
+
+
 def test_extract_anecdote_payload_prefers_story_quest_ids_for_current_data(monkeypatch, tmp_path):
     excel_dir = tmp_path / "ExcelBinOutput"
     excel_dir.mkdir(parents=True)
@@ -589,8 +614,8 @@ def test_extract_anecdote_payload_prefers_story_quest_ids_for_current_data(monke
 
     storyboard_dir = tmp_path / "BinOutput" / "Talk" / "Storyboard"
     storyboard_dir.mkdir(parents=True)
-    (storyboard_dir / "hashed.json").write_text(
-        json.dumps({"AADKDKPMGNO": 6987801, "GALIDJOEHOC": []}),
+    (storyboard_dir / "6987801.json").write_text(
+        json.dumps({"IOEDPLCPFFB": []}),
         encoding="utf-8",
     )
 

@@ -3,6 +3,8 @@ import os
 import sqlite3
 import sys
 
+import pytest
+
 
 TESTS_DIR = os.path.dirname(__file__)
 REPO_ROOT = os.path.normpath(os.path.join(TESTS_DIR, os.pardir))
@@ -13,6 +15,17 @@ if DBBUILD_DIR not in sys.path:
 import entitySourceImport
 import history_backfill
 import databaseHelper
+
+
+@pytest.fixture(autouse=True)
+def _restore_database_helper_schema_cache():
+    table_cache = dict(databaseHelper._CACHE["table"])
+    column_cache = dict(databaseHelper._CACHE["column"])
+    yield
+    databaseHelper._CACHE["table"].clear()
+    databaseHelper._CACHE["table"].update(table_cache)
+    databaseHelper._CACHE["column"].clear()
+    databaseHelper._CACHE["column"].update(column_cache)
 
 
 def test_gender_code_marks_both_body_types_as_unisex():
@@ -270,6 +283,127 @@ def test_iter_hall_facility_mappings_supports_6_6_style_keys():
     ]
 
 
+def test_iter_gcg_card_skill_mappings_links_character_card_skills_to_material():
+    materials = [
+        {
+            "id": 330000,
+            "nameTextMapHash": 1082201100,
+            "descTextMapHash": 2247414261,
+            "materialType": "MATERIAL_GCG_CARD",
+            "itemUse": [
+                {"useOp": "ITEM_USE_GAIN_GCG_CARD", "useParam": ["1101", "", "", "", ""]},
+            ],
+        }
+    ]
+    gcg_chars = [{"id": 1101, "skillList": [11011, 11012]}]
+    gcg_skills = [
+        {"id": 11011, "descTextMapHash": 3920541026},
+        {"id": 11012, "descTextMapHash": 2684862714},
+    ]
+
+    result = list(entitySourceImport._iter_gcg_card_skill_mappings(materials, [], gcg_chars, gcg_skills))
+
+    assert result == [
+        (
+            3920541026,
+            entitySourceImport.SOURCE_TYPE_GCG,
+            330000,
+            1082201100,
+            entitySourceImport._pack_extra(entitySourceImport.FIELD_SKILL_DESC),
+            entitySourceImport.SUB_CARD,
+        ),
+        (
+            2684862714,
+            entitySourceImport.SOURCE_TYPE_GCG,
+            330000,
+            1082201100,
+            entitySourceImport._pack_extra(entitySourceImport.FIELD_SKILL_DESC),
+            entitySourceImport.SUB_CARD,
+        ),
+    ]
+
+
+def test_iter_gcg_card_skill_mappings_links_action_card_skills_to_material():
+    materials = [
+        {
+            "id": 332001,
+            "nameTextMapHash": 3330146804,
+            "materialType": "MATERIAL_GCG_CARD",
+            "itemUse": [
+                {"useOp": "ITEM_USE_GAIN_GCG_CARD", "useParam": ["321002", "", "", "", ""]},
+            ],
+        }
+    ]
+    gcg_cards = [{"id": 321002, "skillList": [3210021, 3210022]}]
+    gcg_skills = [
+        {"id": 3210021, "descTextMapHash": 253515098},
+        {"id": 3210022, "descTextMapHash": 0},
+    ]
+
+    result = list(entitySourceImport._iter_gcg_card_skill_mappings(materials, gcg_cards, [], gcg_skills))
+
+    assert result == [
+        (
+            253515098,
+            entitySourceImport.SOURCE_TYPE_GCG,
+            332001,
+            3330146804,
+            entitySourceImport._pack_extra(entitySourceImport.FIELD_SKILL_DESC),
+            entitySourceImport.SUB_CARD,
+        )
+    ]
+
+
+def test_iter_gcg_card_skill_mappings_skips_invalid_missing_and_duplicate_hashes():
+    materials = [
+        {
+            "id": 332001,
+            "nameTextMapHash": 3330146804,
+            "descTextMapHash": 253515098,
+            "effectDescTextMapHash": 784460031,
+            "materialType": "MATERIAL_GCG_CARD",
+            "itemUse": [
+                {"useOp": "ITEM_USE_GAIN_GCG_CARD", "useParam": ["321002", "", "", "", ""]},
+            ],
+        },
+        {
+            "id": 332002,
+            "nameTextMapHash": 1,
+            "materialType": "MATERIAL_GCG_CARD",
+            "itemUse": [
+                {"useOp": "ITEM_USE_GAIN_GCG_CARD", "useParam": ["", "", "", "", ""]},
+            ],
+        },
+        {
+            "id": 332003,
+            "nameTextMapHash": 2,
+            "materialType": "MATERIAL_GCG_CARD",
+            "itemUse": [
+                {"useOp": "ITEM_USE_GAIN_GCG_CARD", "useParam": ["999999", "", "", "", ""]},
+            ],
+        },
+    ]
+    gcg_cards = [{"id": 321002, "skillList": [1, 2, 3, 4]}]
+    gcg_skills = [
+        {"id": 1, "descTextMapHash": 253515098},
+        {"id": 2, "descTextMapHash": 600},
+        {"id": 3, "descTextMapHash": 600},
+    ]
+
+    result = list(entitySourceImport._iter_gcg_card_skill_mappings(materials, gcg_cards, [], gcg_skills))
+
+    assert result == [
+        (
+            600,
+            entitySourceImport.SOURCE_TYPE_GCG,
+            332001,
+            3330146804,
+            entitySourceImport._pack_extra(entitySourceImport.FIELD_SKILL_DESC),
+            entitySourceImport.SUB_CARD,
+        )
+    ]
+
+
 def _create_entity_version_tables(connection: sqlite3.Connection):
     connection.execute(
         """
@@ -343,6 +477,9 @@ def test_import_entity_sources_writes_current_created_version_and_syncs_entity_r
             "viewpoints": [],
             "dungeons": [],
             "loading_tips": [],
+            "gcg_cards": [],
+            "gcg_chars": [],
+            "gcg_skills": [],
             "describe_title_map": {},
             "codex_desc_map": {},
         },

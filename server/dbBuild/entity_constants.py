@@ -43,6 +43,7 @@ FIELD_SPECIAL_DESC = 3
 FIELD_TYPE_DESC = 4
 FIELD_TITLE = 5
 FIELD_CODEX_DESC = 6
+FIELD_SKILL_DESC = 7
 
 # ── 二级分类编码 ──────────────────────────────────────────────────
 SUB_NONE = 0

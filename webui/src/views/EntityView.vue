@@ -88,10 +88,29 @@ const formatVersionTag = (versionTag, rawVersion) => {
   return resolveVersionValue(versionTag, rawVersion) || '未知'
 }
 
+const hasCreatedVersionTag = (item) => {
+  return !!resolveVersionValue(item?.createdVersion, item?.createdVersionRaw)
+}
+
+const displayVersion = (item, kind) => {
+  const versionTag = kind === 'created' ? item?.createdVersion : item?.updatedVersion
+  const rawVersion = kind === 'created' ? item?.createdVersionRaw : item?.updatedVersionRaw
+  return formatVersionTag(versionTag, rawVersion)
+}
+
 const shouldShowUpdatedVersionTag = (createdTag, createdRaw, updatedTag, updatedRaw) => {
   const updatedValue = resolveVersionValue(updatedTag, updatedRaw)
   if (!updatedValue) return false
   return updatedValue !== resolveVersionValue(createdTag, createdRaw)
+}
+
+const showUpdatedVersionTag = (item) => {
+  return shouldShowUpdatedVersionTag(
+    item?.createdVersion,
+    item?.createdVersionRaw,
+    item?.updatedVersion,
+    item?.updatedVersionRaw,
+  )
 }
 
 const resolveDisplayText = (textObj) => {
@@ -286,6 +305,14 @@ watch(selectedInputLanguage, async () => {
           </div>
           <h2 class="groupTitle">{{ resolveGroupTitle(group) }}</h2>
           <p v-if="resolveGroupSubtitle(group)" class="groupSubtitle">{{ resolveGroupSubtitle(group) }}</p>
+          <div v-if="hasCreatedVersionTag(group) || showUpdatedVersionTag(group)" class="versionTags tagRow">
+            <span v-if="hasCreatedVersionTag(group)" class="versionTag created" :title="group.createdVersionRaw || ''">
+              ✦ 创建: {{ displayVersion(group, 'created') }}
+            </span>
+            <span v-if="showUpdatedVersionTag(group)" class="versionTag updated" :title="group.updatedVersionRaw || ''">
+              ↻ 更新: {{ displayVersion(group, 'updated') }}
+            </span>
+          </div>
         </div>
 
         <div class="entityEntries">

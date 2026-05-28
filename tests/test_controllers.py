@@ -1159,6 +1159,49 @@ class TestEntityTexts:
             }
         ]
 
+    def test_get_entity_texts_labels_gcg_skill_effect_entries(self, monkeypatch):
+        title_map = {
+            1082201100: "甘雨",
+        }
+        monkeypatch.setattr(controllers.config, "getResultLanguages", lambda: [1, 4])
+        monkeypatch.setattr(controllers.config, "getSourceLanguage", lambda: 4)
+        monkeypatch.setattr(
+            controllers.databaseHelper,
+            "selectEntityTextHashesByEntity",
+            lambda source_type_code, entity_id: [(3920541026, 1082201100, 7, 4)],
+        )
+        monkeypatch.setattr(
+            controllers.databaseHelper,
+            "getCatalogEntityVersionInfo",
+            lambda source_type_code, entity_id, version_lang_code=None: (None, None),
+        )
+        monkeypatch.setattr(controllers, "_get_entity_source_meta", lambda code: ("gcg", "七圣召唤"))
+        monkeypatch.setattr(controllers, "_get_sub_category_label", lambda code: "卡牌")
+        monkeypatch.setattr(
+            controllers,
+            "_get_text_map_content_with_fallback",
+            lambda text_hash, *args, **kwargs: title_map.get(text_hash),
+        )
+        monkeypatch.setattr(
+            controllers,
+            "queryTextHashInfo",
+            lambda *args, **kwargs: {"translates": {"1": "造成2点物理伤害。"}},
+        )
+        monkeypatch.setattr(controllers, "_collect_entity_readable_entries", lambda *args, **kwargs: [])
+
+        result = controllers.getEntityTexts(15, 330000, searchLang=1)
+
+        assert result["entries"] == [
+            {
+                "entryTitle": "甘雨",
+                "fieldLabel": "技能效果",
+                "subtitle": "七圣召唤 330000",
+                "textHash": 3920541026,
+                "titleHash": 1082201100,
+                "text": {"translates": {"1": "造成2点物理伤害。"}},
+            }
+        ]
+
     def test_build_entity_source_payload_marks_unisex_costume(self, monkeypatch):
         monkeypatch.setattr(controllers, "_get_entity_source_meta", lambda code: ("costume", "千星奇域"))
         monkeypatch.setattr(controllers.config, "getSourceLanguage", lambda: 1)
