@@ -1,6 +1,9 @@
 import json
+import hashlib
 import os
+import re
 import sys
+from dataclasses import dataclass
 from itertools import chain
 from typing import Any
 
@@ -365,6 +368,8 @@ _ENTITY_EXCEL_FILES = [
     "GCGCardExcelConfigData.json",
     "GCGCharExcelConfigData.json",
     "GCGSkillExcelConfigData.json",
+    "GCGKeywordExcelConfigData.json",
+    "GCGElementExcelConfigData.json",
 ]
 
 
@@ -393,6 +398,8 @@ def _load_all_entity_data(excel_root: str) -> dict[str, Any]:
     gcg_cards = _load_rows(os.path.join(excel_root, "GCGCardExcelConfigData.json"))
     gcg_chars = _load_rows(os.path.join(excel_root, "GCGCharExcelConfigData.json"))
     gcg_skills = _load_rows(os.path.join(excel_root, "GCGSkillExcelConfigData.json"))
+    gcg_keywords = _load_rows(os.path.join(excel_root, "GCGKeywordExcelConfigData.json"))
+    gcg_elements = _load_rows(os.path.join(excel_root, "GCGElementExcelConfigData.json"))
 
     describe_title_map = _build_describe_title_map(animal_describes, monster_describes)
     codex_desc_map = _build_codex_desc_map(material_codex)
@@ -418,6 +425,8 @@ def _load_all_entity_data(excel_root: str) -> dict[str, Any]:
         "gcg_cards": gcg_cards,
         "gcg_chars": gcg_chars,
         "gcg_skills": gcg_skills,
+        "gcg_keywords": gcg_keywords,
+        "gcg_elements": gcg_elements,
         "describe_title_map": describe_title_map,
         "codex_desc_map": codex_desc_map,
     }
@@ -434,6 +443,7 @@ def _print_entity_source_summary(data: dict[str, Any]):
         ("achievements", "成就"), ("viewpoints", "观景点"), ("dungeons", "秘境"),
         ("loading_tips", "过场提示"), ("gcg_cards", "七圣召唤卡牌"),
         ("gcg_chars", "七圣召唤角色牌"), ("gcg_skills", "七圣召唤技能"),
+        ("gcg_keywords", "七圣召唤关键词"), ("gcg_elements", "七圣召唤元素"),
     ]
     parts = []
     for key, label in names:
@@ -470,6 +480,7 @@ def _build_rows_iter(data: dict[str, Any], overrides: dict[str, tuple[int, int]]
             data["gcg_chars"],
             data["gcg_skills"],
             data["codex_desc_map"],
+            data.get("_gcg_synthetic_hashes"),
         ),
     )
 
@@ -649,29 +660,77 @@ def _extract_gcg_card_id_from_material(row: dict[str, Any]) -> int | None:
     return None
 
 
-def _build_gcg_card_skill_map(*card_tables: list[dict[str, Any]]) -> dict[int, list[int]]:
-    card_skill_map: dict[int, list[int]] = {}
-    for row in chain.from_iterable(card_tables):
-        card_id = _as_nonzero_int(row.get("id"))
-        skill_list = row.get("skillList")
-        if card_id is None or not isinstance(skill_list, list):
-            continue
-        skills = card_skill_map.setdefault(card_id, [])
-        for raw_skill_id in skill_list:
-            skill_id = _parse_nonzero_int(raw_skill_id)
-            if skill_id is not None and skill_id not in skills:
-                skills.append(skill_id)
-    return card_skill_map
+_GCG_SYNTHETIC_TEXT_TABLE = "gcg_synthetic_textmap"
+_GCG_TOKEN_RE = re.compile(r"\$\[([^\]]+)\]")
+_GCG_PLURAL_RE = re.compile(r"\{PLURAL#([^|{}]+)\|([^|{}]*)\|([^{}]*)\}")
+_GCG_DECLARED_VALUE_CACHE: dict[str, dict[str, dict[str, Any]]] = {}
+_GCG_TEXT_KIND_SKILL = "skill"
+_GCG_TEXT_KIND_CARD = "card"
 
 
-def _build_gcg_skill_desc_map(skill_rows: list[dict[str, Any]]) -> dict[int, int]:
-    result: dict[int, int] = {}
-    for row in skill_rows:
-        skill_id = _as_nonzero_int(row.get("id"))
-        desc_hash = _as_nonzero_int(row.get("descTextMapHash"))
-        if skill_id is not None and desc_hash is not None:
-            result[skill_id] = desc_hash
+@dataclass(frozen=True)
+class _GcgTextSource:
+    material_id: int
+    title_hash: int
+    card_id: int
+    source_kind: str
+    source_id: int
+    raw_hash: int
+    skill_json: str | None = None
+
+
+def _build_gcg_row_map(rows: list[dict[str, Any]]) -> dict[int, dict[str, Any]]:
+    result: dict[int, dict[str, Any]] = {}
+    for row in rows:
+        row_id = _as_nonzero_int(row.get("id"))
+        if row_id is not None:
+            result[row_id] = row
     return result
+
+
+def _build_gcg_keyword_title_map(keyword_rows: list[dict[str, Any]]) -> dict[int, int]:
+    result: dict[int, int] = {}
+    for row in keyword_rows:
+        keyword_id = _as_nonzero_int(row.get("id"))
+        title_hash = _as_nonzero_int(row.get("titleTextMapHash"))
+        if keyword_id is not None and title_hash is not None:
+            result[keyword_id] = title_hash
+    return result
+
+
+def _build_gcg_element_keyword_map(element_rows: list[dict[str, Any]]) -> dict[str, int]:
+    result: dict[str, int] = {}
+    for row in element_rows:
+        element_type = str(row.get("type") or "").strip()
+        keyword_id = _as_nonzero_int(row.get("keywordId"))
+        if element_type and keyword_id is not None:
+            result[element_type] = keyword_id
+    return result
+
+
+def _build_gcg_char_element_map(char_rows: list[dict[str, Any]]) -> dict[int, str]:
+    result: dict[int, str] = {}
+    for row in char_rows:
+        char_id = _as_nonzero_int(row.get("id"))
+        tag_list = row.get("tagList")
+        if char_id is None or not isinstance(tag_list, list):
+            continue
+        for tag in tag_list:
+            tag_text = str(tag or "")
+            if tag_text.startswith("GCG_TAG_ELEMENT_"):
+                result[char_id] = tag_text.replace("GCG_TAG_ELEMENT_", "GCG_ELEMENT_", 1)
+                break
+    return result
+
+
+def _iter_gcg_skill_ids(row: dict[str, Any]):
+    skill_list = row.get("skillList")
+    if not isinstance(skill_list, list):
+        return
+    for raw_skill_id in skill_list:
+        skill_id = _parse_nonzero_int(raw_skill_id)
+        if skill_id is not None:
+            yield skill_id
 
 
 def _material_text_hashes(row: dict[str, Any], codex_desc_map: dict[int, int] | None = None) -> set[int]:
@@ -689,15 +748,16 @@ def _material_text_hashes(row: dict[str, Any], codex_desc_map: dict[int, int] | 
     return result
 
 
-def _iter_gcg_card_skill_mappings(
+def _iter_gcg_card_text_sources(
     material_rows: list[dict[str, Any]],
     gcg_card_rows: list[dict[str, Any]],
     gcg_char_rows: list[dict[str, Any]],
     gcg_skill_rows: list[dict[str, Any]],
     codex_desc_map: dict[int, int] | None = None,
 ):
-    card_skill_map = _build_gcg_card_skill_map(gcg_card_rows, gcg_char_rows)
-    skill_desc_map = _build_gcg_skill_desc_map(gcg_skill_rows)
+    card_map = _build_gcg_row_map(gcg_card_rows)
+    char_map = _build_gcg_row_map(gcg_char_rows)
+    skill_map = _build_gcg_row_map(gcg_skill_rows)
 
     for row in material_rows:
         if row.get("materialType") != "MATERIAL_GCG_CARD":
@@ -709,20 +769,363 @@ def _iter_gcg_card_skill_mappings(
             continue
 
         existing_hashes = _material_text_hashes(row, codex_desc_map)
-        yielded_hashes: set[int] = set()
-        for skill_id in card_skill_map.get(card_id, []):
-            desc_hash = skill_desc_map.get(skill_id)
-            if not desc_hash or desc_hash in existing_hashes or desc_hash in yielded_hashes:
-                continue
-            yielded_hashes.add(desc_hash)
-            yield (
-                desc_hash,
-                SOURCE_TYPE_GCG,
-                material_id,
-                title_hash,
-                _pack_extra(FIELD_SKILL_DESC),
-                SUB_CARD,
+        yielded_sources: set[tuple[str, int, int]] = set()
+        char_row = char_map.get(card_id)
+        if char_row:
+            for skill_id in _iter_gcg_skill_ids(char_row):
+                skill_row = skill_map.get(skill_id)
+                if not skill_row:
+                    continue
+                desc_hash = _as_nonzero_int(skill_row.get("descTextMapHash"))
+                if desc_hash is None or desc_hash in existing_hashes:
+                    continue
+                source_key = (_GCG_TEXT_KIND_SKILL, skill_id, desc_hash)
+                if source_key in yielded_sources:
+                    continue
+                yielded_sources.add(source_key)
+                skill_json = str(skill_row.get("skillJson") or "").strip() or None
+                yield _GcgTextSource(
+                    material_id=material_id,
+                    title_hash=title_hash,
+                    card_id=card_id,
+                    source_kind=_GCG_TEXT_KIND_SKILL,
+                    source_id=skill_id,
+                    raw_hash=desc_hash,
+                    skill_json=skill_json,
+                )
+            continue
+
+        card_row = card_map.get(card_id)
+        if not card_row:
+            continue
+        desc_hash = _as_nonzero_int(card_row.get("descTextMapHash"))
+        if desc_hash is None or desc_hash in existing_hashes:
+            continue
+        source_key = (_GCG_TEXT_KIND_CARD, card_id, desc_hash)
+        if source_key in yielded_sources:
+            continue
+        yielded_sources.add(source_key)
+        yield _GcgTextSource(
+            material_id=material_id,
+            title_hash=title_hash,
+            card_id=card_id,
+            source_kind=_GCG_TEXT_KIND_CARD,
+            source_id=card_id,
+            raw_hash=desc_hash,
+        )
+
+
+def _stable_gcg_synthetic_hash(source: _GcgTextSource | str, source_id: int | None = None, raw_hash: int | None = None) -> int:
+    if isinstance(source, _GcgTextSource):
+        key = f"gcg:{source.source_kind}:{source.source_id}:{source.raw_hash}"
+    else:
+        key = f"gcg:{source}:{int(source_id or 0)}:{int(raw_hash or 0)}"
+    digest = hashlib.blake2s(key.encode("utf-8"), digest_size=8).digest()
+    value = int.from_bytes(digest, "big") % 2_000_000_000
+    return -(value + 1)
+
+
+def _pack_gcg_text_extra(source_kind: str, source_id: int) -> int:
+    kind_code = 1 if source_kind == _GCG_TEXT_KIND_SKILL else 2
+    return ((int(source_id) & 0xFFFFFFFF) << 16) | ((kind_code & 0xFF) << 8) | (FIELD_SKILL_DESC & 0xFF)
+
+
+def _normalize_declared_key(value: str) -> str:
+    return re.sub(r"[^a-z0-9]+", "", str(value or "").lower())
+
+
+def _collect_gcg_declared_values(obj: Any, result: dict[str, dict[str, Any]]):
+    if isinstance(obj, dict):
+        name = obj.get("MEGMIMEDODJ")
+        if isinstance(name, str) and name:
+            result[_normalize_declared_key(name)] = obj
+        for value in obj.values():
+            _collect_gcg_declared_values(value, result)
+    elif isinstance(obj, list):
+        for value in obj:
+            _collect_gcg_declared_values(value, result)
+
+
+def _load_gcg_declared_values(skill_json: str | None) -> dict[str, dict[str, Any]]:
+    if not skill_json:
+        return {}
+    key = str(skill_json).strip()
+    if not key:
+        return {}
+    if key in _GCG_DECLARED_VALUE_CACHE:
+        return _GCG_DECLARED_VALUE_CACHE[key]
+    path = os.path.join(DATA_PATH, "BinOutput", "GCG", "Gcg_DeclaredValueSet", f"{key}.json")
+    data = load_json_file(path, default={})
+    result: dict[str, dict[str, Any]] = {}
+    _collect_gcg_declared_values(data, result)
+    _GCG_DECLARED_VALUE_CACHE[key] = result
+    return result
+
+
+def _format_gcg_declared_number(value: Any) -> str | None:
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return str(value)
+    if isinstance(value, float):
+        return str(int(value)) if value.is_integer() else str(value)
+    return None
+
+
+class _GcgTextResolver:
+    def __init__(self, cursor, data: dict[str, Any]):
+        self.cursor = cursor
+        self.card_map = _build_gcg_row_map(data.get("gcg_cards", []))
+        self.char_map = _build_gcg_row_map(data.get("gcg_chars", []))
+        self.skill_map = _build_gcg_row_map(data.get("gcg_skills", []))
+        self.keyword_title_map = _build_gcg_keyword_title_map(data.get("gcg_keywords", []))
+        self.element_keyword_map = _build_gcg_element_keyword_map(data.get("gcg_elements", []))
+        self.char_element_map = _build_gcg_char_element_map(data.get("gcg_chars", []))
+        self._text_cache: dict[tuple[int, int], str | None] = {}
+
+    def _text(self, text_hash: int | None, lang: int) -> str | None:
+        if text_hash is None:
+            return None
+        key = (int(text_hash), int(lang))
+        if key not in self._text_cache:
+            row = self.cursor.execute(
+                "SELECT content FROM textMap WHERE hash=? AND lang=? LIMIT 1",
+                key,
+            ).fetchone()
+            self._text_cache[key] = row[0] if row and row[0] is not None else None
+        return self._text_cache[key]
+
+    def _name_from_row(self, row: dict[str, Any] | None, lang: int) -> str | None:
+        if not row:
+            return None
+        return self._text(_as_nonzero_int(row.get("nameTextMapHash")), lang)
+
+    def _keyword_text(self, keyword_id: int, lang: int) -> str | None:
+        return self._text(self.keyword_title_map.get(int(keyword_id)), lang)
+
+    def _element_text(self, element_type: str, lang: int) -> str | None:
+        keyword_id = self.element_keyword_map.get(str(element_type or "").strip())
+        if keyword_id is None:
+            return None
+        return self._keyword_text(keyword_id, lang)
+
+    def _declared_value(
+        self,
+        declared: dict[str, dict[str, Any]],
+        key: str,
+        lang: int,
+        card_id: int | None,
+    ) -> str | None:
+        normalized = _normalize_declared_key(key)
+        entry = declared.get(normalized)
+        if entry is None and normalized.startswith("damage"):
+            entry = declared.get("damage")
+        if entry is None and normalized.startswith("damage"):
+            entry = declared.get("indirectdamage")
+        if entry is None and normalized.startswith("damage"):
+            entry = declared.get("effectnum")
+        if entry is None and normalized.startswith("element"):
+            entry = declared.get("element")
+        if not entry:
+            if normalized.startswith("element") and card_id is not None:
+                element_type = self.char_element_map.get(int(card_id))
+                if element_type:
+                    return self._element_text(element_type, lang)
+            if normalized.startswith("damage"):
+                return "1"
+            return None
+        number = _format_gcg_declared_number(entry.get("AOJNMJNAEEO"))
+        if number is not None:
+            return number
+        element = entry.get("CAHOPGJMELB")
+        if element:
+            return self._element_text(str(element), lang)
+        return None
+
+    def _resolve_token(
+        self,
+        token: str,
+        lang: int,
+        declared: dict[str, dict[str, Any]],
+        card_id: int | None,
+    ) -> str | None:
+        spec = token.split("|", 1)[0].strip()
+        if spec.startswith("D__KEY__"):
+            return self._declared_value(declared, spec.removeprefix("D__KEY__"), lang, card_id)
+
+        token_type = spec[:1]
+        raw_id = spec[1:]
+        match = re.search(r"-?\d+", raw_id)
+        if not token_type or not match:
+            return None
+        ref_id = int(match.group(0))
+        if token_type == "K":
+            return self._keyword_text(ref_id, lang)
+        if token_type == "C":
+            return self._name_from_row(self.card_map.get(ref_id) or self.char_map.get(ref_id), lang)
+        if token_type == "S":
+            return self._name_from_row(self.skill_map.get(ref_id), lang)
+        if token_type == "A":
+            return self._name_from_row(self.char_map.get(ref_id), lang)
+        return None
+
+    @staticmethod
+    def _resolve_plural(content: str) -> str:
+        def repl(match: re.Match) -> str:
+            count_text = match.group(1).strip()
+            try:
+                count = float(count_text)
+            except ValueError:
+                return match.group(0)
+            return match.group(2) if abs(count) == 1 else match.group(3)
+
+        return _GCG_PLURAL_RE.sub(repl, content)
+
+    def resolve(self, content: str, lang: int, skill_json: str | None = None, card_id: int | None = None) -> str:
+        declared = _load_gcg_declared_values(skill_json)
+
+        def repl(match: re.Match) -> str:
+            resolved = self._resolve_token(match.group(1), lang, declared, card_id)
+            return resolved if resolved is not None else match.group(0)
+
+        resolved = _GCG_TOKEN_RE.sub(repl, content)
+        return self._resolve_plural(resolved)
+
+
+def _ensure_gcg_synthetic_text_schema(cursor):
+    cursor.execute(
+        f"""
+        CREATE TABLE IF NOT EXISTS {_GCG_SYNTHETIC_TEXT_TABLE} (
+            hash INTEGER PRIMARY KEY,
+            source_kind TEXT NOT NULL,
+            source_id INTEGER NOT NULL,
+            raw_hash INTEGER NOT NULL
+        )
+        """
+    )
+
+
+def _sqlite_table_exists(cursor, table_name: str) -> bool:
+    row = cursor.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name=? LIMIT 1",
+        (table_name,),
+    ).fetchone()
+    return row is not None
+
+
+def _clear_gcg_synthetic_text(cursor):
+    _ensure_gcg_synthetic_text_schema(cursor)
+    if _sqlite_table_exists(cursor, "textMap"):
+        cursor.execute(
+            f"""
+            DELETE FROM textMap
+            WHERE hash IN (SELECT hash FROM {_GCG_SYNTHETIC_TEXT_TABLE})
+            """
+        )
+    cursor.execute(f"DELETE FROM {_GCG_SYNTHETIC_TEXT_TABLE}")
+
+
+def _clear_gcg_skill_entity_sources(cursor):
+    cursor.execute(
+        """
+        DELETE FROM text_source_entity
+        WHERE source_type_code=? AND sub_category=? AND (extra & 255)=?
+        """,
+        (SOURCE_TYPE_GCG, SUB_CARD, FIELD_SKILL_DESC),
+    )
+
+
+def _refresh_gcg_synthetic_textmap(cursor, data: dict[str, Any], version_id: int | None):
+    _clear_gcg_synthetic_text(cursor)
+    data["_gcg_synthetic_hashes"] = {}
+    if not _sqlite_table_exists(cursor, "textMap"):
+        return
+    _GCG_DECLARED_VALUE_CACHE.clear()
+    resolver = _GcgTextResolver(cursor, data)
+    sources = list(
+        _iter_gcg_card_text_sources(
+            data.get("materials", []),
+            data.get("gcg_cards", []),
+            data.get("gcg_chars", []),
+            data.get("gcg_skills", []),
+            data.get("codex_desc_map"),
+        )
+    )
+    insert_text_sql = (
+        "INSERT INTO textMap(hash, content, lang, created_version_id, updated_version_id) "
+        "VALUES (?,?,?,?,?) "
+        "ON CONFLICT(lang, hash) DO UPDATE SET "
+        "content=excluded.content, "
+        "created_version_id=excluded.created_version_id, "
+        "updated_version_id=excluded.updated_version_id "
+        "WHERE NOT (textMap.content IS excluded.content) "
+        "OR NOT (textMap.created_version_id IS excluded.created_version_id) "
+        "OR NOT (textMap.updated_version_id IS excluded.updated_version_id)"
+    )
+    insert_meta_sql = (
+        f"INSERT OR REPLACE INTO {_GCG_SYNTHETIC_TEXT_TABLE}(hash, source_kind, source_id, raw_hash) "
+        "VALUES (?,?,?,?)"
+    )
+    seen_synthetic: set[int] = set()
+    synthetic_hashes: dict[tuple[str, int, int], int] = {}
+    for source in sources:
+        synthetic_hash = _stable_gcg_synthetic_hash(source)
+        if synthetic_hash in seen_synthetic:
+            continue
+        seen_synthetic.add(synthetic_hash)
+        raw_rows = cursor.execute(
+            """
+            SELECT lang, content, created_version_id, updated_version_id
+            FROM textMap
+            WHERE hash=? AND content IS NOT NULL AND content!=''
+            """,
+            (source.raw_hash,),
+        ).fetchall()
+        if not raw_rows:
+            continue
+        resolved_rows = [
+            (
+                int(lang),
+                resolver.resolve(str(content), int(lang), source.skill_json, source.card_id),
+                created_version_id,
+                updated_version_id,
             )
+            for lang, content, created_version_id, updated_version_id in raw_rows
+        ]
+        if not any(resolved != str(content) for (_lang, content, _created, _updated), (_r_lang, resolved, _r_created, _r_updated) in zip(raw_rows, resolved_rows)):
+            continue
+        synthetic_hashes[(source.source_kind, source.source_id, source.raw_hash)] = synthetic_hash
+        cursor.execute(insert_meta_sql, (synthetic_hash, source.source_kind, source.source_id, source.raw_hash))
+        for lang, resolved, created_version_id, updated_version_id in resolved_rows:
+            row_created = created_version_id if created_version_id is not None else version_id
+            row_updated = updated_version_id if updated_version_id is not None else version_id
+            cursor.execute(insert_text_sql, (synthetic_hash, resolved, int(lang), row_created, row_updated))
+    data["_gcg_synthetic_hashes"] = synthetic_hashes
+
+
+def _iter_gcg_card_skill_mappings(
+    material_rows: list[dict[str, Any]],
+    gcg_card_rows: list[dict[str, Any]],
+    gcg_char_rows: list[dict[str, Any]],
+    gcg_skill_rows: list[dict[str, Any]],
+    codex_desc_map: dict[int, int] | None = None,
+    synthetic_hashes: dict[tuple[str, int, int], int] | None = None,
+):
+    for source in _iter_gcg_card_text_sources(material_rows, gcg_card_rows, gcg_char_rows, gcg_skill_rows, codex_desc_map):
+        source_key = (source.source_kind, source.source_id, source.raw_hash)
+        text_hash = (
+            synthetic_hashes.get(source_key, source.raw_hash)
+            if synthetic_hashes is not None
+            else _stable_gcg_synthetic_hash(source)
+        )
+        yield (
+            text_hash,
+            SOURCE_TYPE_GCG,
+            source.material_id,
+            source.title_hash,
+            _pack_gcg_text_extra(source.source_kind, source.source_id),
+            SUB_CARD,
+        )
 
 
 def _iter_furniture_mappings(rows: list[dict[str, Any]]):
@@ -1087,6 +1490,7 @@ def importEntitySources(*, commit: bool = True, batch_size: int = DEFAULT_BATCH_
         _print_entity_source_summary(data)
 
         overrides = check_and_classify_interactive(data["materials"], interactive=interactive)
+        _refresh_gcg_synthetic_textmap(cursor, data, version_id)
 
         sql = (
             "INSERT INTO text_source_entity(text_hash, source_type_code, entity_id, title_hash, extra, sub_category, created_version_id) "
@@ -1121,6 +1525,8 @@ def insertEntitySourcesDelta(*, commit: bool = True, batch_size: int = DEFAULT_B
         _print_entity_source_summary(data)
 
         overrides = check_and_classify_interactive(data["materials"], interactive=interactive)
+        _refresh_gcg_synthetic_textmap(cursor, data, version_id)
+        _clear_gcg_skill_entity_sources(cursor)
 
         sql = (
             "INSERT INTO text_source_entity(text_hash, source_type_code, entity_id, title_hash, extra, sub_category, created_version_id) "

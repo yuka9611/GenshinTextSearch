@@ -3656,6 +3656,8 @@ _ENTITY_SNAPSHOT_FILE_KEYS = {
     "GCGCardExcelConfigData.json": "gcg_cards",
     "GCGCharExcelConfigData.json": "gcg_chars",
     "GCGSkillExcelConfigData.json": "gcg_skills",
+    "GCGKeywordExcelConfigData.json": "gcg_keywords",
+    "GCGElementExcelConfigData.json": "gcg_elements",
 }
 
 
@@ -3689,6 +3691,8 @@ def _load_entity_snapshot_data(repo_path: str, commit_sha: str) -> dict[str, obj
         "gcg_cards": rows_by_key.get("gcg_cards", []),
         "gcg_chars": rows_by_key.get("gcg_chars", []),
         "gcg_skills": rows_by_key.get("gcg_skills", []),
+        "gcg_keywords": rows_by_key.get("gcg_keywords", []),
+        "gcg_elements": rows_by_key.get("gcg_elements", []),
         "describe_title_map": entitySourceImport._build_describe_title_map(
             rows_by_key.get("animal_describes", []),
             rows_by_key.get("monster_describes", []),

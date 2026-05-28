@@ -1001,7 +1001,7 @@ def _process_entity_sources_stage(plan):
     """
     处理entity_sources阶段
     """
-    if plan["entity_sources"]:
+    if plan["entity_sources"] or plan["textmap_bases"]:
         entitySourceImport.insertEntitySourcesDelta(commit=True, interactive=True)
 
 
@@ -1302,7 +1302,7 @@ def _process_version_catalog_stage(plan, target_commit, base_commit):
     )
 
     version_scopes: list[str] = []
-    if plan["textmap_bases"]:
+    if plan["textmap_bases"] or plan["entity_sources"]:
         version_scopes.append("textMap")
     if plan["textmap_bases"] or plan["quest_related"] or plan["talk_changed"] or plan["talk_deleted"]:
         version_scopes.append("quest")
@@ -1312,7 +1312,7 @@ def _process_version_catalog_stage(plan, target_commit, base_commit):
         version_scopes.append("readable")
     if plan["npc"]:
         version_scopes.append("npc")
-    if plan["entity_sources"]:
+    if plan["entity_sources"] or plan["textmap_bases"]:
         version_scopes.append("text_source_entity")
 
     if version_scopes:
