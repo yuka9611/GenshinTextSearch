@@ -1505,7 +1505,9 @@ def importEntitySources(*, commit: bool = True, batch_size: int = DEFAULT_BATCH_
             )
         )
 
-        rows_iter = ((*row, version_id) for row in _build_rows_iter(data, overrides))
+        # Full imports rebuild the catalog from the current snapshot, so the
+        # entity first-appearance version must be supplied by history replay.
+        rows_iter = ((*row, None) for row in _build_rows_iter(data, overrides))
         executemany_batched(cursor, sql, rows_iter, batch_size=batch_size)
         _sync_entity_created_versions(cursor)
     finally:

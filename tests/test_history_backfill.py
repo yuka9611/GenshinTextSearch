@@ -375,6 +375,76 @@ def test_compute_textmap_group_authoritative_versions_passes_similarity_flag(mon
     assert seen_similarity_flags == [False]
 
 
+def test_compute_textmap_group_authoritative_versions_reuses_baseline_versions(monkeypatch):
+    history_backfill._clear_history_runtime_caches()
+    base_snapshot = history_backfill.VersionSnapshot("6.4", "6.4", 64, "sha64", 64)
+    snapshots = (
+        history_backfill.VersionSnapshot("6.5", "6.5", 65, "sha65", 65),
+    )
+    snapshot_payloads = {
+        ("sha64", "TextMapCHS.json"): {
+            "100": "same text",
+        },
+    }
+
+    monkeypatch.setattr(
+        history_backfill,
+        "_load_snapshot_textmap_group",
+        lambda repo_path, commit_sha, base_name: snapshot_payloads.get((commit_sha, base_name)),
+    )
+
+    version_plan = history_backfill._compute_textmap_group_authoritative_versions(
+        repo_path="/tmp/fake-repo",
+        base_name="TextMapCHS.json",
+        current_obj={"100": "same text"},
+        target_hashes=[100],
+        snapshots=snapshots,
+        base_snapshot=base_snapshot,
+        baseline_versions={100: (30, 64)},
+    )
+
+    assert version_plan == {
+        100: (30, 64),
+    }
+
+
+def test_compute_textmap_group_authoritative_versions_marks_middle_snapshot_update(monkeypatch):
+    history_backfill._clear_history_runtime_caches()
+    base_snapshot = history_backfill.VersionSnapshot("6.3", "6.3", 63, "sha63", 63)
+    snapshots = (
+        history_backfill.VersionSnapshot("6.4", "6.4", 64, "sha64", 64),
+        history_backfill.VersionSnapshot("6.5", "6.5", 65, "sha65", 65),
+    )
+    snapshot_payloads = {
+        ("sha64", "TextMapCHS.json"): {
+            "100": "new text",
+        },
+        ("sha63", "TextMapCHS.json"): {
+            "100": "old text",
+        },
+    }
+
+    monkeypatch.setattr(
+        history_backfill,
+        "_load_snapshot_textmap_group",
+        lambda repo_path, commit_sha, base_name: snapshot_payloads.get((commit_sha, base_name)),
+    )
+
+    version_plan = history_backfill._compute_textmap_group_authoritative_versions(
+        repo_path="/tmp/fake-repo",
+        base_name="TextMapCHS.json",
+        current_obj={"100": "new text"},
+        target_hashes=[100],
+        snapshots=snapshots,
+        base_snapshot=base_snapshot,
+        baseline_versions={100: (30, 63)},
+    )
+
+    assert version_plan == {
+        100: (30, 64),
+    }
+
+
 def test_load_textmap_version_cache_for_current_group_reads_requested_hashes():
     conn = sqlite3.connect(":memory:")
     try:
@@ -477,6 +547,7 @@ def test_backfill_textmap_versions_from_history_replays_only_scoped_hashes(monke
         )
         conn.commit()
 
+        base_snapshot = history_backfill.VersionSnapshot("6.4", "6.4", 64, "sha64", 64)
         snapshot = history_backfill.VersionSnapshot("6.5", "6.5", 65, "sha65", 65)
         seen = []
 
@@ -486,13 +557,11 @@ def test_backfill_textmap_versions_from_history_replays_only_scoped_hashes(monke
             "_resolve_snapshot_replay_range",
             lambda *_args, **_kwargs: SimpleNamespace(
                 target_snapshot=snapshot,
+                from_snapshot=base_snapshot,
+                base_snapshot=base_snapshot,
+                snapshots=(snapshot,),
                 raw_target_commit="sha65",
             ),
-        )
-        monkeypatch.setattr(
-            history_backfill,
-            "_get_version_snapshot_metadata",
-            lambda _repo_path: {"snapshots": (snapshot,)},
         )
         monkeypatch.setattr(
             history_backfill,
@@ -509,7 +578,15 @@ def test_backfill_textmap_versions_from_history_replays_only_scoped_hashes(monke
         )
 
         def fake_compute(**kwargs):
-            seen.append((kwargs["base_name"], set(kwargs["target_hashes"])))
+            seen.append(
+                (
+                    kwargs["base_name"],
+                    set(kwargs["target_hashes"]),
+                    tuple(snapshot.version_tag for snapshot in kwargs["snapshots"]),
+                    kwargs["base_snapshot"].version_tag if kwargs["base_snapshot"] else None,
+                    kwargs["baseline_versions"],
+                )
+            )
             return {hash_value: (65, 65) for hash_value in kwargs["target_hashes"]}
 
         monkeypatch.setattr(
@@ -518,7 +595,13 @@ def test_backfill_textmap_versions_from_history_replays_only_scoped_hashes(monke
             fake_compute,
         )
         monkeypatch.setattr(history_backfill, "fast_import_pragmas", lambda *_args, **_kwargs: nullcontext())
-        monkeypatch.setattr(history_backfill, "_backfill_textmap_git_versions", lambda *_args, **_kwargs: 0)
+        git_backfill_scopes = []
+
+        def fake_git_backfill(*_args, **kwargs):
+            git_backfill_scopes.append(kwargs.get("target_hashes_by_base"))
+            return 0
+
+        monkeypatch.setattr(history_backfill, "_backfill_textmap_git_versions", fake_git_backfill)
         monkeypatch.setattr(
             history_backfill,
             "analyze_textmap_version_exceptions",
@@ -534,7 +617,8 @@ def test_backfill_textmap_versions_from_history_replays_only_scoped_hashes(monke
             target_hashes_by_base={"TextMapCHS.json": {200, 999}},
         )
 
-        assert seen == [("TextMapCHS.json", {200})]
+        assert seen == [("TextMapCHS.json", {200}, ("6.5",), "6.4", {200: (10, 10)})]
+        assert git_backfill_scopes == [{"TextMapCHS.json": {200, 999}}]
         assert conn.execute(
             "SELECT hash, created_version_id, updated_version_id FROM textMap ORDER BY hash"
         ).fetchall() == [
@@ -569,6 +653,7 @@ def test_backfill_textmap_versions_from_history_uses_language_similarity_strateg
         )
         conn.commit()
 
+        base_snapshot = history_backfill.VersionSnapshot("6.4", "6.4", 64, "sha64", 64)
         snapshot = history_backfill.VersionSnapshot("6.5", "6.5", 65, "sha65", 65)
         seen = []
 
@@ -578,13 +663,11 @@ def test_backfill_textmap_versions_from_history_uses_language_similarity_strateg
             "_resolve_snapshot_replay_range",
             lambda *_args, **_kwargs: SimpleNamespace(
                 target_snapshot=snapshot,
+                from_snapshot=base_snapshot,
+                base_snapshot=base_snapshot,
+                snapshots=(snapshot,),
                 raw_target_commit="sha65",
             ),
-        )
-        monkeypatch.setattr(
-            history_backfill,
-            "_get_version_snapshot_metadata",
-            lambda _repo_path: {"snapshots": (snapshot,)},
         )
         monkeypatch.setattr(
             history_backfill,

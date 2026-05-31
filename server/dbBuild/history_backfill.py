@@ -88,9 +88,12 @@ from versioning import (
 from lightweight_progress import LightweightProgress
 from server_import import import_server_module
 
-build_quest_version_dialogue_not_excluded_sql = import_server_module(
-    "quest_text_filters"
-).build_quest_version_dialogue_not_excluded_sql
+_quest_text_filters = import_server_module("quest_text_filters")
+build_quest_text_not_excluded_sql = _quest_text_filters.build_quest_text_not_excluded_sql
+build_quest_version_dialogue_not_excluded_sql = (
+    _quest_text_filters.build_quest_version_dialogue_not_excluded_sql
+)
+get_quest_text_filter_lang_id = _quest_text_filters.get_quest_text_filter_lang_id
 
 try:
     reconfigure = getattr(sys.stderr, "reconfigure", None)
@@ -839,7 +842,8 @@ def _backfill_textmap_git_versions(
     cursor,
     textmap_lang_map: dict[str, int],
     desc: str = "TextMap Git 回溯",
-    unit: str = "records"
+    unit: str = "records",
+    target_hashes_by_base: Mapping[str, Collection[int]] | None = None,
 ) -> int:
     """
     Git-based TextMap backfill helper.
@@ -866,6 +870,19 @@ def _backfill_textmap_git_versions(
             print("TextMap Git 回溯跳过：没有可用的版本快照")
             return 0
 
+        scoped_hashes_by_base: dict[str, set[int]] | None = None
+        if target_hashes_by_base is not None:
+            scoped_hashes_by_base = {}
+            for base_name, raw_hashes in target_hashes_by_base.items():
+                normalized_hashes: set[int] = set()
+                for raw_hash in raw_hashes or ():
+                    try:
+                        normalized_hashes.add(int(raw_hash))
+                    except Exception:
+                        continue
+                if normalized_hashes:
+                    scoped_hashes_by_base[str(base_name)] = normalized_hashes
+
         reverse_lang_map = {lang_id: base_name for base_name, lang_id in textmap_lang_map.items()}
         unresolved_groups: dict[str, list[tuple[int, int, object]]] = {}
         for lang_id, hash_value, content, code_name in rows:
@@ -873,6 +890,10 @@ def _backfill_textmap_git_versions(
             base_name = parsed[0] if parsed is not None else reverse_lang_map.get(int(lang_id))
             if not base_name:
                 continue
+            if scoped_hashes_by_base is not None:
+                scoped_hashes = scoped_hashes_by_base.get(base_name)
+                if not scoped_hashes or int(hash_value) not in scoped_hashes:
+                    continue
             unresolved_groups.setdefault(base_name, []).append((int(lang_id), int(hash_value), content))
 
         if not unresolved_groups:
@@ -1404,6 +1425,8 @@ def _compute_textmap_group_authoritative_versions(
     current_obj: Mapping[str, object],
     target_hashes: Collection[int],
     snapshots: tuple[VersionSnapshot, ...],
+    base_snapshot: VersionSnapshot | None = None,
+    baseline_versions: Mapping[int, tuple[int | None, int | None]] | None = None,
     progress_callback: Callable[..., None] | None = None,
     enable_similarity: bool = True,
 ) -> dict[int, tuple[int | None, int | None]]:
@@ -1431,7 +1454,7 @@ def _compute_textmap_group_authoritative_versions(
             break
 
         snapshot = snapshots[idx]
-        previous_snapshot = snapshots[idx - 1] if idx > 0 else None
+        previous_snapshot = snapshots[idx - 1] if idx > 0 else base_snapshot
         previous_snapshot_index = (
             _load_snapshot_textmap_group_index(repo_path, previous_snapshot.commit_sha, base_name)
             if previous_snapshot is not None
@@ -1492,18 +1515,30 @@ def _compute_textmap_group_authoritative_versions(
                 logger.debug("TextMap progress callback failed", exc_info=True)
         active_states = next_active_states
 
+    baseline_active_hashes = set(active_states.keys())
     if snapshots:
         fallback_version_id = snapshots[-1].version_id
+    elif base_snapshot is not None:
+        fallback_version_id = base_snapshot.version_id
     else:
         fallback_version_id = None
     version_plan: dict[int, tuple[int | None, int | None]] = {}
     for hash_value in sorted(current_states.keys()):
+        baseline_created_version: int | None = None
+        baseline_updated_version: int | None = None
+        if baseline_versions is not None and hash_value in baseline_active_hashes:
+            baseline_created_version, baseline_updated_version = baseline_versions.get(hash_value, (None, None))
+
         created_version = created_versions.get(hash_value)
         if created_version is None:
-            created_version = fallback_version_id
+            created_version = baseline_created_version
+            if created_version is None:
+                created_version = fallback_version_id
         updated_version = updated_versions.get(hash_value)
         if updated_version is None:
-            updated_version = created_version
+            updated_version = baseline_updated_version
+            if updated_version is None:
+                updated_version = created_version
         version_plan[hash_value] = (created_version, updated_version)
     return version_plan
 
@@ -3074,19 +3109,17 @@ def backfill_textmap_versions_from_history(
         )
         return
 
-    metadata = _get_version_snapshot_metadata(repo_path)
-    raw_snapshots = metadata.get("snapshots")
-    all_snapshots = tuple(
-        snapshot for snapshot in raw_snapshots if isinstance(snapshot, VersionSnapshot)
-    ) if isinstance(raw_snapshots, Iterable) else tuple()
-    target_idx = next(
-        (idx for idx, snapshot in enumerate(all_snapshots) if snapshot.version_tag == target_snapshot.version_tag),
-        None,
+    snapshots = tuple(
+        snapshot for snapshot in replay_range.snapshots if isinstance(snapshot, VersionSnapshot)
     )
-    if target_idx is None:
-        logger.warning(f"TextMap 版本快照回放：未找到目标快照 {target_snapshot.version_tag}，已跳过。")
+    if not snapshots:
+        logger.info(
+            "TextMap 版本快照回放："
+            f"{_snapshot_display_label(replay_range.from_snapshot)} -> "
+            f"{_snapshot_display_label(target_snapshot)} 无需回放。"
+        )
         return
-    snapshots = all_snapshots[: target_idx + 1]
+    base_snapshot = replay_range.base_snapshot
 
     resolved_target = target_snapshot.commit_sha
     meta_commit_key = "db_history_versions_commit_textmap"
@@ -3094,9 +3127,6 @@ def backfill_textmap_versions_from_history(
     if not force and from_commit is None and get_meta(meta_commit_key) == resolved_target and _has_any_version_data("textMap"):
         logger.info(f"TextMap 版本快照回放已完成于 {target_snapshot.version_tag}，跳过。")
         return
-
-    if from_commit is not None:
-        logger.info("TextMap 版本快照回放：为保证 lineage 准确性，将忽略 from_commit 并重算到目标版本。")
 
     textmap_lang_map = _get_textmap_lang_id_map()
     scoped_hashes_by_base: dict[str, set[int]] | None = None
@@ -3189,6 +3219,15 @@ def backfill_textmap_versions_from_history(
                         current_obj=current_obj,
                         target_hashes=existing_map.keys(),
                         snapshots=snapshots,
+                        base_snapshot=base_snapshot,
+                        baseline_versions={
+                            hash_value: (created_version_id, updated_version_id)
+                            for hash_value, (
+                                _row_id,
+                                created_version_id,
+                                updated_version_id,
+                            ) in existing_map.items()
+                        },
                         progress_callback=_report_group_snapshot_progress,
                         enable_similarity=enable_similarity,
                     )
@@ -3242,7 +3281,11 @@ def backfill_textmap_versions_from_history(
         print("TextMap history phase-1.5: Git history backfill for unresolved textmap rows")
         cursor = conn.cursor()
         try:
-            _backfill_textmap_git_versions(cursor, textmap_lang_map)
+            _backfill_textmap_git_versions(
+                cursor,
+                textmap_lang_map,
+                target_hashes_by_base=scoped_hashes_by_base if from_commit is not None else None,
+            )
         finally:
             cursor.close()
 
@@ -3711,6 +3754,199 @@ def _snapshot_entity_keys(repo_path: str, commit_sha: str | None) -> set[tuple[i
     return entitySourceImport.build_entity_key_set(data, overrides)
 
 
+def _get_entity_text_version_lang_id(cursor) -> int:
+    try:
+        lang_id = get_quest_text_filter_lang_id(cursor)
+        if lang_id is not None:
+            return int(lang_id)
+    except Exception:
+        pass
+    return 1
+
+
+def backfill_catalog_entity_created_versions_from_textmap(
+    cursor,
+    *,
+    batch_size: int = DEFAULT_BATCH_SIZE,
+) -> int:
+    """Use reliable associated TextMap rows to move entity created versions earlier."""
+    def _cursor_table_exists(table_name: str) -> bool:
+        row = cursor.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name=? LIMIT 1",
+            (table_name,),
+        ).fetchone()
+        return row is not None
+
+    if not _cursor_table_exists("text_source_entity") or not _cursor_table_exists("textMap"):
+        return 0
+
+    lang_id = _get_entity_text_version_lang_id(cursor)
+    title_not_excluded_sql, title_not_excluded_params = build_quest_text_not_excluded_sql("tm.content")
+    body_not_excluded_sql, body_not_excluded_params = build_quest_version_dialogue_not_excluded_sql("tm.content")
+
+    reset_temp_table(
+        cursor,
+        """
+        CREATE TEMP TABLE IF NOT EXISTS _entity_text_created_candidate(
+            source_type_code INTEGER NOT NULL,
+            entity_id INTEGER NOT NULL,
+            created_version_id INTEGER NOT NULL,
+            is_title INTEGER NOT NULL,
+            text_hash INTEGER NOT NULL
+        )
+        """,
+        "_entity_text_created_candidate",
+    )
+    reset_temp_table(
+        cursor,
+        """
+        CREATE TEMP TABLE IF NOT EXISTS _entity_text_created_choice(
+            source_type_code INTEGER NOT NULL,
+            entity_id INTEGER NOT NULL,
+            created_version_id INTEGER NOT NULL,
+            PRIMARY KEY(source_type_code, entity_id)
+        )
+        """,
+        "_entity_text_created_choice",
+    )
+
+    cursor.execute(
+        f"""
+        INSERT INTO _entity_text_created_candidate(
+            source_type_code, entity_id, created_version_id, is_title, text_hash
+        )
+        SELECT DISTINCT
+            e.source_type_code,
+            e.entity_id,
+            tm.created_version_id,
+            1 AS is_title,
+            e.title_hash AS text_hash
+        FROM text_source_entity e
+        JOIN textMap tm ON tm.hash = e.title_hash AND tm.lang = ?
+        WHERE e.title_hash IS NOT NULL
+          AND e.title_hash <> 0
+          AND e.created_version_id IS NOT NULL
+          AND tm.created_version_id IS NOT NULL
+          AND {_version_precedes_sql('tm.created_version_id', 'e.created_version_id')}
+          AND {title_not_excluded_sql}
+        """,
+        (lang_id, *title_not_excluded_params),
+    )
+    cursor.execute(
+        f"""
+        INSERT INTO _entity_text_created_candidate(
+            source_type_code, entity_id, created_version_id, is_title, text_hash
+        )
+        SELECT DISTINCT
+            e.source_type_code,
+            e.entity_id,
+            tm.created_version_id,
+            0 AS is_title,
+            e.text_hash AS text_hash
+        FROM text_source_entity e
+        JOIN textMap tm ON tm.hash = e.text_hash AND tm.lang = ?
+        WHERE e.text_hash IS NOT NULL
+          AND e.text_hash <> 0
+          AND e.text_hash <> e.title_hash
+          AND e.created_version_id IS NOT NULL
+          AND tm.created_version_id IS NOT NULL
+          AND (
+            tm.created_version_id = e.created_version_id
+            OR {_version_precedes_sql('tm.created_version_id', 'e.created_version_id')}
+          )
+          AND length(trim(coalesce(tm.content, ''))) > 8
+          AND {body_not_excluded_sql}
+        """,
+        (lang_id, *body_not_excluded_params),
+    )
+    cursor.execute(
+        """
+        CREATE INDEX IF NOT EXISTS _entity_text_created_candidate_entity_idx
+        ON _entity_text_created_candidate(source_type_code, entity_id)
+        """
+    )
+    cursor.execute(
+        """
+        CREATE INDEX IF NOT EXISTS _entity_text_created_candidate_version_idx
+        ON _entity_text_created_candidate(created_version_id)
+        """
+    )
+    cursor.execute(
+        f"""
+        WITH version_counts AS (
+            SELECT
+                source_type_code,
+                entity_id,
+                created_version_id,
+                MAX(is_title) AS has_title_text,
+                COUNT(DISTINCT text_hash) AS text_count
+            FROM _entity_text_created_candidate
+            GROUP BY source_type_code, entity_id, created_version_id
+        ),
+        ranked AS (
+            SELECT
+                vc.source_type_code,
+                vc.entity_id,
+                vc.created_version_id,
+                ROW_NUMBER() OVER (
+                    PARTITION BY vc.source_type_code, vc.entity_id
+                    ORDER BY
+                        vc.text_count DESC,
+                        COALESCE(vd.version_sort_key, 2147483647),
+                        vc.has_title_text DESC,
+                        vc.created_version_id
+                ) AS rn
+            FROM version_counts vc
+            LEFT JOIN version_dim vd ON vd.id = vc.created_version_id
+        )
+        INSERT OR REPLACE INTO _entity_text_created_choice(
+            source_type_code, entity_id, created_version_id
+        )
+        SELECT source_type_code, entity_id, created_version_id
+        FROM ranked
+        WHERE rn = 1
+        """
+    )
+    cursor.execute(
+        f"""
+        SELECT
+            choice.created_version_id,
+            choice.source_type_code,
+            choice.entity_id
+        FROM _entity_text_created_choice choice
+        WHERE EXISTS (
+            SELECT 1
+            FROM text_source_entity e
+            WHERE e.source_type_code = choice.source_type_code
+              AND e.entity_id = choice.entity_id
+              AND e.created_version_id IS NOT NULL
+              AND {_version_precedes_sql('choice.created_version_id', 'e.created_version_id')}
+        )
+        """
+    )
+    update_rows = [
+        (int(row[0]), int(row[1]), int(row[2]))
+        for row in cursor.fetchall()
+        if row and row[0] is not None and row[1] is not None and row[2] is not None
+    ]
+    if not update_rows:
+        return 0
+
+    executemany_batched(
+        cursor,
+        """
+        UPDATE text_source_entity
+        SET created_version_id=?
+        WHERE source_type_code=?
+          AND entity_id=?
+        """,
+        update_rows,
+        batch_size=batch_size,
+    )
+    entitySourceImport._sync_entity_created_versions(cursor)
+    return len(update_rows)
+
+
 def backfill_catalog_entity_versions_from_history(
     *,
     target_commit: str = "HEAD",
@@ -3737,6 +3973,61 @@ def backfill_catalog_entity_versions_from_history(
             return row is not None
         finally:
             cursor.close()
+
+    def _entity_versions_are_dominated_by(version_id: int, threshold: float = 0.95) -> bool:
+        cursor = conn.cursor()
+        try:
+            row = cursor.execute(
+                """
+                WITH entity_versions AS (
+                    SELECT
+                        source_type_code,
+                        entity_id,
+                        MIN(created_version_id) AS min_created_version_id,
+                        MAX(created_version_id) AS max_created_version_id
+                    FROM text_source_entity
+                    GROUP BY source_type_code, entity_id
+                )
+                SELECT
+                    COUNT(*) AS total_entities,
+                    SUM(
+                        CASE
+                            WHEN min_created_version_id = ?
+                             AND max_created_version_id = ?
+                            THEN 1 ELSE 0
+                        END
+                    ) AS matching_entities
+                FROM entity_versions
+                """,
+                (version_id, version_id),
+            ).fetchone()
+            if not row:
+                return False
+            total = int(row[0] or 0)
+            matching = int(row[1] or 0)
+            return total > 0 and (matching / total) >= threshold
+        finally:
+            cursor.close()
+
+    def _should_force_full_entity_replay_for_target() -> bool:
+        try:
+            entity_history_meta = get_meta("db_history_versions_commit_entity", "")
+        except Exception:
+            entity_history_meta = ""
+        if not from_commit or entity_history_meta:
+            return False
+        try:
+            replay_range = _resolve_snapshot_replay_range(
+                DATA_PATH,
+                target_commit=target_commit,
+                from_commit=from_commit,
+            )
+        except Exception:
+            return False
+        target_snapshot = replay_range.target_snapshot
+        if target_snapshot is None or target_snapshot.version_id is None:
+            return False
+        return _entity_versions_are_dominated_by(int(target_snapshot.version_id))
 
     def _get_current_entity_keys(cursor) -> set[tuple[int, int]]:
         nonlocal current_entity_keys
@@ -3806,6 +4097,12 @@ def backfill_catalog_entity_versions_from_history(
             "replaying full entity history."
         )
         effective_from_commit = None
+    elif _should_force_full_entity_replay_for_target():
+        print(
+            "Entity source snapshot replay: missing entity history metadata and "
+            "created versions are dominated by the target version; replaying full entity history."
+        )
+        effective_from_commit = None
     _backfill_versions_from_history(
         target_commit=target_commit,
         from_commit=effective_from_commit,
@@ -3821,8 +4118,24 @@ def backfill_catalog_entity_versions_from_history(
         process_entry_fn=process_entity_entry,
         pbar_desc="Entity source backfill",
         commit_batch_size=10,
-        refresh_version_catalog=refresh_version_catalog,
+        refresh_version_catalog=False,
     )
+    text_fix_cursor = conn.cursor()
+    try:
+        fixed_from_text = backfill_catalog_entity_created_versions_from_textmap(
+            text_fix_cursor,
+            batch_size=batch_size,
+        )
+        if fixed_from_text > 0:
+            conn.commit()
+            print(
+                "Entity source text-version correction complete: "
+                f"{fixed_from_text} entity row group(s) updated."
+            )
+    finally:
+        text_fix_cursor.close()
+    if refresh_version_catalog:
+        rebuild_version_catalog(["text_source_entity"])
 
 
 def fix_created_after_updated_versions(

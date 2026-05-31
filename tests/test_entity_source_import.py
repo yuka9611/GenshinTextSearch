@@ -698,7 +698,7 @@ def _create_entity_version_tables(connection: sqlite3.Connection):
     )
 
 
-def test_import_entity_sources_writes_current_created_version_and_syncs_entity_rows(monkeypatch):
+def test_import_entity_sources_leaves_created_version_for_history_replay(monkeypatch):
     connection = sqlite3.connect(":memory:")
     _create_entity_version_tables(connection)
     monkeypatch.setattr(entitySourceImport, "conn", connection)
@@ -745,6 +745,67 @@ def test_import_entity_sources_writes_current_created_version_and_syncs_entity_r
     )
 
     entitySourceImport.importEntitySources(commit=False, interactive=False)
+
+    rows = connection.execute(
+        """
+        SELECT text_hash, source_type_code, entity_id, created_version_id
+        FROM text_source_entity
+        ORDER BY text_hash
+        """
+    ).fetchall()
+    assert rows == [
+        (21, entitySourceImport.SOURCE_TYPE_ITEM, 1001, None),
+        (22, entitySourceImport.SOURCE_TYPE_ITEM, 1001, None),
+    ]
+
+
+def test_insert_entity_sources_delta_writes_current_created_version(monkeypatch):
+    connection = sqlite3.connect(":memory:")
+    _create_entity_version_tables(connection)
+    monkeypatch.setattr(entitySourceImport, "conn", connection)
+    monkeypatch.setattr(entitySourceImport, "ensure_version_schema", lambda: None)
+    monkeypatch.setattr(entitySourceImport, "get_current_version", lambda: "Version 2.0")
+    monkeypatch.setattr(entitySourceImport, "get_or_create_version_id", lambda version: 2)
+    monkeypatch.setattr(entitySourceImport, "check_and_classify_interactive", lambda *_args, **_kwargs: {})
+    monkeypatch.setattr(entitySourceImport, "_print_entity_source_summary", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(
+        entitySourceImport,
+        "_load_all_entity_data",
+        lambda _root: {
+            "materials": [
+                {
+                    "id": 1001,
+                    "nameTextMapHash": 11,
+                    "descTextMapHash": 21,
+                    "effectDescTextMapHash": 22,
+                    "materialType": "MATERIAL_QUEST",
+                }
+            ],
+            "furnitures": [],
+            "costumes": [],
+            "suits": [],
+            "emojis": [],
+            "poses": [],
+            "effects": [],
+            "halls": [],
+            "hall_facilities": [],
+            "avatar_costumes": [],
+            "weapons": [],
+            "reliquaries": [],
+            "codex": [],
+            "achievements": [],
+            "viewpoints": [],
+            "dungeons": [],
+            "loading_tips": [],
+            "gcg_cards": [],
+            "gcg_chars": [],
+            "gcg_skills": [],
+            "describe_title_map": {},
+            "codex_desc_map": {},
+        },
+    )
+
+    entitySourceImport.insertEntitySourcesDelta(commit=False, interactive=False)
 
     rows = connection.execute(
         """
@@ -816,9 +877,119 @@ def test_catalog_entity_history_backfill_updates_only_new_snapshot_entities(monk
     assert rows == [(1001, None), (2002, 2)]
 
 
-def test_catalog_queries_prefer_entity_created_version_and_fallback_to_textmap(monkeypatch):
+def test_catalog_entity_history_backfill_replays_full_when_all_rows_are_target_version(monkeypatch):
     connection = sqlite3.connect(":memory:")
     _create_entity_version_tables(connection)
+    connection.executemany(
+        """
+        INSERT INTO text_source_entity(text_hash, source_type_code, entity_id, title_hash, extra, sub_category, created_version_id)
+        VALUES (?,?,?,?,?,?,?)
+        """,
+        [
+            (21, entitySourceImport.SOURCE_TYPE_ITEM, 1001, 11, 1, 0, 2),
+            (31, entitySourceImport.SOURCE_TYPE_ITEM, 2002, 12, 1, 0, 2),
+        ],
+    )
+    monkeypatch.setattr(history_backfill, "conn", connection)
+    monkeypatch.setattr(history_backfill, "get_meta", lambda _key, default="": default)
+    monkeypatch.setattr(entitySourceImport, "ensure_version_schema", lambda: None)
+    monkeypatch.setattr(entitySourceImport, "_load_overrides", lambda: ({}, set()))
+
+    def fake_git_show_json(_repo_path, commit_sha, rel_path):
+        if rel_path != "ExcelBinOutput/MaterialExcelConfigData.json":
+            return []
+        base_rows = [
+            {"id": 1001, "nameTextMapHash": 11, "descTextMapHash": 21, "materialType": "MATERIAL_QUEST"},
+        ]
+        if commit_sha == "child":
+            return [
+                *base_rows,
+                {"id": 2002, "nameTextMapHash": 12, "descTextMapHash": 31, "materialType": "MATERIAL_QUEST"},
+            ]
+        if commit_sha == "base":
+            return base_rows
+        return []
+
+    target_snapshot = history_backfill.VersionSnapshot(
+        version_tag="2.0",
+        version_label="Version 2.0",
+        version_id=2,
+        commit_sha="child",
+        version_sort_key=2000,
+    )
+    from_snapshot = history_backfill.VersionSnapshot(
+        version_tag="1.0",
+        version_label="Version 1.0",
+        version_id=1,
+        commit_sha="base",
+        version_sort_key=1000,
+    )
+
+    monkeypatch.setattr(
+        history_backfill,
+        "_resolve_snapshot_replay_range",
+        lambda *_args, **_kwargs: history_backfill.SnapshotReplayRange(
+            raw_target_commit="child",
+            raw_from_commit="base",
+            target_snapshot=target_snapshot,
+            from_snapshot=from_snapshot,
+            base_snapshot=None,
+            snapshots=(target_snapshot,),
+            resume_scope="base..child",
+        ),
+    )
+
+    captured = {}
+
+    def fake_backfill_versions_from_history(**kwargs):
+        captured.update(kwargs)
+        cursor = connection.cursor()
+        try:
+            kwargs["process_entry_fn"](
+                cursor,
+                "/repo",
+                "base",
+                None,
+                {"action": "A", "new_path": "ExcelBinOutput/MaterialExcelConfigData.json"},
+                1,
+                "Version 1.0",
+                100,
+            )
+            kwargs["process_entry_fn"](
+                cursor,
+                "/repo",
+                "child",
+                "base",
+                {"action": "M", "new_path": "ExcelBinOutput/MaterialExcelConfigData.json"},
+                2,
+                "Version 2.0",
+                100,
+            )
+            connection.commit()
+        finally:
+            cursor.close()
+
+    monkeypatch.setattr(history_backfill, "_git_show_json", fake_git_show_json)
+    monkeypatch.setattr(history_backfill, "_backfill_versions_from_history", fake_backfill_versions_from_history)
+
+    history_backfill.backfill_catalog_entity_versions_from_history(
+        target_commit="child",
+        from_commit="base",
+        refresh_version_catalog=False,
+    )
+
+    rows = connection.execute(
+        """
+        SELECT entity_id, created_version_id
+        FROM text_source_entity
+        ORDER BY entity_id
+        """
+    ).fetchall()
+    assert captured["from_commit"] is None
+    assert rows == [(1001, 1), (2002, 2)]
+
+
+def _create_textmap_version_table(connection: sqlite3.Connection) -> None:
     connection.execute(
         """
         CREATE TABLE textMap (
@@ -830,6 +1001,128 @@ def test_catalog_queries_prefer_entity_created_version_and_fallback_to_textmap(m
         )
         """
     )
+
+
+def test_entity_text_version_correction_prefers_title_version():
+    connection = sqlite3.connect(":memory:")
+    _create_entity_version_tables(connection)
+    _create_textmap_version_table(connection)
+    connection.executemany(
+        "INSERT INTO textMap(hash, content, lang, created_version_id, updated_version_id) VALUES (?,?,?,?,?)",
+        [
+            (11, "可靠标题", 1, 1, 1),
+            (21, "可靠描述", 1, 2, 2),
+        ],
+    )
+    connection.executemany(
+        """
+        INSERT INTO text_source_entity(text_hash, source_type_code, entity_id, title_hash, extra, sub_category, created_version_id)
+        VALUES (?,?,?,?,?,?,?)
+        """,
+        [
+            (21, entitySourceImport.SOURCE_TYPE_ITEM, 1001, 11, 1, 0, 3),
+            (22, entitySourceImport.SOURCE_TYPE_ITEM, 1001, 11, 1, 0, 3),
+        ],
+    )
+
+    changed = history_backfill.backfill_catalog_entity_created_versions_from_textmap(connection.cursor())
+
+    rows = connection.execute(
+        """
+        SELECT text_hash, created_version_id
+        FROM text_source_entity
+        ORDER BY text_hash
+        """
+    ).fetchall()
+    assert changed == 1
+    assert rows == [(21, 1), (22, 1)]
+
+
+def test_entity_text_version_correction_uses_body_majority_and_earlier_tie():
+    connection = sqlite3.connect(":memory:")
+    _create_entity_version_tables(connection)
+    _create_textmap_version_table(connection)
+    connection.executemany(
+        "INSERT INTO textMap(hash, content, lang, created_version_id, updated_version_id) VALUES (?,?,?,?,?)",
+        [
+            (101, "当前标题", 1, 3, 3),
+            (111, "可靠描述甲版本较长", 1, 2, 2),
+            (112, "可靠描述乙版本较长", 1, 2, 2),
+            (113, "可靠描述丙版本较长", 1, 1, 1),
+            (201, "另一个当前标题", 1, 3, 3),
+            (211, "同票描述甲版本较长", 1, 2, 2),
+            (212, "同票描述乙版本较长", 1, 1, 1),
+        ],
+    )
+    connection.executemany(
+        """
+        INSERT INTO text_source_entity(text_hash, source_type_code, entity_id, title_hash, extra, sub_category, created_version_id)
+        VALUES (?,?,?,?,?,?,?)
+        """,
+        [
+            (111, entitySourceImport.SOURCE_TYPE_ITEM, 2002, 101, 1, 0, 3),
+            (112, entitySourceImport.SOURCE_TYPE_ITEM, 2002, 101, 1, 0, 3),
+            (113, entitySourceImport.SOURCE_TYPE_ITEM, 2002, 101, 1, 0, 3),
+            (211, entitySourceImport.SOURCE_TYPE_ITEM, 3003, 201, 1, 0, 3),
+            (212, entitySourceImport.SOURCE_TYPE_ITEM, 3003, 201, 1, 0, 3),
+        ],
+    )
+
+    changed = history_backfill.backfill_catalog_entity_created_versions_from_textmap(connection.cursor())
+
+    rows = connection.execute(
+        """
+        SELECT entity_id, MIN(created_version_id), MAX(created_version_id)
+        FROM text_source_entity
+        GROUP BY entity_id
+        ORDER BY entity_id
+        """
+    ).fetchall()
+    assert changed == 2
+    assert rows == [(2002, 2, 2), (3003, 1, 1)]
+
+
+def test_entity_text_version_correction_ignores_short_and_test_body_texts():
+    connection = sqlite3.connect(":memory:")
+    _create_entity_version_tables(connection)
+    _create_textmap_version_table(connection)
+    connection.executemany(
+        "INSERT INTO textMap(hash, content, lang, created_version_id, updated_version_id) VALUES (?,?,?,?,?)",
+        [
+            (101, "当前标题", 1, 3, 3),
+            (111, "食物", 1, 1, 1),
+            (201, "另一个当前标题", 1, 3, 3),
+            (211, "(test)旧文本", 1, 1, 1),
+        ],
+    )
+    connection.executemany(
+        """
+        INSERT INTO text_source_entity(text_hash, source_type_code, entity_id, title_hash, extra, sub_category, created_version_id)
+        VALUES (?,?,?,?,?,?,?)
+        """,
+        [
+            (111, entitySourceImport.SOURCE_TYPE_ITEM, 4004, 101, 1, 0, 3),
+            (211, entitySourceImport.SOURCE_TYPE_ITEM, 5005, 201, 1, 0, 3),
+        ],
+    )
+
+    changed = history_backfill.backfill_catalog_entity_created_versions_from_textmap(connection.cursor())
+
+    rows = connection.execute(
+        """
+        SELECT entity_id, created_version_id
+        FROM text_source_entity
+        ORDER BY entity_id
+        """
+    ).fetchall()
+    assert changed == 0
+    assert rows == [(4004, 3), (5005, 3)]
+
+
+def test_catalog_queries_prefer_entity_created_version_and_fallback_to_textmap(monkeypatch):
+    connection = sqlite3.connect(":memory:")
+    _create_entity_version_tables(connection)
+    _create_textmap_version_table(connection)
     connection.executemany(
         "INSERT INTO textMap(hash, content, lang, created_version_id, updated_version_id) VALUES (?,?,?,?,?)",
         [
