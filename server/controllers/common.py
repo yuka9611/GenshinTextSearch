@@ -3051,6 +3051,14 @@ def _sort_search_results(ans: list[dict], keyword: str, langCode: int, is_hash_q
     return ans
 
 
+def _get_search_display_cache_fingerprint() -> tuple[tuple[int, ...], int, object]:
+    return (
+        tuple(config.getResultLanguages() or []),
+        config.getSourceLanguage(),
+        config.getIsMale(),
+    )
+
+
 def getTranslateObj(
     keyword: str,
     langCode: int,
@@ -3082,6 +3090,7 @@ def getTranslateObj(
         created_version_filter,
         updated_version_filter,
         source_type_filter,
+        _get_search_display_cache_fingerprint(),
     )
 
     # 尝试从缓存中获取结果

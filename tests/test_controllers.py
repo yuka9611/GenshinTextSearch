@@ -49,6 +49,45 @@ def _patch_avatar_story_dependencies(
     )
 
 
+class TestSearchCache:
+    def test_translate_cache_varies_by_result_languages(self, monkeypatch):
+        controllers.search_cache.clear()
+        try:
+            display_langs = {"value": [1]}
+            calls = []
+
+            monkeypatch.setattr(controllers.config, "getResultLanguages", lambda: display_langs["value"])
+            monkeypatch.setattr(controllers.config, "getSourceLanguage", lambda: 1)
+            monkeypatch.setattr(controllers.config, "getIsMale", lambda: False)
+            monkeypatch.setattr(controllers, "_enrich_primary_sources", lambda contents, source_lang_code: None)
+
+            def fake_keyword_query(*_args, **_kwargs):
+                calls.append(tuple(display_langs["value"]))
+                return (
+                    [
+                        {
+                            "hash": 1,
+                            "translates": {
+                                str(lang): f"text-{lang}" for lang in display_langs["value"]
+                            },
+                        }
+                    ],
+                    1,
+                )
+
+            monkeypatch.setattr(controllers, "_handle_keyword_only_query", fake_keyword_query)
+
+            first_contents, _ = controllers.getTranslateObj("测试", 1)
+            display_langs["value"] = [4]
+            second_contents, _ = controllers.getTranslateObj("测试", 1)
+
+            assert first_contents[0]["translates"] == {"1": "text-1"}
+            assert second_contents[0]["translates"] == {"4": "text-4"}
+            assert calls == [(1,), (4,)]
+        finally:
+            controllers.search_cache.clear()
+
+
 # ---------------------------------------------------------------------------
 # source_type filter helpers
 # ---------------------------------------------------------------------------

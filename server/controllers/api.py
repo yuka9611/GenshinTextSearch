@@ -1255,6 +1255,7 @@ def saveSettings():
         config.setIsMale(newConfig["isMale"])
 
     config.saveConfig()
+    search_cache.increment_version()
     return jsonify({
         "data": _get_config_payload(),
         "code": 200,

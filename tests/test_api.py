@@ -99,6 +99,28 @@ class TestStartupAndSettingsEndpoints:
         assert data["data"]["defaultSearchLanguage"] == 1
         assert data["data"]["assetDirValid"] is False
 
+    def test_save_settings_refreshes_search_cache(self, monkeypatch, tmp_config):
+        calls = []
+        monkeypatch.setattr(api.search_cache, "increment_version", lambda: calls.append("increment"))
+
+        app = _app()
+        payload = {
+            "config": {
+                "defaultSearchLanguage": 4,
+                "resultLanguages": [4],
+                "sourceLanguage": 4,
+                "isMale": True,
+            }
+        }
+        with _request_context(app, "/api/saveSettings", method="POST", json_body=payload):
+            resp = api.saveSettings()
+
+        data = resp.get_json()
+        assert resp.status_code == 200
+        assert data["code"] == 200
+        assert data["data"]["resultLanguages"] == [4]
+        assert calls == ["increment"]
+
 
 class TestSearchEndpoint:
     def test_search_empty_keyword(self, monkeypatch):

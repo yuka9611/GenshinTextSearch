@@ -133,6 +133,7 @@
 <script setup>
 import global from "@/global/global"
 import api from "@/api/basicInfo"
+import requestCache from "@/utils/requestCache"
 import { computed, onBeforeMount, ref } from "vue"
 import { ElMessage } from "element-plus"
 import useLanguage from "@/composables/useLanguage"
@@ -349,6 +350,7 @@ const save = async () => {
       global.config.defaultSearchLanguage = newConfig.defaultSearchLanguage
       global.config.sourceLanguage = newConfig.sourceLanguage
       global.config.isMale = newConfig.isMale
+      requestCache.clear()
 
       // 后端新版 getConfig() 会带 assetDirValid
       if (typeof newConfig.assetDirValid !== "undefined") {
