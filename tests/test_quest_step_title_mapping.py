@@ -370,6 +370,53 @@ def test_backfill_quest_metadata_populates_finish_plot_step_title(monkeypatch, t
     assert row == (1897459020,)
 
 
+def test_backfill_quest_metadata_uses_main_quest_chapter_id_for_6_6_schema(monkeypatch, tmp_path):
+    connection = sqlite3.connect(":memory:")
+    _create_backfill_tables(connection)
+    connection.execute(
+        "INSERT INTO quest(questId, titleTextMapHash, descTextMapHash, longDescTextMapHash, chapterId, source_type, source_code_raw) VALUES (?,?,?,?,?,?,?)",
+        (6034, 4148058431, None, None, 6034, "AQ", "AQ"),
+    )
+
+    quest_obj = {
+        "GMOMCKNPBGE": 6034,
+        "ALLMCLJBBDM": 4148058431,
+        "JILHIMLENJK": 6034,
+        "EOHJIHHMBAN": [106034],
+    }
+    main_quest_rows = [
+        {
+            "id": 6034,
+            "chapterId": 1611,
+            "descTextMapHash": 3061644630,
+        }
+    ]
+
+    quest_dir = tmp_path / "BinOutput" / "Quest"
+    quest_dir.mkdir(parents=True)
+    (quest_dir / "6034.json").write_text(json.dumps(quest_obj), encoding="utf-8")
+
+    excel_dir = tmp_path / "ExcelBinOutput"
+    excel_dir.mkdir(parents=True)
+    (excel_dir / "MainQuestExcelConfigData.json").write_text(json.dumps(main_quest_rows), encoding="utf-8")
+
+    monkeypatch.setattr(questImport, "conn", connection)
+    monkeypatch.setattr(questImport, "DATA_PATH", str(tmp_path))
+    monkeypatch.setattr(questImport, "LightweightProgress", _DummyProgress)
+    monkeypatch.setattr(questImport, "_ensure_quest_version_tables", lambda cursor: None)
+    monkeypatch.setattr(questImport, "_print_skip_summary", lambda *args, **kwargs: None)
+    monkeypatch.setattr(questImport, "_MAIN_QUEST_DESC_HASH_BY_ID", None)
+    monkeypatch.setattr(questImport, "_MAIN_QUEST_CHAPTER_ID_BY_ID", None)
+
+    questImport.backfillQuestMetadata(commit=False)
+
+    row = connection.execute(
+        "SELECT descTextMapHash, chapterId FROM quest WHERE questId=?",
+        (6034,),
+    ).fetchone()
+    assert row == (3061644630, 1611)
+
+
 def test_backfill_quest_metadata_preserves_top_level_talk_title_after_quest_brief(monkeypatch, tmp_path):
     connection = sqlite3.connect(":memory:")
     _create_backfill_tables(connection)

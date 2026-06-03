@@ -52,6 +52,7 @@ sanitize_quest_text_hash = quest_text_filters.sanitize_quest_text_hash
 
 
 _MAIN_QUEST_DESC_HASH_BY_ID: dict[int, int | None] | None = None
+_MAIN_QUEST_CHAPTER_ID_BY_ID: dict[int, int | None] | None = None
 _HAS_TALK_DIALOGUE_LINKS: bool | None = None
 QUEST_TALK_NORMAL_COOP_ID = 0
 QUEST_TALK_SCOPE_ALL = "all"
@@ -558,6 +559,41 @@ def _get_quest_desc_text_map_hash(quest_id: int | None) -> int | None:
     return _load_main_quest_desc_hash_by_id().get(quest_id)
 
 
+def _load_main_quest_chapter_id_by_id() -> dict[int, int | None]:
+    global _MAIN_QUEST_CHAPTER_ID_BY_ID
+    if _MAIN_QUEST_CHAPTER_ID_BY_ID is not None:
+        return _MAIN_QUEST_CHAPTER_ID_BY_ID
+
+    mapping: dict[int, int | None] = {}
+    path = os.path.join(DATA_PATH, "ExcelBinOutput", "MainQuestExcelConfigData.json")
+    if os.path.isfile(path):
+        try:
+            rows = load_json_file(path)
+        except Exception:
+            rows = []
+        if isinstance(rows, list):
+            for row in rows:
+                if not isinstance(row, dict):
+                    continue
+                quest_id = row.get("id")
+                if not isinstance(quest_id, int):
+                    continue
+                chapter_id = row.get("chapterId")
+                mapping[quest_id] = chapter_id if isinstance(chapter_id, int) and chapter_id != 0 else None
+
+    _MAIN_QUEST_CHAPTER_ID_BY_ID = mapping
+    return mapping
+
+
+def _resolve_quest_chapter_id(quest_id: int | None, quest_chapter_id: int | None) -> int | None:
+    if not isinstance(quest_id, int):
+        return quest_chapter_id if isinstance(quest_chapter_id, int) and quest_chapter_id != 0 else None
+    main_chapter_id = _load_main_quest_chapter_id_by_id().get(quest_id)
+    if isinstance(main_chapter_id, int) and main_chapter_id != 0:
+        return main_chapter_id
+    return quest_chapter_id if isinstance(quest_chapter_id, int) and quest_chapter_id != 0 else None
+
+
 def _build_quest_talk_rows(obj: dict, talk_ids: list[int]) -> list[tuple[int, int | None, int]]:
     step_title_hash_by_talk_id = build_step_title_hash_by_talk_id(obj)
     rows: list[tuple[int, int | None, int]] = []
@@ -856,6 +892,7 @@ def importQuest(
         return None, False
 
     questId, titleTextMapHash, chapterId = quest_row
+    chapterId = _resolve_quest_chapter_id(questId, chapterId)
     descTextMapHash = _get_quest_desc_text_map_hash(questId)
     longDescTextMapHash = None
     source_type, source_code_raw = resolve_quest_source_fields(questId)
@@ -866,9 +903,6 @@ def importQuest(
                 missing_title_collector.append(f"{questId} ({fileName})")
             else:
                 print("questId {} don't have TitleTextMapHash!".format(questId))
-    if chapterId == 0:
-        chapterId = None
-
     talk_ids = extract_quest_talk_ids(obj)
     raw_talk_rows = _build_quest_talk_rows(obj, talk_ids)
     new_talk_rows = _filter_quest_talk_rows_by_available_dialogues(cursor, raw_talk_rows)
@@ -958,6 +992,7 @@ def importQuestForDiff(
         return None, False
 
     questId, titleTextMapHash, chapterId = quest_row
+    chapterId = _resolve_quest_chapter_id(questId, chapterId)
     descTextMapHash = _get_quest_desc_text_map_hash(questId)
     longDescTextMapHash = None
     source_type, source_code_raw = resolve_quest_source_fields(questId)
@@ -968,9 +1003,6 @@ def importQuestForDiff(
                 missing_title_collector.append(f"{questId} ({fileName})")
             else:
                 print("questId {} don't have TitleTextMapHash!".format(questId))
-    if chapterId == 0:
-        chapterId = None
-
     talk_ids = extract_quest_talk_ids(obj)
     raw_talk_rows = _build_quest_talk_rows(obj, talk_ids)
     new_talk_rows = _filter_quest_talk_rows_by_available_dialogues(cursor, raw_talk_rows)
@@ -1231,7 +1263,7 @@ def backfillQuestMetadata(*, commit: bool = True, batch_size: int = DEFAULT_BATC
 
     quest_folder = os.path.join(DATA_PATH, "BinOutput", "Quest")
     quest_files = sorted(os.listdir(quest_folder)) if os.path.isdir(quest_folder) else []
-    quest_desc_rows: list[tuple[int | None, int]] = []
+    quest_desc_rows: list[tuple[int | None, int | None, int]] = []
     quest_talk_rows: list[tuple[int | None, int, int, int]] = []
     skipped_quest_files: list[str] = []
 
@@ -1269,7 +1301,13 @@ def backfillQuestMetadata(*, commit: bool = True, batch_size: int = DEFAULT_BATC
                     continue
 
                 quest_id = int(quest_row[0])
-                quest_desc_rows.append((_get_quest_desc_text_map_hash(quest_id), quest_id))
+                quest_desc_rows.append(
+                    (
+                        _get_quest_desc_text_map_hash(quest_id),
+                        _resolve_quest_chapter_id(quest_id, quest_row[2]),
+                        quest_id,
+                    )
+                )
                 for talk_id, step_hash, coop_quest_id in _filter_quest_talk_rows_by_available_dialogues(
                     cursor,
                     _build_quest_talk_rows(obj, extract_quest_talk_ids(obj)),
@@ -1312,7 +1350,7 @@ def backfillQuestMetadata(*, commit: bool = True, batch_size: int = DEFAULT_BATC
 
         executemany_batched(
             cursor,
-            "UPDATE quest SET descTextMapHash=? WHERE questId=?",
+            "UPDATE quest SET descTextMapHash=?, chapterId=? WHERE questId=?",
             quest_desc_rows,
             batch_size=batch_size,
         )
