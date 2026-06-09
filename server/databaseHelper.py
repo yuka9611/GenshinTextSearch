@@ -1199,6 +1199,26 @@ def _get_quest_bin_output(questId: int) -> dict | None:
     return payload if isinstance(payload, dict) else None
 
 
+def _is_hidden_quest_source_obj(obj: object) -> bool:
+    if not isinstance(obj, dict):
+        return False
+    for key in ("showType", "FAPKBAGMFND", "questType", "NCDLPENPKKC", "OIJGOOIJBCH"):
+        if obj.get(key) == "QUEST_HIDDEN":
+            return True
+    return False
+
+
+def isHiddenQuestWithoutBody(questId: int) -> bool:
+    quest_id = _coerce_optional_int(questId)
+    if quest_id is None:
+        return False
+    quest_bin = _get_quest_bin_output(quest_id)
+    main_quest = _load_main_quest_rows_by_id().get(quest_id)
+    if not (_is_hidden_quest_source_obj(quest_bin) or _is_hidden_quest_source_obj(main_quest)):
+        return False
+    return countQuestDialogues(quest_id) <= 0
+
+
 def _resolve_quest_step_text_hash(step_obj: dict) -> int | None:
     keys = (
         "AJGGCMPLKHK",

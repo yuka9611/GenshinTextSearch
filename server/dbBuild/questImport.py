@@ -28,6 +28,8 @@ from quest_source_utils import (
     build_hangout_payload,
     build_step_title_hash_by_talk_id,
     extract_anecdote_payload,
+    get_quest_subquests,
+    get_step_talk_ids,
     iter_subquest_talk_rows,
     load_main_coop_ids_by_quest_id,
     load_storyboard_file_by_talk_id,
@@ -268,7 +270,11 @@ def _build_quest_upsert_sql(*, with_created_version: bool = False) -> str:
 def _is_hidden_quest_obj(obj: object) -> bool:
     quest_type = None
     if isinstance(obj, dict):
-        if "questType" in obj:
+        if "showType" in obj:
+            quest_type = obj.get("showType")
+        elif "FAPKBAGMFND" in obj:
+            quest_type = obj.get("FAPKBAGMFND")
+        elif "questType" in obj:
             quest_type = obj.get("questType")
         elif "NCDLPENPKKC" in obj:
             quest_type = obj.get("NCDLPENPKKC")
@@ -594,6 +600,14 @@ def _resolve_quest_chapter_id(quest_id: int | None, quest_chapter_id: int | None
     return quest_chapter_id if isinstance(quest_chapter_id, int) and quest_chapter_id != 0 else None
 
 
+def _collect_quest_talk_ids(obj: dict) -> list[int]:
+    talk_ids: list[int] = []
+    talk_ids.extend(extract_quest_talk_ids(obj))
+    for step in get_quest_subquests(obj):
+        talk_ids.extend(get_step_talk_ids(step))
+    return normalize_unique_ints(talk_ids, positive_only=True)
+
+
 def _build_quest_talk_rows(obj: dict, talk_ids: list[int]) -> list[tuple[int, int | None, int]]:
     step_title_hash_by_talk_id = build_step_title_hash_by_talk_id(obj)
     rows: list[tuple[int, int | None, int]] = []
@@ -903,7 +917,7 @@ def importQuest(
                 missing_title_collector.append(f"{questId} ({fileName})")
             else:
                 print("questId {} don't have TitleTextMapHash!".format(questId))
-    talk_ids = extract_quest_talk_ids(obj)
+    talk_ids = _collect_quest_talk_ids(obj)
     raw_talk_rows = _build_quest_talk_rows(obj, talk_ids)
     new_talk_rows = _filter_quest_talk_rows_by_available_dialogues(cursor, raw_talk_rows)
     if not talk_ids or not new_talk_rows:
@@ -1003,7 +1017,7 @@ def importQuestForDiff(
                 missing_title_collector.append(f"{questId} ({fileName})")
             else:
                 print("questId {} don't have TitleTextMapHash!".format(questId))
-    talk_ids = extract_quest_talk_ids(obj)
+    talk_ids = _collect_quest_talk_ids(obj)
     raw_talk_rows = _build_quest_talk_rows(obj, talk_ids)
     new_talk_rows = _filter_quest_talk_rows_by_available_dialogues(cursor, raw_talk_rows)
     if not talk_ids or not new_talk_rows:
@@ -1310,7 +1324,7 @@ def backfillQuestMetadata(*, commit: bool = True, batch_size: int = DEFAULT_BATC
                 )
                 for talk_id, step_hash, coop_quest_id in _filter_quest_talk_rows_by_available_dialogues(
                     cursor,
-                    _build_quest_talk_rows(obj, extract_quest_talk_ids(obj)),
+                    _build_quest_talk_rows(obj, _collect_quest_talk_ids(obj)),
                 ):
                     quest_talk_rows.append((step_hash, quest_id, talk_id, coop_quest_id))
                 pbar.update()

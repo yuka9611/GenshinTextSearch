@@ -484,6 +484,74 @@ def test_filter_quest_talk_rows_uses_link_table_for_collision_scope_fix_and_drop
     ]
 
 
+def test_import_quest_collects_6_6_step_talk_ids_for_body_text(monkeypatch, tmp_path):
+    connection = sqlite3.connect(":memory:")
+    _create_dialogue_tables(connection)
+    _create_quest_tables(connection)
+    connection.executemany(
+        "INSERT INTO talk_dialogue_link(talkId, coopQuestId, dialogueId) VALUES (?,?,?)",
+        [
+            (603401, 0, 60340101),
+            (603402, 0, 60340201),
+        ],
+    )
+
+    quest_dir = tmp_path / "BinOutput" / "Quest"
+    quest_dir.mkdir(parents=True)
+    (quest_dir / "6034.json").write_text(
+        json.dumps(
+            {
+                "GMOMCKNPBGE": 6034,
+                "ALLMCLJBBDM": 4148058431,
+                "JILHIMLENJK": 0,
+                "EOHJIHHMBAN": [106034],
+                "IKECHKLEFFK": [
+                    {
+                        "CBOGAFHNHNI": 6034,
+                        "LAFBPKMMBHD": 603401,
+                        "JDFENJAFCPF": 848637268,
+                        "EDPMKKJIKCJ": 1,
+                        "PGELADPAKLA": [
+                            {
+                                "MEGMIMEDODJ": "QUEST_CONTENT_COMPLETE_TALK",
+                                "KFDJJBPNIHG": [603401, 0],
+                            }
+                        ],
+                    },
+                    {
+                        "CBOGAFHNHNI": 6034,
+                        "LAFBPKMMBHD": 603402,
+                        "JDFENJAFCPF": 2444423324,
+                        "EDPMKKJIKCJ": 2,
+                        "PGELADPAKLA": [
+                            {
+                                "MEGMIMEDODJ": "QUEST_CONTENT_COMPLETE_TALK",
+                                "KFDJJBPNIHG": [603402, 0],
+                            }
+                        ],
+                    },
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    monkeypatch.setattr(questImport, "DATA_PATH", str(tmp_path))
+    monkeypatch.setattr(questImport, "conn", connection)
+    monkeypatch.setattr(questImport, "_get_quest_desc_text_map_hash", lambda quest_id: None)
+    monkeypatch.setattr(questImport, "_build_quest_dialogue_signature", lambda *_args, **_kwargs: "")
+    monkeypatch.setattr(questImport, "_sanitize_quest_title_text_map_hash", lambda _cursor, text_hash: text_hash)
+    questImport._set_talk_dialogue_link_presence(None)
+
+    assert questImport.importQuest("6034.json") == (6034, True)
+    assert connection.execute(
+        "SELECT questId, talkId, stepTitleTextMapHash, coopQuestId FROM questTalk ORDER BY talkId"
+    ).fetchall() == [
+        (6034, 603401, 848637268, 0),
+        (6034, 603402, 2444423324, 0),
+    ]
+
+
 def test_database_helper_quest_dialogue_queries_use_talk_dialogue_link(monkeypatch):
     connection = sqlite3.connect(":memory:")
     _create_dialogue_tables(connection)

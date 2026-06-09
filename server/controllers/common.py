@@ -3165,6 +3165,9 @@ def searchNameEntries(
     def build_preview(content: str | None):
         return _build_keyword_preview(content, keyword_trim)
 
+    def should_skip_quest(quest_id: int) -> bool:
+        return databaseHelper.isHiddenQuestWithoutBody(quest_id)
+
     def resolve_readable_title_hash(
         file_name: str,
         readable_id: int | None,
@@ -3364,7 +3367,11 @@ def searchNameEntries(
         else:
             quest_map = speaker_quest_map
 
-    quests.extend(entry for entry in quest_map.values() if _has_visible_quest_card_content(entry))
+    quests.extend(
+        entry
+        for questId, entry in quest_map.items()
+        if not should_skip_quest(questId) and _has_visible_quest_card_content(entry)
+    )
 
     langMap = databaseHelper.getLangCodeMap()
     if (

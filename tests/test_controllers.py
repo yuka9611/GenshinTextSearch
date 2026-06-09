@@ -1534,6 +1534,28 @@ def _patch_search_name_empty_quest_dependencies(monkeypatch):
     monkeypatch.setattr(controllers.databaseHelper, "resolveReadableTitleHash", lambda readable_id, file_name: None)
 
 
+def test_search_name_entries_skips_hidden_quests_without_body(monkeypatch):
+    _patch_search_name_empty_quest_dependencies(monkeypatch)
+    monkeypatch.setattr(
+        controllers.databaseHelper,
+        "selectQuestByTitleKeyword",
+        lambda *args, **kwargs: [
+            (76215, "(test)隐藏$HIDDEN", "WQ", "6.6", None),
+            (70088, "(test)隐藏$HIDDEN", "WQ", "6.6", None),
+            (6034, "幽暗时分", "AQ", "6.6", None),
+        ],
+    )
+    monkeypatch.setattr(controllers.databaseHelper, "getQuestChapterName", lambda quest_id, lang_code: None)
+    monkeypatch.setattr(controllers.databaseHelper, "isHiddenQuestWithoutBody", lambda quest_id: quest_id == 76215)
+    monkeypatch.setattr(controllers.databaseHelper, "selectReadableByTitleKeyword", lambda *args, **kwargs: [])
+    monkeypatch.setattr(controllers.databaseHelper, "selectReadableByFileNameContains", lambda *args, **kwargs: [])
+    monkeypatch.setattr(controllers.databaseHelper, "selectReadableFromKeyword", lambda *args, **kwargs: [])
+
+    result = controllers.searchNameEntries("隐藏", 1)
+
+    assert [entry["questId"] for entry in result["quests"]] == [70088, 6034]
+
+
 class TestSearchNameReadableCategoryFilters:
     def test_search_name_entries_passes_book_filter_directly_to_db(self, monkeypatch):
         _patch_search_name_empty_quest_dependencies(monkeypatch)
