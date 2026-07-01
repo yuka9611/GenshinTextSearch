@@ -293,6 +293,20 @@ def test_diff_update_resolve_talk_keys_supports_kfcnjpjojla_schema():
     assert diffUpdate._resolve_talk_keys(obj) == "KFCNJPJOJLA"
 
 
+def test_diff_update_resolve_talk_keys_supports_6_7_schema():
+    obj = {
+        "LDLMECNIJFC": 7610901,
+        "GDDPNNHLGBL": [
+            {
+                "ANKFNLMKOII": 761090101,
+                "DMIFDJDEFAL": 3728079010,
+            }
+        ],
+    }
+
+    assert diffUpdate._resolve_talk_keys(obj) == "LDLMECNIJFC"
+
+
 def test_new_storyboard_group_schema_is_non_dialog_talk_obj():
     obj = {"ANCLPHMACIF": 0, "CIAOBJHFJJM": []}
 
@@ -448,6 +462,55 @@ def test_import_talk_supports_kfcnjpjojla_schema(monkeypatch, tmp_path):
     assert connection.execute("SELECT * FROM dialogue").fetchall() == []
 
 
+def test_import_talk_supports_6_7_schema(monkeypatch, tmp_path):
+    connection = sqlite3.connect(":memory:")
+    _create_dialogue_tables(connection)
+
+    talk_dir = tmp_path / "BinOutput" / "Talk" / "Quest"
+    talk_dir.mkdir(parents=True)
+    talk_file = talk_dir / "foo.json"
+    talk_file.write_text(
+        json.dumps(
+            {
+                "LDLMECNIJFC": 7610901,
+                "BPEHONLLNNK": "TALK_QUEST",
+                "GDDPNNHLGBL": [
+                    {
+                        "ANKFNLMKOII": 761090101,
+                        "DMIFDJDEFAL": 3728079010,
+                        "EENIFNIGHCH": {"_id": "1005", "_type": "TALK_ROLE_NPC"},
+                    },
+                    {
+                        "ANKFNLMKOII": 761090102,
+                        "DMIFDJDEFAL": 2436563274,
+                        "EENIFNIGHCH": {"_id": "", "_type": "TALK_ROLE_PLAYER"},
+                    },
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    monkeypatch.setattr(questImport, "DATA_PATH", str(tmp_path))
+    monkeypatch.setattr(questImport, "conn", connection)
+    monkeypatch.setattr(questImport, "_refresh_quest_hash_map_for_talk_ids", lambda *args, **kwargs: None)
+    questImport._set_talk_dialogue_link_presence(None)
+
+    assert questImport.importTalk("Quest/foo.json", refresh_hash_map=False) == 2
+    assert connection.execute(
+        "SELECT talkId, coopQuestId, dialogueId FROM talk_dialogue_link ORDER BY dialogueId"
+    ).fetchall() == [
+        (7610901, 0, 761090101),
+        (7610901, 0, 761090102),
+    ]
+    assert connection.execute(
+        "SELECT dialogueId, talkId, textHash, talkerId, talkerType FROM dialogue ORDER BY dialogueId"
+    ).fetchall() == [
+        (761090101, 7610901, 3728079010, 1005, "TALK_ROLE_NPC"),
+        (761090102, 7610901, 2436563274, "", "TALK_ROLE_PLAYER"),
+    ]
+
+
 def test_filter_quest_talk_rows_uses_link_table_for_collision_scope_fix_and_drop(monkeypatch):
     connection = sqlite3.connect(":memory:")
     _create_dialogue_tables(connection)
@@ -550,6 +613,58 @@ def test_import_quest_collects_6_6_step_talk_ids_for_body_text(monkeypatch, tmp_
         (6034, 603401, 848637268, 0),
         (6034, 603402, 2444423324, 0),
     ]
+    assert connection.execute(
+        "SELECT titleTextMapHash FROM quest_text_signature WHERE questId=?",
+        (6034,),
+    ).fetchone() == (4148058431,)
+
+    (quest_dir / "6034.json").write_text(
+        json.dumps(
+            {
+                "GMOMCKNPBGE": 6034,
+                "ALLMCLJBBDM": 4148058943,
+                "JILHIMLENJK": 0,
+                "EOHJIHHMBAN": [106034],
+                "IKECHKLEFFK": [
+                    {
+                        "CBOGAFHNHNI": 6034,
+                        "LAFBPKMMBHD": 603401,
+                        "JDFENJAFCPF": 848637268,
+                        "EDPMKKJIKCJ": 1,
+                        "PGELADPAKLA": [
+                            {
+                                "MEGMIMEDODJ": "QUEST_CONTENT_COMPLETE_TALK",
+                                "KFDJJBPNIHG": [603401, 0],
+                            }
+                        ],
+                    },
+                    {
+                        "CBOGAFHNHNI": 6034,
+                        "LAFBPKMMBHD": 603402,
+                        "JDFENJAFCPF": 2444423324,
+                        "EDPMKKJIKCJ": 2,
+                        "PGELADPAKLA": [
+                            {
+                                "MEGMIMEDODJ": "QUEST_CONTENT_COMPLETE_TALK",
+                                "KFDJJBPNIHG": [603402, 0],
+                            }
+                        ],
+                    },
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    assert questImport.importQuest("6034.json") == (6034, False)
+    assert connection.execute(
+        "SELECT titleTextMapHash FROM quest WHERE questId=?",
+        (6034,),
+    ).fetchone() == (4148058943,)
+    assert connection.execute(
+        "SELECT titleTextMapHash FROM quest_text_signature WHERE questId=?",
+        (6034,),
+    ).fetchone() == (4148058943,)
 
 
 def test_database_helper_quest_dialogue_queries_use_talk_dialogue_link(monkeypatch):
@@ -629,6 +744,27 @@ def test_extract_anecdote_core_fields_supports_current_anecdote_keys():
             "EBDFJDKDDFJ": 3876969701,
             "MCGGPAGBGKO": [510640101],
             "BHAGNOEMPHL": [9878, 9864, 7010],
+        }
+    )
+
+    assert core_fields == {
+        "quest_id": 106401,
+        "title_text_map_hash": 2416311523,
+        "desc_text_map_hash": 3876969701,
+        "long_desc_text_map_hash": None,
+        "story_quest_ids": [510640101],
+        "legacy_group_ids": [9878, 9864, 7010],
+    }
+
+
+def test_extract_anecdote_core_fields_supports_6_7_anecdote_keys():
+    core_fields = quest_source_utils.extract_anecdote_core_fields(
+        {
+            "GIJOCHMAJCI": 106401,
+            "EHGEFIODFHD": 2416311523,
+            "OBJANDCNDMA": 3876969701,
+            "AEEMNELFAIO": [510640101],
+            "HCFJCJFMPDC": [9878, 9864, 7010],
         }
     )
 

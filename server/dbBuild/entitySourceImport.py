@@ -855,6 +855,9 @@ def _load_gcg_declared_values(skill_json: str | None) -> dict[str, dict[str, Any
     if key in _GCG_DECLARED_VALUE_CACHE:
         return _GCG_DECLARED_VALUE_CACHE[key]
     path = os.path.join(DATA_PATH, "BinOutput", "GCG", "Gcg_DeclaredValueSet", f"{key}.json")
+    if not os.path.isfile(path):
+        _GCG_DECLARED_VALUE_CACHE[key] = {}
+        return {}
     data = load_json_file(path, default={})
     result: dict[str, dict[str, Any]] = {}
     _collect_gcg_declared_values(data, result)

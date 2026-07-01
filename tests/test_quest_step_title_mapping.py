@@ -12,6 +12,8 @@ if DBBUILD_DIR not in sys.path:
 
 import databaseHelper
 import questImport
+import quest_source_utils
+from quest_source_utils import SOURCE_TYPE_HANGOUT, resolve_quest_source_fields
 from quest_utils import extract_quest_id, extract_quest_talk_ids
 from quest_source_utils import build_step_title_hash_by_talk_id, get_step_talk_ids
 
@@ -52,6 +54,18 @@ def _create_textmap_and_quest_talk_tables(connection: sqlite3.Connection):
         )
         """
     )
+    connection.execute(
+        """
+        CREATE TABLE langCode (
+            id INTEGER PRIMARY KEY,
+            codeName TEXT
+        )
+        """
+    )
+    connection.execute(
+        "INSERT INTO langCode(id, codeName) VALUES (?, ?)",
+        (1, "TextMapCHS.json"),
+    )
 
 
 def _create_backfill_tables(connection: sqlite3.Connection):
@@ -79,6 +93,16 @@ def _create_backfill_tables(connection: sqlite3.Connection):
         )
         """
     )
+    connection.execute(
+        """
+        CREATE TABLE dialogue (
+            dialogueId INTEGER PRIMARY KEY,
+            talkId INTEGER,
+            textHash INTEGER,
+            coopQuestId INTEGER
+        )
+        """
+    )
 
 
 def test_get_step_talk_ids_supports_finish_plot_and_skips_lua_notify():
@@ -103,6 +127,31 @@ def test_quest_utils_supports_6_6_quest_brief_schema():
 
     assert extract_quest_id(obj) == 70065
     assert extract_quest_talk_ids(obj) == [7006501, 7006502]
+
+
+def test_quest_utils_supports_6_7_quest_brief_schema():
+    obj = {
+        "ANKFNLMKOII": 76109,
+        "OCCBMCOGDOO": 4183792175,
+        "JBDLGLCIOHM": 0,
+        "HONEAMECBEN": 1611,
+        "GDDPNNHLGBL": [
+            {"ANKFNLMKOII": 7610901},
+            {"ANKFNLMKOII": 7610902},
+        ],
+    }
+
+    assert extract_quest_id(obj) == 76109
+    assert extract_quest_talk_ids(obj) == [7610901, 7610902]
+
+
+def test_legacy_190xx_quest_ids_are_hangouts(monkeypatch):
+    monkeypatch.setattr(quest_source_utils, "_HANGOUT_QUEST_IDS", None)
+    monkeypatch.setattr(quest_source_utils, "load_quest_source_raw_by_id", lambda: {19001: "LQ"})
+    monkeypatch.setattr(quest_source_utils, "load_main_coop_ids_by_quest_id", lambda: {})
+
+    assert resolve_quest_source_fields(19001) == (SOURCE_TYPE_HANGOUT, "LQ")
+    assert resolve_quest_source_fields(19187) == (SOURCE_TYPE_HANGOUT, "UNKNOWN")
 
 
 def test_build_step_title_hash_by_talk_id_supports_6_6_quest_brief_schema():
@@ -137,6 +186,55 @@ def test_build_step_title_hash_by_talk_id_supports_6_6_quest_brief_schema():
 
     assert mapping[7006519] == 1374941308
     assert mapping[7006520] == 2033502460
+
+
+def test_build_step_title_hash_by_talk_id_supports_6_7_quest_brief_schema():
+    obj = {
+        "HLCINEMBGEF": [
+            {
+                "PHPKOAIPNFO": 76109,
+                "NDOFAOCKPGE": 7610901,
+                "BMEACBBPBGK": 1090861876,
+                "FCBEKGAHMPD": [
+                    {
+                        "PALPAGCBFDI": [7610901, 0],
+                        "BPEHONLLNNK": "QUEST_CONTENT_COMPLETE_TALK",
+                    }
+                ],
+            },
+            {
+                "PHPKOAIPNFO": 76109,
+                "NDOFAOCKPGE": 7610902,
+                "BMEACBBPBGK": 1770283964,
+                "FCBEKGAHMPD": [
+                    {
+                        "PALPAGCBFDI": [7610903, 0],
+                        "BPEHONLLNNK": "QUEST_CONTENT_FINISH_PLOT",
+                    }
+                ],
+            },
+        ],
+        "GDDPNNHLGBL": [
+            {
+                "ANKFNLMKOII": 7610904,
+                "BLCEJLFCFPH": [],
+                "MPFAEHLBPJE": [
+                    {
+                        "BPEHONLLNNK": "QUEST_COND_STATE_EQUAL",
+                        "PALPAGCBFDI": ["7610902", "2"],
+                    }
+                ],
+            }
+        ],
+    }
+
+    mapping = build_step_title_hash_by_talk_id(obj)
+
+    assert get_step_talk_ids(obj["HLCINEMBGEF"][0]) == [7610901]
+    assert get_step_talk_ids(obj["HLCINEMBGEF"][1]) == [7610903]
+    assert mapping[7610901] == 1090861876
+    assert mapping[7610903] == 1770283964
+    assert mapping[7610904] == 1770283964
 
 
 def test_build_step_title_hash_by_talk_id_keeps_first_match_for_conflicts():

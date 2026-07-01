@@ -439,7 +439,65 @@ def _resolve_commit_title(repo_path: str, commit_sha: str) -> str:
     return title or commit_sha
 
 
-def _list_commits(
+def _git_rev_exists(repo_path: str, rev: str) -> bool:
+    if not rev:
+        return False
+    out = _run_git(repo_path, ["rev-parse", "--verify", f"{rev}^{{commit}}"], check=False)
+    return bool(out.strip())
+
+
+def _git_is_ancestor(repo_path: str, ancestor: str, descendant: str) -> bool:
+    if not ancestor or not descendant:
+        return False
+    try:
+        resolved_ancestor = _resolve_commit(repo_path, ancestor)
+        resolved_descendant = _resolve_commit(repo_path, descendant)
+    except Exception:
+        return False
+    proc = subprocess.run(
+        ["git", "-C", repo_path, "merge-base", "--is-ancestor", resolved_ancestor, resolved_descendant],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+    )
+    return proc.returncode == 0
+
+
+def _dedupe_commit_rows(commit_rows: list[tuple[str, str]]) -> list[tuple[str, str]]:
+    result: list[tuple[str, str]] = []
+    seen: set[str] = set()
+    for sha, title in commit_rows:
+        if sha in seen:
+            continue
+        seen.add(sha)
+        result.append((sha, title))
+    return result
+
+
+def _resolve_local_legacy_history_ref(repo_path: str, target_commit: str) -> str | None:
+    """Return a local legacy branch to prepend for snapshot replay, without modifying git history."""
+    legacy_candidates = ("refs/heads/master", "master", "refs/remotes/origin/master", "origin/master")
+    try:
+        resolved_target = _resolve_commit(repo_path, target_commit)
+    except Exception:
+        return None
+    for candidate in legacy_candidates:
+        if not _git_rev_exists(repo_path, candidate):
+            continue
+        try:
+            legacy_tip = _resolve_commit(repo_path, candidate)
+        except Exception:
+            continue
+        if legacy_tip == resolved_target:
+            continue
+        if _git_is_ancestor(repo_path, legacy_tip, resolved_target):
+            return None
+        return candidate
+    return None
+
+
+def _list_commits_raw(
     repo_path: str,
     target_commit: str,
     *,
@@ -478,6 +536,30 @@ def _list_commits(
             )
 
     return commits
+
+
+def _list_commits(
+    repo_path: str,
+    target_commit: str,
+    *,
+    from_commit: str | None = None,
+) -> list[tuple[str, str]]:
+    commits = _list_commits_raw(repo_path, target_commit, from_commit=from_commit)
+    if from_commit:
+        return commits
+
+    legacy_ref = _resolve_local_legacy_history_ref(repo_path, target_commit)
+    if not legacy_ref:
+        return commits
+    legacy_commits = _list_commits_raw(repo_path, legacy_ref)
+    if not legacy_commits:
+        return commits
+    logger.info(
+        "Prepending local legacy history %s for snapshot replay of %s",
+        legacy_ref,
+        target_commit,
+    )
+    return _dedupe_commit_rows(legacy_commits + commits)
 
 
 def _resolve_parent_commit(repo_path: str, commit_sha: str) -> str | None:
@@ -595,13 +677,43 @@ def _build_snapshot_specs_from_commit_rows(
     return commit_to_version_tag, snapshot_specs
 
 
+def _get_snapshot_source_rows(
+    repo_path: str,
+    target_commit: str,
+) -> list[list[tuple[str, str]]]:
+    current_rows = _list_commits_raw(repo_path, target_commit)
+    legacy_ref = _resolve_local_legacy_history_ref(repo_path, target_commit)
+    if not legacy_ref:
+        return [current_rows]
+    legacy_rows = _list_commits_raw(repo_path, legacy_ref)
+    if not legacy_rows:
+        return [current_rows]
+    logger.info(
+        "Prepending local legacy history %s for snapshot replay of %s",
+        legacy_ref,
+        target_commit,
+    )
+    return [legacy_rows, current_rows]
+
+
 def _get_version_snapshot_metadata(repo_path: str) -> dict[str, object]:
     cached = _snapshot_metadata_cache.get(repo_path)
     if cached is not None:
         return cached
 
-    commit_rows = _list_commits(repo_path, "HEAD")
-    commit_to_version_tag, snapshot_specs = _build_snapshot_specs_from_commit_rows(commit_rows)
+    commit_to_version_tag: dict[str, str | None] = {}
+    snapshot_specs_by_tag: dict[str, tuple[str, str, str, int]] = {}
+    for commit_rows in _get_snapshot_source_rows(repo_path, "HEAD"):
+        segment_commit_to_version_tag, segment_snapshot_specs = _build_snapshot_specs_from_commit_rows(
+            commit_rows
+        )
+        commit_to_version_tag.update(segment_commit_to_version_tag)
+        for snapshot_spec in segment_snapshot_specs:
+            snapshot_specs_by_tag[snapshot_spec[0]] = snapshot_spec
+    snapshot_specs = sorted(
+        snapshot_specs_by_tag.values(),
+        key=lambda item: (item[3], item[0], item[2]),
+    )
 
     snapshots: list[VersionSnapshot] = []
     snapshot_by_tag: dict[str, VersionSnapshot] = {}

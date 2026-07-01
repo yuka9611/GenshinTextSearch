@@ -4,14 +4,18 @@ from import_utils import load_json_file
 
 
 _SUBTITLE_PATH_KEYS = [
+    "AENCKCKHDFK",
     "dePath",
     "enPath",
     "esPath",
     "frPath",
+    "HJBAJOBPLGE",
     "idPath",
+    "INAGBNHLPIE",
     "itPath",
     "jpPath",
     "krPath",
+    "NAGBHOLCGCH",
     "ptPath",
     "ruPath",
     "tcPath",
@@ -23,6 +27,18 @@ _SUBTITLE_PATH_KEYS = [
 ]
 
 _LANG_SUFFIX_RE = re.compile(r"_(CHS|CHT|DE|EN|ES|FR|ID|IT|JP|KR|PT|RU|TH|TR|VI)$", re.IGNORECASE)
+
+
+def _looks_like_subtitle_path(path: str) -> bool:
+    normalized = str(path or "").replace("\\", "/")
+    parts = [part for part in normalized.split("/") if part]
+    if any(part.lower() == "subtitle" for part in parts):
+        return True
+    base_name = os.path.basename(normalized)
+    root, ext = os.path.splitext(base_name)
+    return root.startswith("Cs_") and ext.lower() in {".mihoyobin", ".srt"}
+
+
 def load_document_loc_title_hash(data_path: str) -> dict:
     """Map localization ID -> titleTextMapHash from DocumentExcelConfigData."""
     doc_path = os.path.join(data_path, "ExcelBinOutput", "DocumentExcelConfigData.json")
@@ -91,12 +107,18 @@ def build_subtitle_filename_map(localization_entries: list[dict]) -> dict:
     """Map subtitle file stem -> subtitleId from LocalizationExcelConfigData."""
     filename_to_info = {}
     for entry in localization_entries:
-        if entry.get("assetType") != "LOC_SUBTITLE":
+        subtitle_paths = [
+            entry.get(key)
+            for key in _SUBTITLE_PATH_KEYS
+            if isinstance(entry.get(key), str)
+        ]
+        asset_type = entry.get("assetType")
+        if asset_type is not None and asset_type != "LOC_SUBTITLE":
+            continue
+        if asset_type is None and not any(_looks_like_subtitle_path(path) for path in subtitle_paths):
             continue
         subtitle_id = entry.get("id")
-        for key in _SUBTITLE_PATH_KEYS:
-            path = entry.get(key)
-            if isinstance(path, str):
-                filename_no_ext = os.path.splitext(os.path.basename(path))[0]
-                filename_to_info[filename_no_ext] = {"subtitleId": subtitle_id}
+        for path in subtitle_paths:
+            filename_no_ext = os.path.splitext(os.path.basename(path))[0]
+            filename_to_info[filename_no_ext] = {"subtitleId": subtitle_id}
     return filename_to_info

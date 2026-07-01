@@ -47,6 +47,14 @@ _QUEST_SCHEMA_VARIANTS = [
         "talks_key": "EOHJIHHMBAN",
         "talk_id": None,
     },
+    {
+        "quest_id": "ANKFNLMKOII",
+        "title_hash": "OCCBMCOGDOO",
+        "chapter_id": "JBDLGLCIOHM",
+        "chapter_id_fallback": "HONEAMECBEN",
+        "talks_key": "GDDPNNHLGBL",
+        "talk_id": "ANKFNLMKOII",
+    },
 ]
 
 

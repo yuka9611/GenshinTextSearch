@@ -795,7 +795,7 @@ if __name__ == "__main__":
         help="backfill quest description/step-title hashes into existing quest tables only",
     )
 
-    parser.add_argument("--remote-ref", "--remote", type=str, default="origin/master", help="target remote ref for diff")
+    parser.add_argument("--remote-ref", "--remote", type=str, default="origin/main", help="target remote ref for diff")
     parser.add_argument(
         "--from-commit",
         "--from",

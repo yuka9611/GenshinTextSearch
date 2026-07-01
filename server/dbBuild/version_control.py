@@ -945,7 +945,7 @@ def rebuild_version_catalog(
 
 def set_current_version(
     commit: str,
-    remote_ref: str = "origin/master",
+    remote_ref: str = "origin/main",
     version_label: str | None = None,
 ) -> None:
     _set_current_version_impl(commit, remote_ref=remote_ref, version_label=version_label)

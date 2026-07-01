@@ -1030,7 +1030,7 @@ def get_current_version(default: str = "unknown") -> str:
 
 def set_current_version(
     commit: str,
-    remote_ref: str = "origin/master",
+    remote_ref: str = "origin/main",
     version_label: str | None = None,
 ):
     label = normalize_version_label(version_label) or resolve_version_label(commit)
@@ -1039,7 +1039,7 @@ def set_current_version(
     cur.executemany(
         "INSERT OR REPLACE INTO app_meta(k, v) VALUES (?, ?)",
         [
-            ("agd_repo_url", "https://gitlab.com/Dimbreath/AnimeGameData.git"),
+            ("agd_repo_url", "https://gitlab.com/Dimbreath/animegamedata2.git"),
             ("agd_remote_ref", remote_ref),
             ("db_current_commit", commit),
             ("db_current_commit_title", label),

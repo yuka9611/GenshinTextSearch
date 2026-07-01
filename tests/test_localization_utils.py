@@ -16,11 +16,17 @@ def test_build_subtitle_filename_map_supports_obfuscated_path_keys():
         [
             {"id": 101, "assetType": "LOC_SUBTITLE", "EDPAFDDJJNM": "Subtitle/EN/Cutscene_01.srt"},
             {"id": 102, "assetType": "LOC_SUBTITLE", "FNIFOPDJMMG": "Subtitle/JP/Cutscene_02.srt"},
+            {"id": 103, "AENCKCKHDFK": "Subtitle/CHS/Cutscene_03.srt"},
+            {"id": 104, "HJBAJOBPLGE": "ART/UI/Readable/CHS/NotSubtitle"},
+            {"id": 105, "HJBAJOBPLGE": "CHS/Cs_MDAQ019_DragonInCity_CHS.mihoyobin"},
         ]
     )
 
     assert mapping["Cutscene_01"] == {"subtitleId": 101}
     assert mapping["Cutscene_02"] == {"subtitleId": 102}
+    assert mapping["Cutscene_03"] == {"subtitleId": 103}
+    assert mapping["Cs_MDAQ019_DragonInCity_CHS"] == {"subtitleId": 105}
+    assert "NotSubtitle" not in mapping
 
 
 def test_build_readable_filename_map_matches_multiple_filename_variants():

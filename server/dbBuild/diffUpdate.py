@@ -31,7 +31,7 @@ from version_control import (
 from versioning import resolve_version_label
 
 
-SOURCE_REPO_URL = "https://gitlab.com/Dimbreath/AnimeGameData.git"
+SOURCE_REPO_URL = "https://gitlab.com/Dimbreath/animegamedata2.git"
 DIFF_RESUME_RANGE_KEY = "db_diffupdate_resume_range"
 DIFF_RESUME_STAGE_KEY = "db_diffupdate_resume_stage"
 def _print_anomaly_summary(anomalies: list[str]):
@@ -61,7 +61,7 @@ def _normalize_remote_ref(repo_path: str, remote_ref: str) -> tuple[str, str, st
     remotes = _list_remotes(repo_path)
     raw = (remote_ref or "").strip()
     if not raw:
-        raw = "origin/master"
+        raw = "origin/main"
 
     if raw.startswith("refs/remotes/"):
         # refs/remotes/origin/master -> origin/master
@@ -348,6 +348,8 @@ def _resolve_talk_keys(obj: dict):
         return "AADKDKPMGNO"
     if "KFCNJPJOJLA" in obj and "IOEDPLCPFFB" in obj:
         return "KFCNJPJOJLA"
+    if "LDLMECNIJFC" in obj and "GDDPNNHLGBL" in obj:
+        return "LDLMECNIJFC"
     return None
 
 
@@ -1337,7 +1339,7 @@ def _process_finalize_stage(target_commit, normalized_remote_ref, target_version
 
 def run_diff_update(
     *,
-    remote_ref: str = "origin/master",
+    remote_ref: str = "origin/main",
     from_commit: str | None = None,
     to_commit: str | None = None,
     fetch_remote: bool = True,

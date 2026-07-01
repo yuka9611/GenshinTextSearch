@@ -663,6 +663,14 @@ def test_refresh_gcg_synthetic_textmap_uses_action_card_desc(monkeypatch):
         connection.close()
 
 
+def test_load_gcg_declared_values_missing_file_returns_empty(monkeypatch, tmp_path):
+    monkeypatch.setattr(entitySourceImport, "DATA_PATH", str(tmp_path))
+    entitySourceImport._GCG_DECLARED_VALUE_CACHE.clear()
+
+    assert entitySourceImport._load_gcg_declared_values("Char_Skill_17122") == {}
+    assert entitySourceImport._GCG_DECLARED_VALUE_CACHE["Char_Skill_17122"] == {}
+
+
 def _create_entity_version_tables(connection: sqlite3.Connection):
     connection.execute(
         """

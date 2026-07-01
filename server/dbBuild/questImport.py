@@ -714,7 +714,8 @@ def _upsert_quest_text_signature(cursor, quest_id, title_text_map_hash, dialogue
         "titleTextMapHash=excluded.titleTextMapHash, "
         "dialogue_signature=excluded.dialogue_signature "
         "WHERE "
-        "NOT (quest_text_signature.dialogue_signature IS excluded.dialogue_signature)",
+        "NOT (quest_text_signature.titleTextMapHash IS excluded.titleTextMapHash) "
+        "OR NOT (quest_text_signature.dialogue_signature IS excluded.dialogue_signature)",
         (quest_id, sanitized_title_hash, dialogue_signature),
     )
 
@@ -1277,7 +1278,7 @@ def backfillQuestMetadata(*, commit: bool = True, batch_size: int = DEFAULT_BATC
 
     quest_folder = os.path.join(DATA_PATH, "BinOutput", "Quest")
     quest_files = sorted(os.listdir(quest_folder)) if os.path.isdir(quest_folder) else []
-    quest_desc_rows: list[tuple[int | None, int | None, int]] = []
+    quest_meta_rows: list[tuple[int | None, int | None, int | None, int]] = []
     quest_talk_rows: list[tuple[int | None, int, int, int]] = []
     skipped_quest_files: list[str] = []
 
@@ -1315,8 +1316,9 @@ def backfillQuestMetadata(*, commit: bool = True, batch_size: int = DEFAULT_BATC
                     continue
 
                 quest_id = int(quest_row[0])
-                quest_desc_rows.append(
+                quest_meta_rows.append(
                     (
+                        quest_row[1],
                         _get_quest_desc_text_map_hash(quest_id),
                         _resolve_quest_chapter_id(quest_id, quest_row[2]),
                         quest_id,
@@ -1364,8 +1366,8 @@ def backfillQuestMetadata(*, commit: bool = True, batch_size: int = DEFAULT_BATC
 
         executemany_batched(
             cursor,
-            "UPDATE quest SET descTextMapHash=?, chapterId=? WHERE questId=?",
-            quest_desc_rows,
+            "UPDATE quest SET titleTextMapHash=?, descTextMapHash=?, chapterId=? WHERE questId=?",
+            quest_meta_rows,
             batch_size=batch_size,
         )
         executemany_batched(
@@ -1382,6 +1384,11 @@ def backfillQuestMetadata(*, commit: bool = True, batch_size: int = DEFAULT_BATC
                 brief_talk_rows,
                 batch_size=batch_size,
             )
+        refreshed_hash_map_quests = _refresh_quest_hash_map_for_quest_ids(
+            cursor,
+            (quest_id for _title_hash, _desc_hash, _chapter_id, quest_id in quest_meta_rows),
+            batch_size=batch_size,
+        )
 
         if commit:
             conn.commit()
@@ -1396,9 +1403,10 @@ def backfillQuestMetadata(*, commit: bool = True, batch_size: int = DEFAULT_BATC
     _print_skip_summary("quest brief metadata", skipped_brief_files)
     return {
         "quest_file_count": len(quest_files),
-        "quest_desc_row_count": len(quest_desc_rows),
+        "quest_desc_row_count": len(quest_meta_rows),
         "quest_talk_row_count": len(quest_talk_rows),
         "quest_brief_row_count": len(brief_talk_rows),
+        "hash_map_refreshed_quest_count": int(refreshed_hash_map_quests or 0),
         "skipped_quest_file_count": len(skipped_quest_files),
         "skipped_brief_file_count": len(skipped_brief_files),
     }
@@ -2351,6 +2359,14 @@ def importTalk(
         talkRoleTypeKey = "_type"
         talkRoleIdKey = "_id"
         talkContentTextMapHashKey = "HJJLLECCCPI"
+    elif "LDLMECNIJFC" in obj and "GDDPNNHLGBL" in obj:
+        talkIdKey = "LDLMECNIJFC"
+        dialogueListKey = "GDDPNNHLGBL"
+        dialogueIdKey = "ANKFNLMKOII"
+        talkRoleKey = "EENIFNIGHCH"
+        talkRoleTypeKey = "_type"
+        talkRoleIdKey = "_id"
+        talkContentTextMapHashKey = "DMIFDJDEFAL"
     else:
         if skip_collector is not None:
             skip_collector.append(fileName)

@@ -26,6 +26,8 @@ BASE_QUEST_SOURCE_TYPES = {
     SOURCE_TYPE_EQ,
     SOURCE_TYPE_IQ,
 }
+LEGACY_HANGOUT_QUEST_ID_MIN = 19001
+LEGACY_HANGOUT_QUEST_ID_MAX = 19187
 _STEP_TALK_CONDITION_TYPES = {
     "QUEST_CONTENT_COMPLETE_TALK",
     "QUEST_CONTENT_FINISH_PLOT",
@@ -50,21 +52,41 @@ def extract_anecdote_core_fields(row: dict) -> dict | None:
     if not isinstance(row, dict):
         return None
 
-    anecdote_id = _extract_first_positive_int(row, "IDEHFGDCPDL", "GBDGFHNLDFF", "DBGCFNMLHAJ")
+    anecdote_id = _extract_first_positive_int(
+        row,
+        "IDEHFGDCPDL",
+        "GIJOCHMAJCI",
+        "GBDGFHNLDFF",
+        "DBGCFNMLHAJ",
+    )
     if anecdote_id is None:
         return None
 
-    title_text_map_hash = _extract_first_positive_int(row, "IBGEKMBPNNO", "titleTextMapHash")
-    desc_text_map_hash = _extract_first_positive_int(row, "EBDFJDKDDFJ", "descTextMapHash")
+    title_text_map_hash = _extract_first_positive_int(
+        row,
+        "IBGEKMBPNNO",
+        "EHGEFIODFHD",
+        "titleTextMapHash",
+    )
+    desc_text_map_hash = _extract_first_positive_int(
+        row,
+        "EBDFJDKDDFJ",
+        "OBJANDCNDMA",
+        "descTextMapHash",
+    )
     long_desc_text_map_hash = None
 
     story_quest_ids = normalize_unique_ints(row.get("MCGGPAGBGKO"), positive_only=True)
+    if not story_quest_ids:
+        story_quest_ids = normalize_unique_ints(row.get("AEEMNELFAIO"), positive_only=True)
     if not story_quest_ids:
         story_quest_ids = normalize_unique_ints(row.get("BBOMCGBIOFM"), positive_only=True)
     if not story_quest_ids:
         story_quest_ids = normalize_unique_ints(row.get("LIIPHELCPKJ"), positive_only=True)
 
     legacy_group_ids = normalize_unique_ints(row.get("BHAGNOEMPHL"), positive_only=True)
+    if not legacy_group_ids:
+        legacy_group_ids = normalize_unique_ints(row.get("HCFJCJFMPDC"), positive_only=True)
 
     return {
         "quest_id": anecdote_id,
@@ -120,6 +142,7 @@ def load_quest_source_raw_by_id() -> dict[int, str]:
                 obj.get("HAHEIAHBPEJ")
                 or obj.get("DLPKMDPABFM")
                 or obj.get("MEGMIMEDODJ")
+                or obj.get("BPEHONLLNNK")
             )
 
     _QUEST_SOURCE_RAW_BY_ID = mapping
@@ -183,6 +206,7 @@ def load_hangout_quest_ids() -> set[int]:
         return _HANGOUT_QUEST_IDS
 
     quest_ids: set[int] = set(load_main_coop_ids_by_quest_id().keys())
+    quest_ids.update(range(LEGACY_HANGOUT_QUEST_ID_MIN, LEGACY_HANGOUT_QUEST_ID_MAX + 1))
     coop_folder = os.path.join(DATA_PATH, "BinOutput", "Coop")
     if os.path.isdir(coop_folder):
         for file_name in os.listdir(coop_folder):
@@ -223,12 +247,14 @@ def get_quest_subquests(obj: dict) -> list[dict]:
     if not isinstance(subquests, list):
         subquests = obj.get("IKECHKLEFFK")
     if not isinstance(subquests, list):
+        subquests = obj.get("HLCINEMBGEF")
+    if not isinstance(subquests, list):
         return []
     return [item for item in subquests if isinstance(item, dict)]
 
 
 def _get_subquest_id(step_obj: dict) -> int | None:
-    for key in ("MPKBGPAKIOA", "subId", "KKMJBEPGLGD", "LAFBPKMMBHD"):
+    for key in ("MPKBGPAKIOA", "subId", "KKMJBEPGLGD", "LAFBPKMMBHD", "NDOFAOCKPGE"):
         value = step_obj.get(key)
         if isinstance(value, int) and value > 0:
             return value
@@ -244,6 +270,7 @@ def get_step_desc_text_map_hash(step_obj: dict) -> int | None:
         "NAEMBIJFJCA",
         "HMLBMECMBGA",
         "JDFENJAFCPF",
+        "BMEACBBPBGK",
     ):
         value = step_obj.get(key)
         if isinstance(value, int) and value != 0:
@@ -252,7 +279,7 @@ def get_step_desc_text_map_hash(step_obj: dict) -> int | None:
 
 
 def _get_quest_talk_rows(obj: dict) -> list[dict]:
-    for key in ("NFFIGDHFAJG", "talks", "IBEGAHMEABP", "DGJMIPFDEOF", "DCHHEHNNEOO"):
+    for key in ("NFFIGDHFAJG", "talks", "IBEGAHMEABP", "DGJMIPFDEOF", "DCHHEHNNEOO", "GDDPNNHLGBL"):
         value = obj.get(key)
         if isinstance(value, list):
             return [item for item in value if isinstance(item, dict)]
@@ -260,7 +287,7 @@ def _get_quest_talk_rows(obj: dict) -> list[dict]:
 
 
 def _get_quest_talk_id(talk_obj: dict) -> int | None:
-    for key in ("NFIEHACCECI", "id", "ILHDNJDDEOP", "BLKKAMEMBBJ", "BPMABFNPCMI"):
+    for key in ("NFIEHACCECI", "id", "ILHDNJDDEOP", "BLKKAMEMBBJ", "BPMABFNPCMI", "ANKFNLMKOII"):
         value = talk_obj.get(key)
         if isinstance(value, int) and value > 0:
             return value
@@ -274,6 +301,8 @@ def _get_talk_start_condition_subquest_ids(talk_obj: dict) -> list[int]:
     if not isinstance(conditions, list):
         conditions = talk_obj.get("beginCond")
     if not isinstance(conditions, list):
+        conditions = talk_obj.get("BLCEJLFCFPH")
+    if not isinstance(conditions, list):
         return result
 
     for condition in conditions:
@@ -284,6 +313,7 @@ def _get_talk_start_condition_subquest_ids(talk_obj: dict) -> list[int]:
             or condition.get("type")
             or condition.get("HAHEIAHBPEJ")
             or condition.get("DLPKMDPABFM")
+            or condition.get("BPEHONLLNNK")
         )
         if cond_type != "QUEST_COND_STATE_EQUAL":
             continue
@@ -292,6 +322,7 @@ def _get_talk_start_condition_subquest_ids(talk_obj: dict) -> list[int]:
             or condition.get("param")
             or condition.get("paramList")
             or condition.get("AAHAKNIPEDM")
+            or condition.get("PALPAGCBFDI")
         )
         if not isinstance(params, list) or not params:
             continue
@@ -319,6 +350,8 @@ def get_step_talk_ids(step_obj: dict) -> list[int]:
     if not isinstance(conditions, list):
         conditions = step_obj.get("PGELADPAKLA")
     if not isinstance(conditions, list):
+        conditions = step_obj.get("FCBEKGAHMPD")
+    if not isinstance(conditions, list):
         return talk_ids
 
     for condition in conditions:
@@ -330,6 +363,7 @@ def get_step_talk_ids(step_obj: dict) -> list[int]:
             or condition.get("type")
             or condition.get("PAINLIBBLDK")
             or condition.get("MEGMIMEDODJ")
+            or condition.get("BPEHONLLNNK")
         )
         if cond_type not in _STEP_TALK_CONDITION_TYPES:
             continue
@@ -340,6 +374,7 @@ def get_step_talk_ids(step_obj: dict) -> list[int]:
             or condition.get("paramList")
             or condition.get("LNHLPKELCAL")
             or condition.get("KFDJJBPNIHG")
+            or condition.get("PALPAGCBFDI")
         )
         if not isinstance(params, list) or not params:
             continue
@@ -379,7 +414,7 @@ def build_step_title_hash_by_talk_id(obj: dict) -> dict[int, int]:
 def resolve_main_quest_id_for_subquest(subquest: dict, fallback_quest_id: int | None = None) -> int | None:
     if isinstance(fallback_quest_id, int) and fallback_quest_id > 0:
         return fallback_quest_id
-    for key in ("JPBOKMKMHCJ", "mainQuestId", "GNGFBMPFBOK", "JKHGFFKOFFN", "CBOGAFHNHNI"):
+    for key in ("JPBOKMKMHCJ", "mainQuestId", "GNGFBMPFBOK", "JKHGFFKOFFN", "CBOGAFHNHNI", "PHPKOAIPNFO"):
         value = subquest.get(key)
         if isinstance(value, int) and value > 0:
             return value
@@ -453,6 +488,8 @@ def load_storyboard_file_by_talk_id() -> dict[int, str]:
             continue
         talk_id = obj.get("AADKDKPMGNO")
         if not isinstance(talk_id, int) or talk_id <= 0:
+            talk_id = obj.get("LDLMECNIJFC")
+        if not isinstance(talk_id, int) or talk_id <= 0:
             talk_id = obj.get("LBPGKDMGFBN")
         if not isinstance(talk_id, int) or talk_id <= 0:
             stem = os.path.splitext(os.path.basename(path))[0]
@@ -476,6 +513,8 @@ def extract_storyboard_group_talk_ids(obj: dict) -> list[int]:
     if not isinstance(items, list):
         items = obj.get("talks")
     if not isinstance(items, list):
+        items = obj.get("GDDPNNHLGBL")
+    if not isinstance(items, list):
         return []
 
     talk_ids: list[int] = []
@@ -486,6 +525,8 @@ def extract_storyboard_group_talk_ids(obj: dict) -> list[int]:
         talk_id = item.get("NFIEHACCECI")
         if not isinstance(talk_id, int) or talk_id <= 0 or talk_id in seen:
             talk_id = item.get("BLKKAMEMBBJ")
+        if not isinstance(talk_id, int) or talk_id <= 0 or talk_id in seen:
+            talk_id = item.get("ANKFNLMKOII")
         if not isinstance(talk_id, int) or talk_id <= 0 or talk_id in seen:
             continue
         seen.add(talk_id)
