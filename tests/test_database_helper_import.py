@@ -121,3 +121,26 @@ def test_version_filter_values_preserve_created_updated_split(monkeypatch):
 
     assert sorted(filters["created"]) == ["4.0", "4.1", "4.2"]
     assert sorted(filters["updated"]) == ["4.1", "4.2"]
+
+
+def test_get_talker_name_uses_display_names_for_special_roles(monkeypatch):
+    import databaseHelper
+
+    manual_names = {
+        "INFO_FEMALE_PRONOUN_YING": "荧",
+        "INFO_MALE_PRONOUN_KONG": "空",
+    }
+    monkeypatch.setattr(databaseHelper, "getManualTextMap", lambda key, lang_code: manual_names.get(key))
+
+    databaseHelper._get_name_cache_bucket("mate_avatar").clear()
+    monkeypatch.setattr(databaseHelper.config, "getIsMale", lambda: True)
+    assert databaseHelper.getTalkerName("TALK_ROLE_PLAYER", "", 1) == "旅行者"
+    assert databaseHelper.getTalkerName("TALK_ROLE_MATE_AVATAR", "", 1) == "荧"
+
+    databaseHelper._get_name_cache_bucket("mate_avatar").clear()
+    monkeypatch.setattr(databaseHelper.config, "getIsMale", lambda: False)
+    assert databaseHelper.getTalkerName("TALK_ROLE_MATE_AVATAR", "", 1) == "空"
+
+    databaseHelper._get_name_cache_bucket("mate_avatar").clear()
+    monkeypatch.setattr(databaseHelper.config, "getIsMale", lambda: "both")
+    assert databaseHelper.getTalkerName("TALK_ROLE_MATE_AVATAR", "", 1) == "{荧/空}"

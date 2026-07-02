@@ -210,7 +210,8 @@ _CACHE: dict[str, dict] = {
     "names": {  # 名称缓存
         "characters": {},  # 角色名称缓存
         "wander": {},  # 旅行者名称缓存
-        "traveller": {}  # 空旅行者名称缓存
+        "traveller": {},  # 空旅行者名称缓存
+        "mate_avatar": {}  # 血亲同伴名称缓存
     }
 }
 
@@ -233,6 +234,11 @@ _QUEST_STEP_TALK_CONDITION_TYPES = {
 def _get_gender_cache_key() -> str:
     gender = config.getIsMale()
     return str(gender)
+
+
+def _get_name_cache_bucket(bucket_name: str) -> dict:
+    names_cache = _CACHE.setdefault("names", {})
+    return names_cache.setdefault(bucket_name, {})
 
 
 def _normalize_output_text(text: str | None, langCode: int):
@@ -3385,10 +3391,11 @@ def getCharterName(avatarId: int, langCode: int = 1):
     获取角色名称
     """
     cache_key = f"{avatarId}:{langCode}:{_get_gender_cache_key()}"
-    if cache_key in _CACHE["names"]["characters"]:
-        return _CACHE["names"]["characters"][cache_key]
+    name_cache = _get_name_cache_bucket("characters")
+    if cache_key in name_cache:
+        return name_cache[cache_key]
     result = _normalize_output_text(getCharacterNameRaw(avatarId, langCode), langCode)
-    _CACHE["names"]["characters"][cache_key] = result
+    name_cache[cache_key] = result
     return result
 
 
@@ -3397,10 +3404,11 @@ def getWanderName(langCode: int = 1):
     获取旅行者名称
     """
     cache_key = f"{langCode}:{_get_gender_cache_key()}"
-    if cache_key in _CACHE["names"]["wander"]:
-        return _CACHE["names"]["wander"][cache_key]
-    _CACHE["names"]["wander"][cache_key] = getCharterName(10000075, langCode)
-    return _CACHE["names"]["wander"][cache_key]
+    name_cache = _get_name_cache_bucket("wander")
+    if cache_key in name_cache:
+        return name_cache[cache_key]
+    name_cache[cache_key] = getCharterName(10000075, langCode)
+    return name_cache[cache_key]
 
 
 def getTravellerName(langCode: int = 1):
@@ -3408,10 +3416,42 @@ def getTravellerName(langCode: int = 1):
     获取空旅行者名称
     """
     cache_key = f"{langCode}:{_get_gender_cache_key()}"
-    if cache_key in _CACHE["names"]["traveller"]:
-        return _CACHE["names"]["traveller"][cache_key]
-    _CACHE["names"]["traveller"][cache_key] = getCharterName(10000005, langCode)
-    return _CACHE["names"]["traveller"][cache_key]
+    name_cache = _get_name_cache_bucket("traveller")
+    if cache_key in name_cache:
+        return name_cache[cache_key]
+    name_cache[cache_key] = getCharterName(10000005, langCode)
+    return name_cache[cache_key]
+
+
+def _get_manual_name_or_default(placeHolderName: str, langCode: int, default: str) -> str:
+    try:
+        value = getManualTextMap(placeHolderName, langCode)
+    except Exception:
+        value = None
+    return value or default
+
+
+def getMateAvatarName(langCode: int = 1):
+    """
+    获取血亲同伴名称。男主线中同伴为荧，女主线中同伴为空。
+    """
+    cache_key = f"{langCode}:{_get_gender_cache_key()}"
+    name_cache = _get_name_cache_bucket("mate_avatar")
+    if cache_key in name_cache:
+        return name_cache[cache_key]
+
+    female_twin_name = _get_manual_name_or_default("INFO_FEMALE_PRONOUN_YING", langCode, "荧")
+    male_twin_name = _get_manual_name_or_default("INFO_MALE_PRONOUN_KONG", langCode, "空")
+    player_is_male = config.getIsMale()
+    if player_is_male == "both":
+        result = f"{{{female_twin_name}/{male_twin_name}}}"
+    elif player_is_male:
+        result = female_twin_name
+    else:
+        result = male_twin_name
+
+    name_cache[cache_key] = result
+    return result
 
 
 def getTalkInfo(textHash):
@@ -3431,6 +3471,11 @@ def getTalkInfo(textHash):
 
 
 def getTalkerName(talkerType: str, talkerId: int, langCode: int = 1):
+    if talkerType == "TALK_ROLE_PLAYER":
+        return "旅行者"
+    if talkerType == "TALK_ROLE_MATE_AVATAR":
+        return getMateAvatarName(langCode)
+
     with closing(conn.cursor()) as cursor:
         talkerName = None
         if talkerType == "TALK_ROLE_NPC":
@@ -3439,10 +3484,6 @@ def getTalkerName(talkerType: str, talkerId: int, langCode: int = 1):
             ansNpcName = cursor.fetchall()
             if len(ansNpcName) > 0:
                 talkerName = ansNpcName[0][0]
-        elif talkerType == "TALK_ROLE_PLAYER":
-            talkerName = "主角"
-        elif talkerType == "TALK_ROLE_MATE_AVATAR":
-            talkerName = "同伴"
 
         return _normalize_output_text(talkerName, langCode)
 

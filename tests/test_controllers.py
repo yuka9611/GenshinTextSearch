@@ -362,6 +362,63 @@ class TestSpeakerSourceQueries:
         assert result[0]["talker"] == "琴"
         assert result[0]["_preferredSourceType"] == "story"
 
+    @pytest.mark.parametrize(
+        ("speaker_keyword", "matched_type", "display_name"),
+        [
+            ("旅行者", "TALK_ROLE_PLAYER", "旅行者"),
+            ("荧", "TALK_ROLE_MATE_AVATAR", "荧"),
+        ],
+    )
+    def test_handle_speaker_only_query_matches_special_talker_display_names(
+        self,
+        monkeypatch,
+        speaker_keyword,
+        matched_type,
+        display_name,
+    ):
+        monkeypatch.setattr(controllers.config, "getResultLanguages", lambda: [1])
+        monkeypatch.setattr(controllers.config, "getSourceLanguage", lambda: 1)
+        monkeypatch.setattr(controllers.databaseHelper, "selectDialogueByTalkerKeyword", lambda *args, **kwargs: [])
+        monkeypatch.setattr(controllers, "_count_dialogue_by_talker_keyword_cached", lambda *args, **kwargs: 0)
+        monkeypatch.setattr(
+            controllers.databaseHelper,
+            "getTalkerName",
+            lambda talker_type, talker_id, lang_code: {
+                "TALK_ROLE_PLAYER": "旅行者",
+                "TALK_ROLE_MATE_AVATAR": "荧",
+            }.get(talker_type),
+        )
+        monkeypatch.setattr(
+            controllers.databaseHelper,
+            "selectDialogueByTalkerType",
+            lambda talker_type, *args, **kwargs: [(101, talker_type, "", 9001)] if talker_type == matched_type else [],
+        )
+        monkeypatch.setattr(
+            controllers,
+            "_count_dialogue_by_talker_type_cached",
+            lambda talker_type, *args, **kwargs: 1 if talker_type == matched_type else 0,
+        )
+        monkeypatch.setattr(
+            controllers,
+            "queryTextHashInfo",
+            lambda text_hash, *args, **kwargs: {"hash": text_hash, "translates": {"1": "测试对白"}, "voicePaths": []},
+        )
+
+        result, total = controllers._handle_speaker_only_query(
+            speaker_keyword,
+            1,
+            1,
+            20,
+            "all",
+            None,
+            None,
+            "dialogue",
+        )
+
+        assert total == 1
+        assert len(result) == 1
+        assert result[0]["talker"] == display_name
+
 
 # ---------------------------------------------------------------------------
 # match/rank helpers
@@ -845,6 +902,42 @@ class TestQuestDialogueVersions:
         assert result["updatedVersionRaw"] == "Version 4.7"
         assert result["createdVersion"] == "4.4"
         assert result["updatedVersion"] == "4.7"
+
+    def test_get_quest_dialogues_uses_special_talker_display_names(self, monkeypatch):
+        monkeypatch.setattr(controllers.config, "getResultLanguages", lambda: [1])
+        monkeypatch.setattr(controllers.config, "getSourceLanguage", lambda: 1)
+        monkeypatch.setattr(controllers.databaseHelper, "getQuestName", lambda quest_id, lang_code: "我们终将重逢")
+        monkeypatch.setattr(controllers.databaseHelper, "getQuestDescription", lambda quest_id, lang_code: "")
+        monkeypatch.setattr(controllers.databaseHelper, "getQuestLongDescription", lambda quest_id, lang_code: "")
+        monkeypatch.setattr(controllers.databaseHelper, "getQuestStepTitleMap", lambda quest_id, lang_code: {})
+        monkeypatch.setattr(controllers.databaseHelper, "getQuestVersionInfo", lambda quest_id, lang_code=None: (None, None))
+        monkeypatch.setattr(controllers.databaseHelper, "countQuestDialogues", lambda quest_id: 2)
+        monkeypatch.setattr(
+            controllers.databaseHelper,
+            "selectQuestDialoguesPaged",
+            lambda quest_id, page_size, offset: [
+                (101, "TALK_ROLE_PLAYER", "", 9001, 1001),
+                (102, "TALK_ROLE_MATE_AVATAR", "", 9002, 1001),
+            ],
+        )
+        monkeypatch.setattr(
+            controllers.databaseHelper,
+            "getTalkerName",
+            lambda talker_type, talker_id, lang_code: {
+                "TALK_ROLE_PLAYER": "旅行者",
+                "TALK_ROLE_MATE_AVATAR": "荧",
+            }.get(talker_type),
+        )
+        monkeypatch.setattr(
+            controllers,
+            "queryTextHashInfo",
+            lambda text_hash, *args, **kwargs: {"hash": text_hash, "translates": {"1": f"对白{text_hash}"}},
+        )
+
+        result, total = controllers.getQuestDialogues(42, searchLang=1, page=1, page_size=20)
+
+        assert total == 2
+        assert [dialogue["talker"] for dialogue in result["dialogues"]] == ["旅行者", "荧"]
 
 
 # ---------------------------------------------------------------------------
