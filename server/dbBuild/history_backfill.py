@@ -3797,6 +3797,9 @@ _ENTITY_SNAPSHOT_FILE_KEYS = {
     "BeyondTransferEffectExcelConfigData.json": "effects",
     "BeyondHallExcelConfigData.json": "halls",
     "BeyondHallFacilityExcelConfigData.json": "hall_facilities",
+    "AvatarExcelConfigData.json": "avatars",
+    "AvatarSkillDepotExcelConfigData.json": "avatar_skill_depots",
+    "AvatarSkillExcelConfigData.json": "avatar_skills",
     "AvatarCostumeExcelConfigData.json": "avatar_costumes",
     "WeaponExcelConfigData.json": "weapons",
     "ReliquaryExcelConfigData.json": "reliquaries",
@@ -3835,6 +3838,9 @@ def _load_entity_snapshot_data(repo_path: str, commit_sha: str) -> dict[str, obj
         "effects": rows_by_key.get("effects", []),
         "halls": rows_by_key.get("halls", []),
         "hall_facilities": rows_by_key.get("hall_facilities", []),
+        "avatars": rows_by_key.get("avatars", []),
+        "avatar_skill_depots": rows_by_key.get("avatar_skill_depots", []),
+        "avatar_skills": rows_by_key.get("avatar_skills", []),
         "avatar_costumes": rows_by_key.get("avatar_costumes", []),
         "weapons": rows_by_key.get("weapons", []),
         "reliquaries": rows_by_key.get("reliquaries", []),
@@ -4176,20 +4182,16 @@ def backfill_catalog_entity_versions_from_history(
             return
 
         update_rows = [
-            (int(version_id), source_type_code, entity_id, int(version_id))
+            (int(version_id), source_type_code, entity_id)
             for source_type_code, entity_id in candidate_keys
         ]
         executemany_batched(
             cursor,
-            f"""
+            """
             UPDATE text_source_entity
             SET created_version_id=?
             WHERE source_type_code=?
               AND entity_id=?
-              AND (
-                created_version_id IS NULL
-                OR {_version_precedes_sql('?', 'created_version_id')}
-              )
             """,
             update_rows,
             batch_size=batch_size,
@@ -4232,20 +4234,6 @@ def backfill_catalog_entity_versions_from_history(
         commit_batch_size=10,
         refresh_version_catalog=False,
     )
-    text_fix_cursor = conn.cursor()
-    try:
-        fixed_from_text = backfill_catalog_entity_created_versions_from_textmap(
-            text_fix_cursor,
-            batch_size=batch_size,
-        )
-        if fixed_from_text > 0:
-            conn.commit()
-            print(
-                "Entity source text-version correction complete: "
-                f"{fixed_from_text} entity row group(s) updated."
-            )
-    finally:
-        text_fix_cursor.close()
     if refresh_version_catalog:
         rebuild_version_catalog(["text_source_entity"])
 

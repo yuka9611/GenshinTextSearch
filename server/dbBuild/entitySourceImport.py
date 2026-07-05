@@ -22,7 +22,7 @@ from entity_constants import (
     SOURCE_TYPE_ITEM, SOURCE_TYPE_FOOD, SOURCE_TYPE_FURNISHING,
     SOURCE_TYPE_COSTUME, SOURCE_TYPE_SUIT, SOURCE_TYPE_WEAPON, SOURCE_TYPE_RELIQUARY,
     SOURCE_TYPE_MONSTER, SOURCE_TYPE_CREATURE,
-    SOURCE_TYPE_DRESSING, SOURCE_TYPE_GCG,
+    SOURCE_TYPE_DRESSING, SOURCE_TYPE_GCG, SOURCE_TYPE_AVATAR_INTRO,
     SOURCE_TYPE_ACHIEVEMENT, SOURCE_TYPE_VIEWPOINT, SOURCE_TYPE_DUNGEON, SOURCE_TYPE_LOADING_TIP,
     SOURCE_TYPE_QIANXING_EMOJI, SOURCE_TYPE_QIANXING_POSE, SOURCE_TYPE_QIANXING_EFFECT,
     SOURCE_TYPE_QIANXING_HALL,
@@ -30,7 +30,7 @@ from entity_constants import (
     FIELD_DESC, FIELD_EFFECT_DESC, FIELD_SPECIAL_DESC, FIELD_TYPE_DESC, FIELD_TITLE, FIELD_CODEX_DESC, FIELD_SKILL_DESC,
     # 二级分类
     SUB_NONE, SUB_CARD,
-    SUB_COSTUME_DRESS, SUB_QIANXING_PARADOX, SUB_QIANXING_SUIT,
+    SUB_COSTUME_DRESS, SUB_AVATAR_SKILL, SUB_QIANXING_PARADOX, SUB_QIANXING_SUIT,
     SUB_QIANXING_EMOJI, SUB_QIANXING_POSE, SUB_QIANXING_EFFECT, SUB_QIANXING_HALL,
     # 映射与标签
     MATERIAL_TYPE_TO_CATEGORY, SUB_CATEGORY_LABELS, SOURCE_TYPE_LABELS,
@@ -354,6 +354,9 @@ _ENTITY_EXCEL_FILES = [
     "BeyondTransferEffectExcelConfigData.json",
     "BeyondHallExcelConfigData.json",
     "BeyondHallFacilityExcelConfigData.json",
+    "AvatarExcelConfigData.json",
+    "AvatarSkillDepotExcelConfigData.json",
+    "AvatarSkillExcelConfigData.json",
     "AvatarCostumeExcelConfigData.json",
     "WeaponExcelConfigData.json",
     "ReliquaryExcelConfigData.json",
@@ -384,6 +387,9 @@ def _load_all_entity_data(excel_root: str) -> dict[str, Any]:
     effects = _load_rows(os.path.join(excel_root, "BeyondTransferEffectExcelConfigData.json"))
     halls = _load_rows(os.path.join(excel_root, "BeyondHallExcelConfigData.json"))
     hall_facilities = _load_rows(os.path.join(excel_root, "BeyondHallFacilityExcelConfigData.json"))
+    avatars = _load_rows(os.path.join(excel_root, "AvatarExcelConfigData.json"))
+    avatar_skill_depots = _load_rows(os.path.join(excel_root, "AvatarSkillDepotExcelConfigData.json"))
+    avatar_skills = _load_rows(os.path.join(excel_root, "AvatarSkillExcelConfigData.json"))
     avatar_costumes = _load_rows(os.path.join(excel_root, "AvatarCostumeExcelConfigData.json"))
     weapons = _load_rows(os.path.join(excel_root, "WeaponExcelConfigData.json"))
     reliquaries = _load_rows(os.path.join(excel_root, "ReliquaryExcelConfigData.json"))
@@ -414,6 +420,9 @@ def _load_all_entity_data(excel_root: str) -> dict[str, Any]:
         "effects": effects,
         "halls": halls,
         "hall_facilities": hall_facilities,
+        "avatars": avatars,
+        "avatar_skill_depots": avatar_skill_depots,
+        "avatar_skills": avatar_skills,
         "avatar_costumes": avatar_costumes,
         "weapons": weapons,
         "reliquaries": reliquaries,
@@ -438,6 +447,7 @@ def _print_entity_source_summary(data: dict[str, Any]):
         ("materials", "材料"), ("furnitures", "家具"), ("costumes", "装扮"),
         ("suits", "套装"), ("emojis", "表情"), ("poses", "动作"),
         ("effects", "特效"), ("halls", "大厅模板"), ("hall_facilities", "大厅设施"),
+        ("avatars", "角色"), ("avatar_skill_depots", "角色技能池"), ("avatar_skills", "角色技能"),
         ("avatar_costumes", "角色装扮"),
         ("weapons", "武器"), ("reliquaries", "圣遗物"), ("codex", "图鉴"),
         ("achievements", "成就"), ("viewpoints", "观景点"), ("dungeons", "秘境"),
@@ -466,6 +476,11 @@ def _build_rows_iter(data: dict[str, Any], overrides: dict[str, tuple[int, int]]
         _iter_effect_mappings(data["effects"]),
         _iter_hall_template_mappings(data["halls"]),
         _iter_hall_facility_mappings(data["hall_facilities"]),
+        _iter_avatar_skill_mappings(
+            data.get("avatars", []),
+            data.get("avatar_skill_depots", []),
+            data.get("avatar_skills", []),
+        ),
         _iter_avatar_costume_mappings(data["avatar_costumes"]),
         _pad_sub_category(_iter_weapon_mappings(data["weapons"])),
         _pad_sub_category(_iter_reliquary_mappings(data["reliquaries"])),
@@ -1277,19 +1292,19 @@ def _iter_effect_mappings(rows: list[dict[str, Any]]):
 
 
 def _get_hall_style_id(row: dict[str, Any]) -> int | None:
-    return _extract_first_int(row, "COGKFPLDLLL", "DCOBMNILGJL", "OCHDBIAAHIO")
+    return _extract_first_int(row, "COGKFPLDLLL", "DCOBMNILGJL", "OCHDBIAAHIO", "CKIGKAIIFFI")
 
 
 def _get_hall_name_text_hash(row: dict[str, Any]) -> int | None:
-    return _extract_first_int(row, "LDCAAIEKMOE", "KMMKMJLOFGC", "CAMAHAEKAIH")
+    return _extract_first_int(row, "LDCAAIEKMOE", "KMMKMJLOFGC", "CAMAHAEKAIH", "AOGCNHLHJMJ")
 
 
 def _get_hall_desc_text_hash(row: dict[str, Any]) -> int | None:
-    return _extract_first_int(row, "BPKNEMEJEPF", "DKBHBHOOGAP", "PEODHMPDKNF")
+    return _extract_first_int(row, "BPKNEMEJEPF", "DKBHBHOOGAP", "PEODHMPDKNF", "PPOAOFDNLDJ")
 
 
 def _is_public_hall(row: dict[str, Any]) -> bool:
-    hall_type = _extract_first_str(row, "PEMNJBEBBOG", "BMIILBDKBIO", "KMDBAGPDKNG")
+    hall_type = _extract_first_str(row, "PEMNJBEBBOG", "BMIILBDKBIO", "KMDBAGPDKNG", "BNKLMBACEDF")
     return hall_type == "BEYOND_HALL_PUBLIC"
 
 
@@ -1298,7 +1313,7 @@ def _get_hall_facility_style_id(row: dict[str, Any]) -> int | None:
         row,
         "OJGEAGGJALA", "DGBOKBNOJKE", "LGGBFCPPBBJ",
         "OEFKFFGKKKP", "DOPFMOKHIIC", "JPGMJHBCOGK",
-        "FEIJJDIAHFJ", "KJJPGPAKCIF",
+        "FEIJJDIAHFJ", "KJJPGPAKCIF", "BBLFLDMDBNJ",
     )
 
 
@@ -1337,6 +1352,80 @@ def _iter_hall_facility_mappings(rows: list[dict[str, Any]]):
             _pack_extra(FIELD_DESC),
             SUB_QIANXING_HALL,
         )
+
+
+def _iter_avatar_depot_ids(rows: list[dict[str, Any]]) -> set[int]:
+    depot_ids: set[int] = set()
+    for row in rows:
+        if str(row.get("useType") or "").strip() == "AVATAR_TEST":
+            continue
+        depot_id = _as_nonzero_int(row.get("skillDepotId"))
+        if depot_id is not None:
+            depot_ids.add(depot_id)
+        cand_depot_ids = row.get("candSkillDepotIds")
+        if isinstance(cand_depot_ids, list):
+            for cand_depot_id in cand_depot_ids:
+                parsed = _parse_nonzero_int(cand_depot_id)
+                if parsed is not None:
+                    depot_ids.add(parsed)
+    return depot_ids
+
+
+def _iter_avatar_skill_ids(
+    avatar_skill_depots: list[dict[str, Any]],
+    avatar_depot_ids: set[int],
+) -> set[int]:
+    skill_ids: set[int] = set()
+    for row in avatar_skill_depots:
+        depot_id = _as_nonzero_int(row.get("id"))
+        if depot_id is None or depot_id not in avatar_depot_ids:
+            continue
+        for key in ("skills", "subSkills"):
+            values = row.get(key)
+            if not isinstance(values, list):
+                continue
+            for value in values:
+                parsed = _parse_nonzero_int(value)
+                if parsed is not None:
+                    skill_ids.add(parsed)
+        for key in ("energySkill", "attackModeSkill"):
+            parsed = _parse_nonzero_int(row.get(key))
+            if parsed is not None:
+                skill_ids.add(parsed)
+    return skill_ids
+
+
+def _iter_avatar_skill_mappings(
+    avatars: list[dict[str, Any]],
+    avatar_skill_depots: list[dict[str, Any]],
+    avatar_skills: list[dict[str, Any]],
+):
+    avatar_depot_ids = _iter_avatar_depot_ids(avatars)
+    skill_ids = _iter_avatar_skill_ids(avatar_skill_depots, avatar_depot_ids)
+    for row in avatar_skills:
+        skill_id = _as_nonzero_int(row.get("id"))
+        title_hash = _as_nonzero_int(row.get("nameTextMapHash"))
+        if skill_id is None or title_hash is None or skill_id not in skill_ids:
+            continue
+
+        yielded_hashes: set[int] = set()
+        mapping = (
+            (title_hash, FIELD_TITLE),
+            (_as_nonzero_int(row.get("descTextMapHash")), FIELD_DESC),
+            (_as_nonzero_int(row.get("extraDescTextMapHash")), FIELD_SPECIAL_DESC),
+        )
+        for text_hash, field_code in mapping:
+            if text_hash is None or text_hash in yielded_hashes:
+                continue
+            yielded_hashes.add(text_hash)
+            yield (
+                text_hash,
+                SOURCE_TYPE_AVATAR_INTRO,
+                skill_id,
+                title_hash,
+                _pack_extra(field_code),
+                SUB_AVATAR_SKILL,
+            )
 
 
 def _iter_avatar_costume_mappings(rows: list[dict[str, Any]]):

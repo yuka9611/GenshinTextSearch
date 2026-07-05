@@ -597,6 +597,7 @@ _SUB_CATEGORY_LABELS: dict[int, str] = {
     32: "动作",
     33: "特效",
     34: "大厅设施",
+    35: "角色技能",
 }
 
 _CATALOG_OTHER_SUB_CATEGORY_CODE = "0"
@@ -1253,6 +1254,13 @@ def _build_entity_detail_payload(
 
         if _is_qianxing_source_type(source_type) or source_type == "dressing":
             field_label = "介绍"
+        elif source_type == "avatar_intro" and _sub_category == 35:
+            field_label_map = {
+                1: "技能描述",
+                3: "技能补充描述",
+                5: "技能名",
+            }
+            field_label = field_label_map.get(field_code, "技能描述")
         else:
             field_label_map = {
                 1: "描述",

@@ -234,6 +234,36 @@ def test_iter_hall_template_mappings_supports_6_6_keys():
     ]
 
 
+def test_iter_hall_template_mappings_supports_6_7_keys():
+    rows = [
+        {
+            "CKIGKAIIFFI": 11,
+            "AOGCNHLHJMJ": 3153252249,
+            "PPOAOFDNLDJ": 2073840156,
+            "BNKLMBACEDF": "BEYOND_HALL_PRIVATE",
+        },
+        {
+            "CKIGKAIIFFI": 1011,
+            "AOGCNHLHJMJ": 4116792297,
+            "PPOAOFDNLDJ": 1271560124,
+            "BNKLMBACEDF": "BEYOND_HALL_PUBLIC",
+        },
+    ]
+
+    result = list(entitySourceImport._iter_hall_template_mappings(rows))
+
+    assert result == [
+        (
+            2073840156,
+            entitySourceImport.SOURCE_TYPE_QIANXING_HALL,
+            11,
+            3153252249,
+            entitySourceImport._pack_extra(entitySourceImport.FIELD_DESC),
+            entitySourceImport.SUB_QIANXING_HALL,
+        )
+    ]
+
+
 def test_iter_hall_facility_mappings_accepts_bwiki_style_id_fallback_keys():
     rows = [
         {
@@ -280,6 +310,179 @@ def test_iter_hall_facility_mappings_supports_6_6_style_keys():
             entitySourceImport._pack_extra(entitySourceImport.FIELD_DESC),
             entitySourceImport.SUB_QIANXING_HALL,
         )
+    ]
+
+
+def test_iter_hall_facility_mappings_supports_6_7_style_key():
+    rows = [
+        {
+            "id": 351101,
+            "nameTextMapHash": 2097033056,
+            "descTextMapHash": 3061298116,
+            "BBLFLDMDBNJ": 1,
+        }
+    ]
+
+    result = list(entitySourceImport._iter_hall_facility_mappings(rows))
+
+    assert result == [
+        (
+            3061298116,
+            entitySourceImport.SOURCE_TYPE_QIANXING_HALL,
+            351101,
+            2097033056,
+            entitySourceImport._pack_extra(entitySourceImport.FIELD_DESC),
+            entitySourceImport.SUB_QIANXING_HALL,
+        )
+    ]
+
+
+def test_iter_avatar_skill_mappings_uses_formal_avatar_depots_only():
+    avatars = [
+        {
+            "id": 10000002,
+            "useType": "AVATAR_FORMAL",
+            "skillDepotId": 201,
+            "candSkillDepotIds": [202],
+        },
+        {
+            "id": 10000001,
+            "useType": "AVATAR_TEST",
+            "skillDepotId": 101,
+            "candSkillDepotIds": [],
+        },
+    ]
+    depots = [
+        {
+            "id": 201,
+            "skills": [10024, 0],
+            "subSkills": [10020],
+            "energySkill": 10019,
+            "attackModeSkill": 0,
+        },
+        {
+            "id": 202,
+            "skills": [20024],
+            "subSkills": [],
+            "energySkill": 0,
+            "attackModeSkill": 0,
+        },
+        {
+            "id": 101,
+            "skills": [90001],
+            "subSkills": [],
+            "energySkill": 0,
+            "attackModeSkill": 0,
+        },
+    ]
+    skills = [
+        {
+            "id": 10024,
+            "nameTextMapHash": 101,
+            "descTextMapHash": 102,
+            "extraDescTextMapHash": 103,
+        },
+        {
+            "id": 10020,
+            "nameTextMapHash": 201,
+            "descTextMapHash": 202,
+            "extraDescTextMapHash": 0,
+        },
+        {
+            "id": 10019,
+            "nameTextMapHash": 301,
+            "descTextMapHash": 302,
+            "extraDescTextMapHash": 0,
+        },
+        {
+            "id": 20024,
+            "nameTextMapHash": 401,
+            "descTextMapHash": 402,
+            "extraDescTextMapHash": 0,
+        },
+        {
+            "id": 90001,
+            "nameTextMapHash": 901,
+            "descTextMapHash": 902,
+            "extraDescTextMapHash": 0,
+        },
+    ]
+
+    result = list(entitySourceImport._iter_avatar_skill_mappings(avatars, depots, skills))
+
+    assert result == [
+        (
+            101,
+            entitySourceImport.SOURCE_TYPE_AVATAR_INTRO,
+            10024,
+            101,
+            entitySourceImport._pack_extra(entitySourceImport.FIELD_TITLE),
+            entitySourceImport.SUB_AVATAR_SKILL,
+        ),
+        (
+            102,
+            entitySourceImport.SOURCE_TYPE_AVATAR_INTRO,
+            10024,
+            101,
+            entitySourceImport._pack_extra(entitySourceImport.FIELD_DESC),
+            entitySourceImport.SUB_AVATAR_SKILL,
+        ),
+        (
+            103,
+            entitySourceImport.SOURCE_TYPE_AVATAR_INTRO,
+            10024,
+            101,
+            entitySourceImport._pack_extra(entitySourceImport.FIELD_SPECIAL_DESC),
+            entitySourceImport.SUB_AVATAR_SKILL,
+        ),
+        (
+            201,
+            entitySourceImport.SOURCE_TYPE_AVATAR_INTRO,
+            10020,
+            201,
+            entitySourceImport._pack_extra(entitySourceImport.FIELD_TITLE),
+            entitySourceImport.SUB_AVATAR_SKILL,
+        ),
+        (
+            202,
+            entitySourceImport.SOURCE_TYPE_AVATAR_INTRO,
+            10020,
+            201,
+            entitySourceImport._pack_extra(entitySourceImport.FIELD_DESC),
+            entitySourceImport.SUB_AVATAR_SKILL,
+        ),
+        (
+            301,
+            entitySourceImport.SOURCE_TYPE_AVATAR_INTRO,
+            10019,
+            301,
+            entitySourceImport._pack_extra(entitySourceImport.FIELD_TITLE),
+            entitySourceImport.SUB_AVATAR_SKILL,
+        ),
+        (
+            302,
+            entitySourceImport.SOURCE_TYPE_AVATAR_INTRO,
+            10019,
+            301,
+            entitySourceImport._pack_extra(entitySourceImport.FIELD_DESC),
+            entitySourceImport.SUB_AVATAR_SKILL,
+        ),
+        (
+            401,
+            entitySourceImport.SOURCE_TYPE_AVATAR_INTRO,
+            20024,
+            401,
+            entitySourceImport._pack_extra(entitySourceImport.FIELD_TITLE),
+            entitySourceImport.SUB_AVATAR_SKILL,
+        ),
+        (
+            402,
+            entitySourceImport.SOURCE_TYPE_AVATAR_INTRO,
+            20024,
+            401,
+            entitySourceImport._pack_extra(entitySourceImport.FIELD_DESC),
+            entitySourceImport.SUB_AVATAR_SKILL,
+        ),
     ]
 
 
@@ -883,6 +1086,63 @@ def test_catalog_entity_history_backfill_updates_only_new_snapshot_entities(monk
         """
     ).fetchall()
     assert rows == [(1001, None), (2002, 2)]
+
+
+def test_catalog_entity_history_backfill_overrides_earlier_text_version(monkeypatch):
+    connection = sqlite3.connect(":memory:")
+    _create_entity_version_tables(connection)
+    connection.executemany(
+        """
+        INSERT INTO text_source_entity(text_hash, source_type_code, entity_id, title_hash, extra, sub_category, created_version_id)
+        VALUES (?,?,?,?,?,?,?)
+        """,
+        [
+            (31, entitySourceImport.SOURCE_TYPE_COSTUME, 2002, 12, 1, entitySourceImport.SUB_QIANXING_PARADOX, 1),
+        ],
+    )
+    monkeypatch.setattr(history_backfill, "conn", connection)
+    monkeypatch.setattr(entitySourceImport, "ensure_version_schema", lambda: None)
+    monkeypatch.setattr(entitySourceImport, "_load_overrides", lambda: ({}, set()))
+
+    def fake_git_show_json(_repo_path, commit_sha, rel_path):
+        if rel_path != "ExcelBinOutput/BeyondCostumeExcelConfigData.json":
+            return []
+        if commit_sha == "child":
+            return [
+                {
+                    "costumeId": 2002,
+                    "nameTextMapHash": 12,
+                    "descriptionTextMapHash": 31,
+                    "GGBEAGONFJA": ["BODY_GIRL"],
+                },
+            ]
+        return []
+
+    def fake_backfill_versions_from_history(**kwargs):
+        kwargs["process_entry_fn"](
+            connection.cursor(),
+            "/repo",
+            "child",
+            "parent",
+            {"action": "M", "new_path": "ExcelBinOutput/BeyondCostumeExcelConfigData.json"},
+            2,
+            "Version 2.0",
+            100,
+        )
+
+    monkeypatch.setattr(history_backfill, "_git_show_json", fake_git_show_json)
+    monkeypatch.setattr(history_backfill, "_backfill_versions_from_history", fake_backfill_versions_from_history)
+
+    history_backfill.backfill_catalog_entity_versions_from_history(refresh_version_catalog=False)
+
+    rows = connection.execute(
+        """
+        SELECT entity_id, created_version_id
+        FROM text_source_entity
+        ORDER BY entity_id
+        """
+    ).fetchall()
+    assert rows == [(2002, 2)]
 
 
 def test_catalog_entity_history_backfill_replays_full_when_all_rows_are_target_version(monkeypatch):
