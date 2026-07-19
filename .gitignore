@@ -10,6 +10,7 @@ build/
 dist/
 release/
 .trae/
+docs/
 *.log
 AGENTS.md
 *.sh

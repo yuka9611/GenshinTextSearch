@@ -37,14 +37,14 @@ from quest_hash_map_utils import (
     refresh_all_quest_hash_map as _refresh_all_quest_hash_map,
     unresolved_created_quest_ids as _unresolved_created_quest_ids,
 )
-from quest_source_utils import (
+from genshin_data_core.sources import (
     SOURCE_TYPE_ANECDOTE,
     SOURCE_TYPE_HANGOUT,
     extract_anecdote_core_fields,
     extract_main_coop_ids,
     extract_storyboard_group_talk_ids,
 )
-from quest_utils import extract_quest_row as _extract_quest_row
+from genshin_data_core.quest import extract_quest_row as _extract_quest_row
 from version_control import backfill_quest_created_version_from_textmap as _backfill_quest_created_version_from_textmap
 from subtitle_utils import parse_srt_rows as _parse_srt_rows
 from text_source_path_utils import (

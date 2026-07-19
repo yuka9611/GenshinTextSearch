@@ -20,23 +20,16 @@ from quest_hash_map_utils import (
     refresh_quest_hash_map_for_quest_ids as _refresh_quest_hash_map_for_quest_ids,
     refresh_quest_hash_map_for_talk_ids as _refresh_quest_hash_map_for_talk_ids,
 )
-from quest_utils import extract_quest_id, extract_quest_row, extract_quest_talk_ids
-from quest_source_utils import (
+from genshin_data_core.access import FilesystemGameDataAccess
+from genshin_data_core.quest import GTS_QUEST_PARSER
+from genshin_data_core.sources import (
     ANECDOTE_SOURCE_STATUS_MAPPING_MISS,
     SOURCE_TYPE_ANECDOTE,
     SOURCE_TYPE_HANGOUT,
-    build_hangout_payload,
-    build_step_title_hash_by_talk_id,
-    extract_anecdote_payload,
-    get_quest_subquests,
-    get_step_talk_ids,
+    QuestSourceResolver,
     iter_subquest_talk_rows,
-    load_main_coop_ids_by_quest_id,
-    load_storyboard_file_by_talk_id,
-    load_storyboard_talk_excel_by_quest_id,
-    reset_quest_source_caches,
-    resolve_quest_source_fields,
 )
+from genshin_data_core.talk import is_non_dialog_talk_obj
 from version_control import backfill_quest_created_version_from_textmap as _backfill_quest_created_version_from_textmap
 from version_control import (
     _build_version_preference_case_sql,
@@ -56,6 +49,8 @@ sanitize_quest_text_hash = quest_text_filters.sanitize_quest_text_hash
 _MAIN_QUEST_DESC_HASH_BY_ID: dict[int, int | None] | None = None
 _MAIN_QUEST_CHAPTER_ID_BY_ID: dict[int, int | None] | None = None
 _HAS_TALK_DIALOGUE_LINKS: bool | None = None
+_QUEST_SOURCE_DATA_PATH: str | None = None
+_QUEST_SOURCE_RESOLVER: QuestSourceResolver | None = None
 QUEST_TALK_NORMAL_COOP_ID = 0
 QUEST_TALK_SCOPE_ALL = "all"
 QUEST_TALK_SCOPE_NORMAL = "normal"
@@ -64,6 +59,31 @@ _QUEST_META_SELECT_SQL = (
     "SELECT titleTextMapHash, descTextMapHash, longDescTextMapHash, chapterId, source_type, source_code_raw "
     "FROM quest WHERE questId=?"
 )
+
+extract_quest_id = GTS_QUEST_PARSER.extract_quest_id
+extract_quest_row = GTS_QUEST_PARSER.extract_quest_row
+extract_quest_talk_ids = GTS_QUEST_PARSER.extract_quest_talk_ids
+build_step_title_hash_by_talk_id = GTS_QUEST_PARSER.build_step_title_hash_by_talk_id
+get_quest_subquests = GTS_QUEST_PARSER.get_quest_subquests
+get_step_talk_ids = GTS_QUEST_PARSER.get_step_talk_ids
+
+
+def _get_quest_source_resolver() -> QuestSourceResolver:
+    global _QUEST_SOURCE_DATA_PATH, _QUEST_SOURCE_RESOLVER
+    normalized_path = os.path.abspath(DATA_PATH)
+    if _QUEST_SOURCE_RESOLVER is None or _QUEST_SOURCE_DATA_PATH != normalized_path:
+        _QUEST_SOURCE_DATA_PATH = normalized_path
+        _QUEST_SOURCE_RESOLVER = QuestSourceResolver(
+            FilesystemGameDataAccess(normalized_path),
+            parser=GTS_QUEST_PARSER,
+        )
+    return _QUEST_SOURCE_RESOLVER
+
+
+def _reset_quest_source_caches() -> None:
+    global _QUEST_SOURCE_DATA_PATH, _QUEST_SOURCE_RESOLVER
+    _QUEST_SOURCE_DATA_PATH = None
+    _QUEST_SOURCE_RESOLVER = None
 
 
 def _load_json_dict(path: str) -> dict | None:
@@ -591,13 +611,13 @@ def _load_main_quest_chapter_id_by_id() -> dict[int, int | None]:
     return mapping
 
 
-def _resolve_quest_chapter_id(quest_id: int | None, quest_chapter_id: int | None) -> int | None:
-    if not isinstance(quest_id, int):
-        return quest_chapter_id if isinstance(quest_chapter_id, int) and quest_chapter_id != 0 else None
-    main_chapter_id = _load_main_quest_chapter_id_by_id().get(quest_id)
-    if isinstance(main_chapter_id, int) and main_chapter_id != 0:
-        return main_chapter_id
-    return quest_chapter_id if isinstance(quest_chapter_id, int) and quest_chapter_id != 0 else None
+def _get_import_chapter_id(quest_id: int | None, quest_chapter_id: int | None) -> int | None:
+    main_chapter_id = (
+        _load_main_quest_chapter_id_by_id().get(quest_id)
+        if isinstance(quest_id, int)
+        else None
+    )
+    return GTS_QUEST_PARSER.resolve_chapter_values(main_chapter_id, quest_chapter_id)
 
 
 def _collect_quest_talk_ids(obj: dict) -> list[int]:
@@ -907,10 +927,10 @@ def importQuest(
         return None, False
 
     questId, titleTextMapHash, chapterId = quest_row
-    chapterId = _resolve_quest_chapter_id(questId, chapterId)
+    chapterId = _get_import_chapter_id(questId, chapterId)
     descTextMapHash = _get_quest_desc_text_map_hash(questId)
     longDescTextMapHash = None
-    source_type, source_code_raw = resolve_quest_source_fields(questId)
+    source_type, source_code_raw = _get_quest_source_resolver().resolve_quest_source_fields(questId)
     if titleTextMapHash in (None, 0):
         titleTextMapHash = None
         if not _is_hidden_quest_obj(obj):
@@ -1007,10 +1027,10 @@ def importQuestForDiff(
         return None, False
 
     questId, titleTextMapHash, chapterId = quest_row
-    chapterId = _resolve_quest_chapter_id(questId, chapterId)
+    chapterId = _get_import_chapter_id(questId, chapterId)
     descTextMapHash = _get_quest_desc_text_map_hash(questId)
     longDescTextMapHash = None
-    source_type, source_code_raw = resolve_quest_source_fields(questId)
+    source_type, source_code_raw = _get_quest_source_resolver().resolve_quest_source_fields(questId)
     if titleTextMapHash in (None, 0):
         titleTextMapHash = None
         if not _is_hidden_quest_obj(obj):
@@ -1098,7 +1118,7 @@ def importAllQuests(
     *,
     batch_size: int = DEFAULT_BATCH_SIZE,
 ):
-    reset_quest_source_caches()
+    _reset_quest_source_caches()
     cursor = conn.cursor()
     _ensure_quest_version_tables(cursor)
 
@@ -1183,7 +1203,7 @@ def importAllQuestsForDiff(
     *,
     batch_size: int = DEFAULT_BATCH_SIZE,
 ):
-    reset_quest_source_caches()
+    _reset_quest_source_caches()
     version = current_version or get_current_version()
     cursor = conn.cursor()
     _ensure_quest_version_tables(cursor)
@@ -1320,7 +1340,7 @@ def backfillQuestMetadata(*, commit: bool = True, batch_size: int = DEFAULT_BATC
                     (
                         quest_row[1],
                         _get_quest_desc_text_map_hash(quest_id),
-                        _resolve_quest_chapter_id(quest_id, quest_row[2]),
+                        _get_import_chapter_id(quest_id, quest_row[2]),
                         quest_id,
                     )
                 )
@@ -1428,7 +1448,7 @@ def importAnecdote(
         cursor = conn.cursor()
         _ensure_quest_version_tables(cursor)
 
-    payload = extract_anecdote_payload(
+    payload = _get_quest_source_resolver().extract_anecdote_payload(
         row,
         talk_excel_map=talk_excel_map,
         storyboard_file_by_talk_id=storyboard_file_by_talk_id,
@@ -1527,7 +1547,7 @@ def importAnecdoteForDiff(
     version = current_version or get_current_version()
     get_or_create_version_id(version)
 
-    payload = extract_anecdote_payload(
+    payload = _get_quest_source_resolver().extract_anecdote_payload(
         row,
         talk_excel_map=talk_excel_map,
         storyboard_file_by_talk_id=storyboard_file_by_talk_id,
@@ -1665,8 +1685,8 @@ def importAllAnecdotes(
     rows = load_json_file(anecdote_path)
     if not isinstance(rows, list):
         rows = []
-    talk_excel_map = load_storyboard_talk_excel_by_quest_id()
-    storyboard_file_by_talk_id = load_storyboard_file_by_talk_id()
+    talk_excel_map = _get_quest_source_resolver().load_storyboard_talk_excel_by_quest_id()
+    storyboard_file_by_talk_id = _get_quest_source_resolver().load_storyboard_file_by_talk_id()
     imported_quest_ids: set[int] = set()
     new_quest_ids: set[int] = set()
     skipped_rows: list[str] = []
@@ -1777,8 +1797,8 @@ def importAllAnecdotesForDiff(
     rows = load_json_file(anecdote_path)
     if not isinstance(rows, list):
         rows = []
-    talk_excel_map = load_storyboard_talk_excel_by_quest_id()
-    storyboard_file_by_talk_id = load_storyboard_file_by_talk_id()
+    talk_excel_map = _get_quest_source_resolver().load_storyboard_talk_excel_by_quest_id()
+    storyboard_file_by_talk_id = _get_quest_source_resolver().load_storyboard_file_by_talk_id()
     imported_quest_ids: set[int] = set()
     new_quest_ids: set[int] = set()
     skipped_rows: list[str] = []
@@ -1887,7 +1907,7 @@ def importHangout(
         _QUEST_META_SELECT_SQL,
         (quest_id,),
     ).fetchone()
-    payload = build_hangout_payload(
+    payload = _get_quest_source_resolver().build_hangout_payload(
         quest_id,
         existing_quest_row=existing_quest_row,
         missing_coop_collector=missing_coop_collector,
@@ -1977,7 +1997,7 @@ def importHangoutForDiff(
         _QUEST_META_SELECT_SQL,
         (quest_id,),
     ).fetchone()
-    payload = build_hangout_payload(
+    payload = _get_quest_source_resolver().build_hangout_payload(
         quest_id,
         existing_quest_row=existing_quest_row,
         missing_coop_collector=missing_coop_collector,
@@ -2088,10 +2108,10 @@ def importAllHangouts(
     *,
     batch_size: int = DEFAULT_BATCH_SIZE,
 ):
-    reset_quest_source_caches()
+    _reset_quest_source_caches()
     cursor = conn.cursor()
     _ensure_quest_version_tables(cursor)
-    quest_ids = sorted(load_main_coop_ids_by_quest_id().keys())
+    quest_ids = sorted(_get_quest_source_resolver().load_main_coop_ids_by_quest_id().keys())
     imported_quest_ids: set[int] = set()
     new_quest_ids: set[int] = set()
     missing_title_rows: list[str] = []
@@ -2183,12 +2203,12 @@ def importAllHangoutsForDiff(
     *,
     batch_size: int = DEFAULT_BATCH_SIZE,
 ):
-    reset_quest_source_caches()
+    _reset_quest_source_caches()
     version = current_version or get_current_version()
     get_or_create_version_id(version)
     cursor = conn.cursor()
     _ensure_quest_version_tables(cursor)
-    quest_ids = sorted(load_main_coop_ids_by_quest_id().keys())
+    quest_ids = sorted(_get_quest_source_resolver().load_main_coop_ids_by_quest_id().keys())
     imported_quest_ids: set[int] = set()
     new_quest_ids: set[int] = set()
     missing_title_rows: list[str] = []
@@ -2306,7 +2326,7 @@ def importTalk(
         if own_cursor:
             cursor.close()
         return 0
-    if _is_non_dialog_talk_obj(obj):
+    if is_non_dialog_talk_obj(obj):
         if own_cursor:
             cursor.close()
         return 0
@@ -2476,44 +2496,6 @@ def importTalk(
         if commit:
             conn.commit()
     return len(rows)
-
-
-def _is_non_dialog_talk_obj(obj: object) -> bool:
-    if not isinstance(obj, dict):
-        return False
-    keys = set(obj.keys())
-
-    if keys == {"activityId", "talks"}:
-        return True
-    if "talks" in obj and isinstance(obj.get("talks"), list):
-        return True
-
-    if "DGJMIPFDEOF" in obj and isinstance(obj.get("DGJMIPFDEOF"), list):
-        if (
-            "CAKFHGJGEEK" in obj
-            or "BLPHCANGKPL" in obj
-            or "EOFLGOBJBCG" in obj
-            or "configId" in obj
-            or "groupId" in obj
-            or "npcId" in obj
-        ):
-            return True
-
-    if keys == {"ANCLPHMACIF", "CIAOBJHFJJM"} and isinstance(obj.get("CIAOBJHFJJM"), list):
-        return True
-
-    if "DLPKMDPABFM" in obj and "LBPGKDMGFBN" in obj:
-        if not isinstance(obj.get("LOJEOMAPIIM"), list):
-            return True
-
-    if "AFKIEPNELHE" in obj and "IKCBIFLCCOH" in obj and "PDFCHAAMEHA" in obj:
-        return True
-    if "AFNAKLCPGNF" in obj and "speed" in obj and "maxSpeed" in obj:
-        return True
-    if "FDAAMLIPKAK" in obj and "reApplyModifierOnStateChange" in obj:
-        return True
-
-    return False
 
 
 def importAllTalkItems(

@@ -14,7 +14,18 @@ import diffUpdate
 import databaseHelper
 import history_backfill
 import questImport
-import quest_source_utils
+from genshin_data_core.access import FilesystemGameDataAccess
+from genshin_data_core.sources import (
+    ANECDOTE_SOURCE_STATUS_IMPORTABLE,
+    ANECDOTE_SOURCE_STATUS_MAPPING_MISS,
+    QuestSourceResolver,
+    extract_anecdote_core_fields,
+)
+from genshin_data_core.talk import is_non_dialog_talk_obj
+
+
+def _quest_source_resolver(root) -> QuestSourceResolver:
+    return QuestSourceResolver(FilesystemGameDataAccess(str(root)))
 
 
 class _DummyCursor:
@@ -310,7 +321,7 @@ def test_diff_update_resolve_talk_keys_supports_6_7_schema():
 def test_new_storyboard_group_schema_is_non_dialog_talk_obj():
     obj = {"ANCLPHMACIF": 0, "CIAOBJHFJJM": []}
 
-    assert questImport._is_non_dialog_talk_obj(obj)
+    assert is_non_dialog_talk_obj(obj)
     assert diffUpdate._resolve_talk_keys(obj) is None
 
 
@@ -724,10 +735,7 @@ def test_load_storyboard_file_by_talk_id_indexes_hashed_storyboard_files(monkeyp
         encoding="utf-8",
     )
 
-    monkeypatch.setattr(quest_source_utils, "DATA_PATH", str(tmp_path))
-    quest_source_utils.reset_quest_source_caches()
-
-    mapping = quest_source_utils.load_storyboard_file_by_talk_id()
+    mapping = _quest_source_resolver(tmp_path).load_storyboard_file_by_talk_id()
 
     assert mapping == {
         6987810: "BinOutput/Talk/Storyboard/a8e1ffaf.json",
@@ -737,7 +745,7 @@ def test_load_storyboard_file_by_talk_id_indexes_hashed_storyboard_files(monkeyp
 
 
 def test_extract_anecdote_core_fields_supports_current_anecdote_keys():
-    core_fields = quest_source_utils.extract_anecdote_core_fields(
+    core_fields = extract_anecdote_core_fields(
         {
             "IDEHFGDCPDL": 106401,
             "IBGEKMBPNNO": 2416311523,
@@ -758,7 +766,7 @@ def test_extract_anecdote_core_fields_supports_current_anecdote_keys():
 
 
 def test_extract_anecdote_core_fields_supports_6_7_anecdote_keys():
-    core_fields = quest_source_utils.extract_anecdote_core_fields(
+    core_fields = extract_anecdote_core_fields(
         {
             "GIJOCHMAJCI": 106401,
             "EHGEFIODFHD": 2416311523,
@@ -823,10 +831,7 @@ def test_extract_anecdote_payload_prefers_story_quest_ids_for_current_data(monke
         encoding="utf-8",
     )
 
-    monkeypatch.setattr(quest_source_utils, "DATA_PATH", str(tmp_path))
-    quest_source_utils.reset_quest_source_caches()
-
-    payload = quest_source_utils.extract_anecdote_payload(
+    payload = _quest_source_resolver(tmp_path).extract_anecdote_payload(
         {
             "IDEHFGDCPDL": 106401,
             "IBGEKMBPNNO": 2416311523,
@@ -841,7 +846,7 @@ def test_extract_anecdote_payload_prefers_story_quest_ids_for_current_data(monke
     assert payload["title_text_map_hash"] == 2416311523
     assert payload["desc_text_map_hash"] == 3876969701
     assert payload["talk_rows"] == [(6987801, None, 0)]
-    assert payload["source_status"] == quest_source_utils.ANECDOTE_SOURCE_STATUS_IMPORTABLE
+    assert payload["source_status"] == ANECDOTE_SOURCE_STATUS_IMPORTABLE
     assert payload["mapping_miss_refs"] == []
 
 
@@ -870,10 +875,7 @@ def test_extract_anecdote_payload_uses_hashed_storyboard_file_for_107601(monkeyp
         encoding="utf-8",
     )
 
-    monkeypatch.setattr(quest_source_utils, "DATA_PATH", str(tmp_path))
-    quest_source_utils.reset_quest_source_caches()
-
-    payload = quest_source_utils.extract_anecdote_payload(
+    payload = _quest_source_resolver(tmp_path).extract_anecdote_payload(
         {
             "GBDGFHNLDFF": 107601,
             "BBOMCGBIOFM": [510760101],
@@ -882,7 +884,7 @@ def test_extract_anecdote_payload_uses_hashed_storyboard_file_for_107601(monkeyp
 
     assert payload is not None
     assert payload["talk_rows"] == [(6987810, None, 0)]
-    assert payload["source_status"] == quest_source_utils.ANECDOTE_SOURCE_STATUS_IMPORTABLE
+    assert payload["source_status"] == ANECDOTE_SOURCE_STATUS_IMPORTABLE
     assert payload["mapping_miss_refs"] == []
     assert "located_talk_refs" not in payload
 
@@ -919,10 +921,7 @@ def test_extract_anecdote_payload_reports_storyboard_missing_for_107501(monkeypa
         encoding="utf-8",
     )
 
-    monkeypatch.setattr(quest_source_utils, "DATA_PATH", str(tmp_path))
-    quest_source_utils.reset_quest_source_caches()
-
-    payload = quest_source_utils.extract_anecdote_payload(
+    payload = _quest_source_resolver(tmp_path).extract_anecdote_payload(
         {
             "GBDGFHNLDFF": 107501,
             "BBOMCGBIOFM": [510750101],
@@ -931,7 +930,7 @@ def test_extract_anecdote_payload_reports_storyboard_missing_for_107501(monkeypa
 
     assert payload is not None
     assert payload["talk_rows"] == []
-    assert payload["source_status"] == quest_source_utils.ANECDOTE_SOURCE_STATUS_MAPPING_MISS
+    assert payload["source_status"] == ANECDOTE_SOURCE_STATUS_MAPPING_MISS
     assert payload["mapping_miss_refs"] == ["107501:510750101"]
     assert "located_talk_refs" not in payload
 
@@ -951,10 +950,7 @@ def test_extract_anecdote_payload_falls_back_to_storyboard_group(monkeypatch, tm
         encoding="utf-8",
     )
 
-    monkeypatch.setattr(quest_source_utils, "DATA_PATH", str(tmp_path))
-    quest_source_utils.reset_quest_source_caches()
-
-    payload = quest_source_utils.extract_anecdote_payload(
+    payload = _quest_source_resolver(tmp_path).extract_anecdote_payload(
         {
             "GBDGFHNLDFF": 107501,
             "BBOMCGBIOFM": [510750101],
@@ -965,7 +961,7 @@ def test_extract_anecdote_payload_falls_back_to_storyboard_group(monkeypatch, tm
 
     assert payload is not None
     assert payload["talk_rows"] == [(7001, None, 0), (7002, None, 0)]
-    assert payload["source_status"] == quest_source_utils.ANECDOTE_SOURCE_STATUS_IMPORTABLE
+    assert payload["source_status"] == ANECDOTE_SOURCE_STATUS_IMPORTABLE
     assert payload["mapping_miss_refs"] == []
     assert "located_talk_refs" not in payload
 
@@ -1002,11 +998,9 @@ def test_import_anecdote_mapping_miss_does_not_duplicate_no_talk(monkeypatch, tm
         encoding="utf-8",
     )
 
-    monkeypatch.setattr(quest_source_utils, "DATA_PATH", str(tmp_path))
-    quest_source_utils.reset_quest_source_caches()
-
-    talk_excel_map = quest_source_utils.load_storyboard_talk_excel_by_quest_id()
-    storyboard_file_by_talk_id = quest_source_utils.load_storyboard_file_by_talk_id()
+    resolver = _quest_source_resolver(tmp_path)
+    talk_excel_map = resolver.load_storyboard_talk_excel_by_quest_id()
+    storyboard_file_by_talk_id = resolver.load_storyboard_file_by_talk_id()
 
     connection = sqlite3.connect(":memory:")
     _create_dialogue_tables(connection)

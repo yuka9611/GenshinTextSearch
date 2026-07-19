@@ -12,10 +12,14 @@ if DBBUILD_DIR not in sys.path:
 
 import databaseHelper
 import questImport
-import quest_source_utils
-from quest_source_utils import SOURCE_TYPE_HANGOUT, resolve_quest_source_fields
-from quest_utils import extract_quest_id, extract_quest_talk_ids
-from quest_source_utils import build_step_title_hash_by_talk_id, get_step_talk_ids
+from genshin_data_core.access import FilesystemGameDataAccess
+from genshin_data_core.quest import (
+    build_step_title_hash_by_talk_id,
+    extract_quest_id,
+    extract_quest_talk_ids,
+    get_step_talk_ids,
+)
+from genshin_data_core.sources import QuestSourceResolver, SOURCE_TYPE_HANGOUT
 
 
 class _DummyProgress:
@@ -117,7 +121,7 @@ def test_get_step_talk_ids_supports_finish_plot_and_skips_lua_notify():
     assert get_step_talk_ids(step_obj) == [1000701, 1000702]
 
 
-def test_quest_utils_supports_6_6_quest_brief_schema():
+def test_shared_quest_parser_supports_6_6_quest_brief_schema():
     obj = {
         "GMOMCKNPBGE": 70065,
         "ALLMCLJBBDM": 2595721583,
@@ -129,7 +133,7 @@ def test_quest_utils_supports_6_6_quest_brief_schema():
     assert extract_quest_talk_ids(obj) == [7006501, 7006502]
 
 
-def test_quest_utils_supports_6_7_quest_brief_schema():
+def test_shared_quest_parser_supports_6_7_quest_brief_schema():
     obj = {
         "ANKFNLMKOII": 76109,
         "OCCBMCOGDOO": 4183792175,
@@ -146,12 +150,12 @@ def test_quest_utils_supports_6_7_quest_brief_schema():
 
 
 def test_legacy_190xx_quest_ids_are_hangouts(monkeypatch):
-    monkeypatch.setattr(quest_source_utils, "_HANGOUT_QUEST_IDS", None)
-    monkeypatch.setattr(quest_source_utils, "load_quest_source_raw_by_id", lambda: {19001: "LQ"})
-    monkeypatch.setattr(quest_source_utils, "load_main_coop_ids_by_quest_id", lambda: {})
+    resolver = QuestSourceResolver(FilesystemGameDataAccess([]))
+    monkeypatch.setattr(resolver, "load_quest_source_raw_by_id", lambda: {19001: "LQ"})
+    monkeypatch.setattr(resolver, "load_main_coop_ids_by_quest_id", lambda: {})
 
-    assert resolve_quest_source_fields(19001) == (SOURCE_TYPE_HANGOUT, "LQ")
-    assert resolve_quest_source_fields(19187) == (SOURCE_TYPE_HANGOUT, "UNKNOWN")
+    assert resolver.resolve_quest_source_fields(19001) == (SOURCE_TYPE_HANGOUT, "LQ")
+    assert resolver.resolve_quest_source_fields(19187) == (SOURCE_TYPE_HANGOUT, "UNKNOWN")
 
 
 def test_build_step_title_hash_by_talk_id_supports_6_6_quest_brief_schema():

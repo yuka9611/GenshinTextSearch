@@ -9,6 +9,12 @@ from typing import Any
 
 from DBConfig import DATA_PATH, conn
 from import_utils import DEFAULT_BATCH_SIZE, executemany_batched, load_json_file
+from genshin_data_core.hall import (
+    get_hall_desc_text_hash,
+    get_hall_name_text_hash,
+    get_hall_style_id,
+    is_public_hall,
+)
 from version_control import (
     _build_version_preference_case_sql,
     ensure_version_schema,
@@ -1291,23 +1297,6 @@ def _iter_effect_mappings(rows: list[dict[str, Any]]):
         )
 
 
-def _get_hall_style_id(row: dict[str, Any]) -> int | None:
-    return _extract_first_int(row, "COGKFPLDLLL", "DCOBMNILGJL", "OCHDBIAAHIO", "CKIGKAIIFFI")
-
-
-def _get_hall_name_text_hash(row: dict[str, Any]) -> int | None:
-    return _extract_first_int(row, "LDCAAIEKMOE", "KMMKMJLOFGC", "CAMAHAEKAIH", "AOGCNHLHJMJ")
-
-
-def _get_hall_desc_text_hash(row: dict[str, Any]) -> int | None:
-    return _extract_first_int(row, "BPKNEMEJEPF", "DKBHBHOOGAP", "PEODHMPDKNF", "PPOAOFDNLDJ")
-
-
-def _is_public_hall(row: dict[str, Any]) -> bool:
-    hall_type = _extract_first_str(row, "PEMNJBEBBOG", "BMIILBDKBIO", "KMDBAGPDKNG", "BNKLMBACEDF")
-    return hall_type == "BEYOND_HALL_PUBLIC"
-
-
 def _get_hall_facility_style_id(row: dict[str, Any]) -> int | None:
     return _extract_first_int(
         row,
@@ -1319,11 +1308,11 @@ def _get_hall_facility_style_id(row: dict[str, Any]) -> int | None:
 
 def _iter_hall_template_mappings(rows: list[dict[str, Any]]):
     for row in rows:
-        if _is_public_hall(row):
+        if is_public_hall(row):
             continue
-        hall_style_id = _get_hall_style_id(row)
-        title_hash = _get_hall_name_text_hash(row)
-        text_hash = _get_hall_desc_text_hash(row)
+        hall_style_id = get_hall_style_id(row)
+        title_hash = get_hall_name_text_hash(row)
+        text_hash = get_hall_desc_text_hash(row)
         if hall_style_id is None or title_hash is None or text_hash is None:
             continue
         yield (

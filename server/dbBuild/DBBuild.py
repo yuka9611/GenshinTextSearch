@@ -16,6 +16,7 @@ import textMapImport
 import questImport
 import entitySourceImport
 from import_utils import DEFAULT_BATCH_SIZE, executemany_batched, fast_import_pragmas, load_json_file
+from genshin_data_core.talk import is_non_dialog_talk_obj
 from version_control import (
     ensure_version_schema,
     get_current_version,
@@ -112,11 +113,6 @@ def _dump_profile_stats(
     print(f"[PROFILE] cProfile top {max(1, top_n)} (sort={sort_key})")
     stats = pstats.Stats(profiler).strip_dirs().sort_stats(sort_key)
     stats.print_stats(max(1, top_n))
-def _is_non_dialog_talk_obj(obj: dict) -> bool:
-    # Keep compatibility for callers (e.g. diffUpdate) that use DBBuild as facade.
-    return questImport._is_non_dialog_talk_obj(obj)
-
-
 def _load_json_rows(path: str) -> list[dict[str, Any]]:
     data = load_json_file(path, default=[])
     if not isinstance(data, list):

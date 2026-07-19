@@ -9,6 +9,7 @@ from lightweight_progress import LightweightProgress
 
 from DBConfig import conn, DATA_PATH, LANG_PATH
 import DBBuild
+from genshin_data_core.talk import is_non_dialog_talk_obj
 import voiceItemImport
 import readableImport
 import readableMetaImport
@@ -334,7 +335,7 @@ def _resolve_local_talk_path(talk_file_rel: str) -> str | None:
 def _resolve_talk_keys(obj: dict):
     if not isinstance(obj, dict):
         return None
-    if DBBuild._is_non_dialog_talk_obj(obj):
+    if is_non_dialog_talk_obj(obj):
         return None
     if "talkId" in obj and "dialogList" in obj:
         return "talkId"
@@ -411,7 +412,7 @@ def _replace_talk_file_from_local(talk_file_rel: str):
 
     with open(full_path, encoding="utf-8") as f:
         obj = json.load(f)
-    if DBBuild._is_non_dialog_talk_obj(obj):
+    if is_non_dialog_talk_obj(obj):
         return None, False
     scope = _extract_talk_scope(normalized_talk_file_rel, obj)
     if scope is not None:
