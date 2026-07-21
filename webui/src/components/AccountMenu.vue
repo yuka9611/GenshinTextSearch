@@ -34,16 +34,20 @@
         class="accountAction providerButton"
         @click="handleProvider('github')"
       >
-        <i class="fi fi-brands-github"></i>
-        使用 GitHub 登录
+        <span class="providerButtonContent">
+          <i class="fi fi-brands-github" aria-hidden="true"></i>
+          <span>使用 GitHub 登录</span>
+        </span>
       </el-button>
       <el-button
         v-if="providers.includes('google')"
         class="accountAction providerButton"
         @click="handleProvider('google')"
       >
-        <span class="googleMark">G</span>
-        使用 Google 登录
+        <span class="providerButtonContent">
+          <span class="googleMark" aria-hidden="true">G</span>
+          <span>使用 Google 登录</span>
+        </span>
       </el-button>
       <p v-if="!isConfigured" class="accountWarning">账号同步服务尚未配置。</p>
       <p v-else-if="!providers.length" class="accountWarning">GitHub / Google 登录方式正在配置中。</p>
@@ -190,12 +194,12 @@ const goToHistory = () => router.push('/history')
   margin-left: 0 !important;
 }
 
-.providerButton :deep(span) {
+.providerButtonContent {
   width: 100%;
   display: flex;
   align-items: center;
   justify-content: center;
-  gap: 8px;
+  gap: 5px;
 }
 
 .googleMark {

@@ -194,12 +194,14 @@ const onSearch = () => {
 .searchMainRow :deep(.input-with-select .el-input-group__prepend .el-select),
 .searchMainRow :deep(.input-with-select .el-input-group__prepend .el-input),
 .searchMainRow :deep(.input-with-select .el-input__wrapper),
-.searchMainRow :deep(.input-with-select .el-select .el-input__wrapper) {
+.searchMainRow :deep(.input-with-select .el-select .el-input__wrapper),
+.searchMainRow :deep(.input-with-select .el-select__wrapper) {
   min-height: var(--search-control-height);
   height: var(--search-control-height);
 }
 
-.searchMainRow :deep(.input-with-select .el-input__wrapper) {
+.searchMainRow :deep(.input-with-select .el-input__wrapper),
+.searchMainRow :deep(.input-with-select .el-select__wrapper) {
   border-radius: 0;
   border: none;
   background: transparent;

@@ -470,7 +470,9 @@ i.centerIcon{
 
 .el-input__wrapper,
 .el-textarea__inner,
-.el-select .el-input__wrapper {
+.el-select .el-input__wrapper,
+.el-select__wrapper {
+    min-height: 34px;
     border-radius: var(--control-radius);
     background: rgba(255, 251, 244, 0.92);
     border: 1px solid rgba(190, 164, 124, 0.32);
@@ -480,7 +482,8 @@ i.centerIcon{
 
 [data-theme="dark"] .el-input__wrapper,
 [data-theme="dark"] .el-textarea__inner,
-[data-theme="dark"] .el-select .el-input__wrapper {
+[data-theme="dark"] .el-select .el-input__wrapper,
+[data-theme="dark"] .el-select__wrapper {
     background: rgba(22, 32, 30, 0.92);
     border-color: var(--theme-border);
     box-shadow: none;
@@ -488,13 +491,15 @@ i.centerIcon{
 
 .el-input__wrapper:hover,
 .el-textarea__inner:hover,
-.el-select .el-input__wrapper:hover {
+.el-select .el-input__wrapper:hover,
+.el-select__wrapper:hover {
     border-color: rgba(47, 105, 101, 0.26);
     box-shadow: none;
 }
 
 .el-input__wrapper.is-focus,
 .el-select .el-input__wrapper.is-focus,
+.el-select__wrapper.is-focused,
 .el-textarea__inner:focus {
     border-color: var(--theme-primary);
     box-shadow: 0 0 0 4px rgba(47, 105, 101, 0.08);
@@ -514,19 +519,22 @@ i.centerIcon{
 
 .stickySearchSection .el-input__wrapper,
 .stickySearchSection .el-textarea__inner,
-.stickySearchSection .el-select .el-input__wrapper {
+.stickySearchSection .el-select .el-input__wrapper,
+.stickySearchSection .el-select__wrapper {
     background: var(--search-section-input-bg);
     border-color: var(--search-section-border);
 }
 
 .stickySearchSection .el-input__wrapper:hover,
 .stickySearchSection .el-textarea__inner:hover,
-.stickySearchSection .el-select .el-input__wrapper:hover {
+.stickySearchSection .el-select .el-input__wrapper:hover,
+.stickySearchSection .el-select__wrapper:hover {
     border-color: var(--search-section-border-hover);
 }
 
 .stickySearchSection .el-input__wrapper.is-focus,
 .stickySearchSection .el-select .el-input__wrapper.is-focus,
+.stickySearchSection .el-select__wrapper.is-focused,
 .stickySearchSection .el-textarea__inner:focus {
     border-color: var(--search-section-border-focus);
     box-shadow: 0 0 0 4px var(--search-section-focus-ring);
