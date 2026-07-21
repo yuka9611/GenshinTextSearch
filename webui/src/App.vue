@@ -5,6 +5,8 @@ import { ElMessage, ElMessageBox } from 'element-plus'
 
 import global from '@/global/global'
 import loading from '@/global/loading'
+import { apiFetch, apiUrl } from '@/utils/apiUrl'
+import { initializeAccount } from '@/composables/useAccount'
 
 const router = useRouter()
 const startupChecked = ref(false)
@@ -42,7 +44,7 @@ function createBrowserSessionMonitor() {
 
   const postJson = async (url, keepalive = false) => {
     try {
-      await fetch(url, {
+      await apiFetch(url, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ clientId }),
@@ -67,7 +69,7 @@ function createBrowserSessionMonitor() {
     try {
       if (navigator.sendBeacon) {
         const blob = new Blob([payload], { type: 'application/json' })
-        if (navigator.sendBeacon('/api/browser-session/disconnect', blob)) {
+        if (navigator.sendBeacon(apiUrl('/api/browser-session/disconnect'), blob)) {
           return
         }
       }
@@ -121,21 +123,29 @@ async function jumpToSettings() {
 }
 
 async function refreshStartupStatus() {
-  const resp = await fetch('/api/startupStatus')
+  const resp = await apiFetch('/api/startupStatus')
   const payload = await resp.json()
   const data = payload?.data || {}
 
   global.config.assetDir = data.assetDir || ''
   global.config.assetDirValid = !!data.assetDirValid
+  Object.assign(global.runtime, {
+    cloudMode: !!data.cloudMode,
+    localFeaturesEnabled: data.localFeaturesEnabled !== false,
+    settingsWritable: data.settingsWritable !== false,
+    voicePlaybackEnabled: data.voicePlaybackEnabled !== false,
+  })
 
   return {
     assetDir: global.config.assetDir,
-    assetDirValid: global.config.assetDirValid
+    assetDirValid: global.config.assetDirValid,
+    browserAutoShutdownEnabled: !!data.browserAutoShutdownEnabled,
+    localFeaturesEnabled: global.runtime.localFeaturesEnabled,
   }
 }
 
 async function pickDirViaBackendDialog() {
-  const resp = await fetch('/api/pickAssetDir', {
+  const resp = await apiFetch('/api/pickAssetDir', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({})
@@ -170,8 +180,8 @@ async function pickDirViaBackendDialog() {
   }
 }
 
-async function ensureAssetDirOnFirstRun() {
-  const status = await refreshStartupStatus()
+async function ensureAssetDirOnFirstRun(status) {
+  if (!status.localFeaturesEnabled) return
   if (status.assetDirValid) return
 
   try {
@@ -209,14 +219,17 @@ async function ensureAssetDirOnFirstRun() {
 }
 
 onMounted(async () => {
-  disposeBrowserSessionMonitor = createBrowserSessionMonitor()
-
   if (startupChecked.value) return
   startupChecked.value = true
 
   loading.startLoading() // :contentReference[oaicite:3]{index=3}
   try {
-    await ensureAssetDirOnFirstRun()
+    await initializeAccount()
+    const status = await refreshStartupStatus()
+    if (status.browserAutoShutdownEnabled) {
+      disposeBrowserSessionMonitor = createBrowserSessionMonitor()
+    }
+    await ensureAssetDirOnFirstRun(status)
   } finally {
     loading.endLoading()
   }

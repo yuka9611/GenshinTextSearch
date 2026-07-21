@@ -10,6 +10,7 @@
   "dependencies": {
     "@flaticon/flaticon-uicons": "^2.4.0",
     "@liripeng/vue-audio-player": "^2.0.4",
+    "@supabase/supabase-js": "2.110.8",
     "axios": "^1.6.7",
     "element-plus": "^2.3.12",
     "vue": "^3.3.4",
@@ -17,6 +18,6 @@
   },
   "devDependencies": {
     "@vitejs/plugin-vue": "^5.2.4",
-    "vite": "5.2.6"
+    "vite": "5.4.21"
   }
 }

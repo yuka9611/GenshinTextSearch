@@ -1,0 +1,8 @@
+{
+  "name": "genshin-text-search-api-proxy",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "node --test"
+  }
+}

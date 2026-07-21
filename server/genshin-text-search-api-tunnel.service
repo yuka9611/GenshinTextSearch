@@ -1,0 +1,25 @@
+[Unit]
+Description=Cloudflare Tunnel for Genshin Text Search API
+After=network-online.target genshin-text-search-api.service
+Wants=network-online.target
+Requires=genshin-text-search-api.service
+
+[Service]
+Type=simple
+User=cloudflared
+Group=cloudflared
+ExecStart=/usr/bin/cloudflared tunnel --no-autoupdate --protocol quic run --token-file /etc/cloudflared/tunnel-token
+Restart=on-failure
+RestartSec=5s
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=strict
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+LockPersonality=true
+
+[Install]
+WantedBy=multi-user.target

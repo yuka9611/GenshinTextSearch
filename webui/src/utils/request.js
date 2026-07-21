@@ -3,6 +3,8 @@ import loadingScreen from "@/global/loading"
 import { ElMessage } from "element-plus"
 import router from "@/router"
 import { sanitizePayload, sanitizeText } from "@/utils/textSanitizer"
+import { apiBaseUrl } from "@/utils/apiUrl"
+import { recordSearchFromResponse } from "@/services/userData"
 
 const MSG = Object.freeze({
     error: "错误",
@@ -17,13 +19,18 @@ const MSG = Object.freeze({
     unknownError: "未知错误",
 })
 
+const configuredTimeout = Number.parseInt(import.meta.env.VITE_API_TIMEOUT_MS || "30000", 10)
+const apiTimeout = Number.isFinite(configuredTimeout) && configuredTimeout > 0
+    ? configuredTimeout
+    : 30000
+
 const service = axios.create({
     headers: {},
-    timeout: 5000,
+    timeout: apiTimeout,
 })
 
-if (import.meta.env.VITE_AXIOS_BASE_URL) {
-    service.defaults.baseURL = import.meta.env.VITE_AXIOS_BASE_URL
+if (apiBaseUrl) {
+    service.defaults.baseURL = apiBaseUrl
 }
 
 service.interceptors.request.use((config) => {
@@ -76,6 +83,7 @@ service.interceptors.response.use((response) => {
     }
 
     response.json = sanitizePayload(response.data.data)
+    void recordSearchFromResponse(response.config, response.data)
     return response
 }, (error) => {
     loadingScreen.endLoading()

@@ -19,6 +19,11 @@ const router = createRouter({
                     component: () => import("@/views/SettingsView.vue"),
                 },
                 {
+                    path: "history",
+                    name: "searchHistoryView",
+                    component: () => import("@/views/SearchHistoryView.vue"),
+                },
+                {
                     path: "name-search",
                     name: "nameSearchView",
                     component: () => import("@/views/NameSearchView.vue"),

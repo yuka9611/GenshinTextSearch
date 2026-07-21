@@ -8,6 +8,7 @@ vgm
 GenshinTextSearch.spec
 build/
 dist/
+.wrangler/
 release/
 .trae/
 docs/
@@ -62,6 +63,11 @@ coverage.xml
 *.mo~
 *.log
 *.sql
+
+# Supabase schema migrations are application source, not generated database dumps.
+!supabase/
+!supabase/migrations/
+!supabase/migrations/*.sql
 *.sqlite
 *.sqlite3
 *.db

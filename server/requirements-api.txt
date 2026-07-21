@@ -1,6 +1,4 @@
 Flask==3.0.3
 Flask-CORS==4.0.1
 gunicorn==23.0.0
-tqdm==4.64.0
 jieba==0.42.1
-pygit2==1.19.2

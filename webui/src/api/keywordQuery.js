@@ -1,6 +1,7 @@
 import request from "@/utils/request";
 import axios from "axios";
 import { withCache } from "@/utils/requestCache";
+import { apiUrl } from "@/utils/apiUrl";
 
 const queryByKeyword = (
     keyword,
@@ -33,9 +34,7 @@ const queryByKeyword = (
  * @return {Promise<ArrayBuffer|null>}
  */
 const getVoiceOver = async (voicePath, langCode) => {
-    const voiceOverUrl = request.defaults.baseURL
-        ? new URL("/api/getVoiceOver", request.defaults.baseURL).toString()
-        : "/api/getVoiceOver";
+    const voiceOverUrl = apiUrl("/api/getVoiceOver");
 
     const ans = await axios.post(voiceOverUrl, {
         voicePath: voicePath,

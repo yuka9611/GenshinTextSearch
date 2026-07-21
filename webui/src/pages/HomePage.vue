@@ -6,6 +6,7 @@ import { ElMenuItem, ElSubMenu } from "element-plus";
 import global from "@/global/global";
 import { toggleTheme, getTheme } from "@/assets/changeTheme";
 import useLanguage from "@/composables/useLanguage";
+import AccountMenu from "@/components/AccountMenu.vue";
 
 const menuItemClick = (ke) => {
     router.push(ke.index)
@@ -19,6 +20,7 @@ const menus = reactive({
         { "title": "角色语音查询", "icon": "fi-rr-volume", "path": "/voice-search" },
         { "title": "角色故事查询", "icon": "fi-rr-book-open-cover", "path": "/story-search" },
         { "title": "图鉴搜索", "icon": "fi-rr-apps", "path": "/catalog-search" },
+        { "title": "搜索记录", "icon": "fi-rr-time-past", "path": "/history" },
         { "title": "设置", "icon": "fi-rr-settings", "path": "/settings" },
     ]
 });
@@ -42,6 +44,7 @@ const bottomNavTabs = [
 const moreMenuItems = [
     { title: "角色故事查询", icon: "fi-rr-book-open-cover", path: "/story-search" },
     { title: "图鉴搜索", icon: "fi-rr-apps", path: "/catalog-search" },
+    { title: "搜索记录", icon: "fi-rr-time-past", path: "/history" },
     { title: "设置", icon: "fi-rr-settings", path: "/settings" },
 ]
 const moreMenuVisible = ref(false)
@@ -53,7 +56,7 @@ const activeBottomPath = computed(() => {
 })
 
 const isMoreActive = computed(() => {
-    return ['/story-search', '/catalog-search', '/settings'].includes(activeBottomPath.value)
+    return ['/story-search', '/catalog-search', '/history', '/settings'].includes(activeBottomPath.value)
 })
 
 const onBottomNavClick = (tab) => {
@@ -187,6 +190,7 @@ watch(router.currentRoute, async (to, from) => {
                 <span class="titleMain">原神文本搜索</span>
             </div>
             <div class="headerRight">
+                <AccountMenu />
                 <button class="themeToggleBtn" @click="onToggleTheme" :title="isDark ? '切换至浅色模式' : '切换至暗黑模式'">
                     <i class="fi" :class="isDark ? 'fi-rr-sun' : 'fi-rr-moon'"></i>
                 </button>

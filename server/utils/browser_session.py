@@ -3,6 +3,8 @@ import threading
 import time
 from collections.abc import Callable
 
+from cloud_runtime import is_cloud_mode
+
 
 def _read_seconds(name: str, default: float, minimum: float) -> float:
     raw_value = os.environ.get(name, "").strip()
@@ -25,7 +27,7 @@ def _read_bool(name: str, default: bool) -> bool:
     return default
 
 
-_AUTO_STOP_ENABLED = _read_bool("GTS_AUTO_STOP_ON_LAST_PAGE", True)
+_AUTO_STOP_ENABLED = _read_bool("GTS_AUTO_STOP_ON_LAST_PAGE", not is_cloud_mode())
 _HEARTBEAT_TTL_SECONDS = _read_seconds("GTS_BROWSER_HEARTBEAT_TTL", 75.0, 15.0)
 _EMPTY_GRACE_SECONDS = _read_seconds("GTS_BROWSER_EMPTY_GRACE", 10.0, 5.0)
 _WATCH_INTERVAL_SECONDS = _read_seconds("GTS_BROWSER_WATCH_INTERVAL", 1.0, 0.5)
@@ -40,7 +42,7 @@ _shutdown_requested = False
 
 
 def is_browser_auto_shutdown_enabled() -> bool:
-    return _AUTO_STOP_ENABLED
+    return _AUTO_STOP_ENABLED and not is_cloud_mode()
 
 
 def _prune_stale_clients_locked(now: float) -> None:
@@ -134,7 +136,7 @@ def _request_shutdown(logger=None, shutdown_callback: Callable[[], None] | None 
 
 def start_browser_session_watchdog(logger=None, shutdown_callback: Callable[[], None] | None = None) -> None:
     global _watchdog_started
-    if not _AUTO_STOP_ENABLED:
+    if not is_browser_auto_shutdown_enabled():
         return
 
     with _lock:

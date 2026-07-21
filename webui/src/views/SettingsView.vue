@@ -4,8 +4,9 @@
 
     <div class="helpText settingsHelpText">
       <p>所有已经导入到数据库的文本语言会在此处显示。要导入新的语言，请关闭服务器，并使用导入工具。</p>
-      <p>所有游戏已下载的语言包会在此处显示。请进入游戏来管理语音包。</p>
-      <p>现在可以在这里直接选择游戏资源路径。</p>
+      <p v-if="localFeaturesEnabled">所有游戏已下载的语言包会在此处显示。请进入游戏来管理语音包。</p>
+      <p v-if="localFeaturesEnabled">现在可以在这里直接选择游戏资源路径。</p>
+      <p v-else>当前为云端模式，本地资源和语音功能已隐藏；检索偏好可在此修改，登录后会按账号跨设备同步。</p>
     </div>
 
     <el-form :label-width="120" label-position="left" class="settingsForm">
@@ -17,13 +18,13 @@
         </div>
 
         <el-form-item label="默认搜索语言">
-          <el-select v-model="selectedInputLanguage" placeholder="选择语言" class="languageSelector">
+          <el-select v-model="selectedInputLanguage" placeholder="选择语言" class="languageSelector" :disabled="!settingsWritable">
             <el-option v-for="(v, k) in supportedInputLanguage" :label="v" :value="k" :key="k" />
           </el-select>
         </el-form-item>
 
         <el-form-item label="来源语言">
-          <el-select v-model="selectedSourceLanguage" placeholder="选择语言" class="languageSelector">
+          <el-select v-model="selectedSourceLanguage" placeholder="选择语言" class="languageSelector" :disabled="!settingsWritable">
             <el-option v-for="(v, k) in supportedInputLanguage" :label="v" :value="k" :key="k" />
           </el-select>
         </el-form-item>
@@ -38,6 +39,7 @@
             clearable
             placeholder="选择结果语言"
             class="languageSelector"
+            :disabled="!settingsWritable"
           >
             <el-option
               v-for="item in transferComponentData"
@@ -49,13 +51,13 @@
         </el-form-item>
 
         <el-form-item label="双子">
-          <el-select v-model="selectedTwin" placeholder="请选择" class="languageSelector">
+          <el-select v-model="selectedTwin" placeholder="请选择" class="languageSelector" :disabled="!settingsWritable">
             <el-option v-for="(v, k) in twinList" :label="v.label" :value="v.value" :key="k" />
           </el-select>
         </el-form-item>
       </section>
 
-      <section class="settingsSection">
+      <section v-if="localFeaturesEnabled" class="settingsSection">
         <div class="sectionHeader">
           <div class="sectionEyebrow">Assets</div>
           <h2 class="sectionTitle">资源与语音包</h2>
@@ -121,7 +123,7 @@
         </el-form-item>
       </section>
 
-      <div class="actionBar">
+      <div v-if="settingsWritable" class="actionBar">
         <el-button type="primary" @click="save" :loading="saving" :disabled="picking || savingAssetDir">
           保存
         </el-button>
@@ -137,6 +139,9 @@ import requestCache from "@/utils/requestCache"
 import { computed, onBeforeMount, ref } from "vue"
 import { ElMessage } from "element-plus"
 import useLanguage from "@/composables/useLanguage"
+import { apiFetch } from "@/utils/apiUrl"
+import { loadUserPreferences, saveUserPreferences } from "@/services/userData"
+import { useAccount } from "@/composables/useAccount"
 
 const twinList = ref([
   { value: false, label: "荧" },
@@ -167,6 +172,9 @@ const selectedSourceLanguage = ref(global.config.sourceLanguage + "")
 
 // ✅ 用全局 config 的状态（后端 getConfig() / startupStatus 会带）
 const assetDirValid = ref(!!global.config.assetDirValid)
+const localFeaturesEnabled = computed(() => global.runtime.localFeaturesEnabled !== false)
+const settingsWritable = computed(() => global.runtime.cloudMode || global.runtime.settingsWritable !== false)
+const { isSignedIn } = useAccount()
 
 // ✅ 把 global.voiceLanguages（对象）转成 tag 列表并排序显示
 const voiceTagList = computed(() => {
@@ -189,9 +197,19 @@ onBeforeMount(async () => {
   // 获取完整的配置
   try {
     const configResp = await api.getConfig()
-    if (configResp.code === 200) {
+    if (configResp.data?.code === 200) {
       // 更新全局配置
-      Object.assign(global.config, configResp.data)
+      Object.assign(global.config, configResp.json || configResp.data.data)
+      Object.assign(global.runtime, {
+        cloudMode: !!global.config.cloudMode,
+        localFeaturesEnabled: global.config.localFeaturesEnabled !== false,
+        settingsWritable: global.config.settingsWritable !== false,
+        voicePlaybackEnabled: global.config.voicePlaybackEnabled !== false,
+      })
+      if (global.runtime.cloudMode) {
+        const userPreferences = await loadUserPreferences(global.config)
+        Object.assign(global.config, userPreferences)
+      }
       // 更新本地状态
       selectedSourceLanguage.value = global.config.sourceLanguage + ""
       selectedTwin.value = global.config.isMale
@@ -218,7 +236,7 @@ onBeforeMount(async () => {
   }
 
   // 初次进入设置页时也刷新一次语音包（如果目录有效）
-  if (assetDirValid.value) {
+  if (localFeaturesEnabled.value && assetDirValid.value) {
     await refreshVoicePacks()
   }
 })
@@ -226,7 +244,7 @@ onBeforeMount(async () => {
 const refreshVoicePacks = async () => {
   refreshingVoice.value = true
   try {
-    const resp = await fetch("/api/getImportedVoiceLanguages")
+    const resp = await apiFetch("/api/getImportedVoiceLanguages")
     const payload = await resp.json()
     if (payload.code !== 200) {
       ElMessage({ type: "error", message: payload.msg || "刷新失败" })
@@ -244,7 +262,7 @@ const refreshVoicePacks = async () => {
 const pickDir = async () => {
   picking.value = true
   try {
-    const resp = await fetch("/api/pickAssetDir", {
+    const resp = await apiFetch("/api/pickAssetDir", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({}),
@@ -294,7 +312,7 @@ const saveAssetDir = async ({ silentSuccess = false } = {}) => {
 
   savingAssetDir.value = true
   try {
-    const resp = await fetch("/api/setAssetDir", {
+    const resp = await apiFetch("/api/setAssetDir", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ assetDir: nextPath }),
@@ -331,16 +349,34 @@ const saveAssetDir = async ({ silentSuccess = false } = {}) => {
 const save = async () => {
   saving.value = true
   try {
-    if (assetDirDirty.value) {
+    if (localFeaturesEnabled.value && assetDirDirty.value) {
       const savedAssetDir = await saveAssetDir({ silentSuccess: true })
       if (!savedAssetDir) return
     }
 
+    const preferences = {
+      resultLanguages: transferComponentValue.value.map(Number),
+      defaultSearchLanguage: Number(selectedInputLanguage.value),
+      sourceLanguage: Number(selectedSourceLanguage.value),
+      isMale: selectedTwin.value,
+    }
+
+    if (global.runtime.cloudMode) {
+      const result = await saveUserPreferences(preferences)
+      Object.assign(global.config, result.preferences)
+      requestCache.clear()
+      ElMessage({
+        type: "success",
+        message: result.synced && isSignedIn.value ? "检索偏好已同步到账号" : "检索偏好已保存到当前浏览器",
+      })
+      return
+    }
+
     const response = await api.saveConfig(
-      transferComponentValue.value,
-      selectedInputLanguage.value,
-      selectedSourceLanguage.value,
-      selectedTwin.value
+      preferences.resultLanguages,
+      preferences.defaultSearchLanguage,
+      preferences.sourceLanguage,
+      preferences.isMale
     )
 
     if (response.json) {

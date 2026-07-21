@@ -1,0 +1,16 @@
+{
+  "$schema": "../../webui/node_modules/wrangler/config-schema.json",
+  "name": "genshin-text-search-api",
+  "main": "src/index.js",
+  "compatibility_date": "2026-07-21",
+  "workers_dev": true,
+  "observability": {
+    "enabled": true
+  },
+  "vpc_services": [
+    {
+      "binding": "PRIVATE_API",
+      "service_id": "019f85d1-d102-7810-a6ba-b9d37d530bd4"
+    }
+  ]
+}

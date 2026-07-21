@@ -1,6 +1,8 @@
 import { ref, computed, watch } from 'vue'
 import global from '@/global/global'
 import basicInfoApi from '@/api/basicInfo'
+import { loadUserPreferences } from '@/services/userData'
+import { initializeAccount } from '@/composables/useAccount'
 
 let loadLanguagesPromise = null
 
@@ -55,7 +57,12 @@ const useLanguage = () => {
           global.voiceLanguages = toLanguageMap(voiceLanguages)
 
           const config = (await basicInfoApi.getConfig()).json
-          global.config = config
+          await initializeAccount()
+          const preferences = await loadUserPreferences(config).catch((error) => {
+            console.warn('failed to load user preferences:', error?.message || error)
+            return null
+          })
+          global.config = preferences ? { ...config, ...preferences } : config
         })().finally(() => {
           loadLanguagesPromise = null
         })

@@ -4,6 +4,14 @@ import importlib
 import time
 from flask import Blueprint, current_app, request, jsonify
 
+from cloud_runtime import (
+    cloud_feature_forbidden,
+    is_cloud_mode,
+    local_features_enabled,
+    public_runtime_payload,
+    settings_writable,
+    voice_playback_enabled,
+)
 from utils.browser_session import (
     disconnect_browser_client,
     is_browser_auto_shutdown_enabled,
@@ -72,8 +80,17 @@ def getLangCodeMap(*args, **kwargs):
 def _get_config_payload():
     import config
 
-    cfg = dict(config.config)
-    cfg["assetDirValid"] = config.isAssetDirValid()
+    if is_cloud_mode():
+        cfg = {
+            key: config.config.get(key)
+            for key in ("resultLanguages", "defaultSearchLanguage", "sourceLanguage", "isMale")
+        }
+        cfg["assetDir"] = ""
+        cfg["assetDirValid"] = False
+    else:
+        cfg = dict(config.config)
+        cfg["assetDirValid"] = config.isAssetDirValid()
+    cfg.update(public_runtime_payload())
     return cfg
 
 
@@ -238,6 +255,9 @@ def get_voice_path_api():
     """
     获取语音路径
     """
+    if not voice_playback_enabled():
+        return cloud_feature_forbidden("Voice playback")
+
     voice_hash = request.args.get('hash', '', type=str)
     lang = getLangFromRequest()
 
@@ -361,11 +381,13 @@ def get_languages_api():
 @api_bp.route("/api/startupStatus")
 def startupStatus():
     import config
+    runtime = public_runtime_payload()
     return jsonify({
         "data": {
-            "assetDirValid": config.isAssetDirValid(),
-            "assetDir": config.getAssetDir(),
+            "assetDirValid": config.isAssetDirValid() if local_features_enabled() else False,
+            "assetDir": config.getAssetDir() if local_features_enabled() else "",
             "browserAutoShutdownEnabled": is_browser_auto_shutdown_enabled(),
+            **runtime,
         },
         "code": 200,
         "msg": "ok"
@@ -407,6 +429,9 @@ def browserSessionDisconnect():
 
 @api_bp.route("/api/setAssetDir", methods=["POST"])
 def setAssetDir():
+    if not local_features_enabled():
+        return cloud_feature_forbidden("Asset directory changes")
+
     import config
     import languagePackReader
 
@@ -431,6 +456,9 @@ def setAssetDir():
 
 @api_bp.route("/api/pickAssetDir", methods=["POST"])
 def pickAssetDir():
+    if not local_features_enabled():
+        return cloud_feature_forbidden("Asset directory picker")
+
     import config
     import languagePackReader
 
@@ -494,6 +522,9 @@ def getImportedTextLanguages():
 
 @api_bp.route("/api/getImportedVoiceLanguages")
 def getImportedVoiceLanguages():
+    if not voice_playback_enabled():
+        return jsonify({"data": {}, "code": 200, "msg": "ok"})
+
     return jsonify({
         "data": _get_controllers().getLoadedVoicePacks(), # type: ignore
         "code": 200,
@@ -584,6 +615,9 @@ def keywordQuery():
 @api_bp.route("/api/getVoiceOver", methods=["POST"])
 def getVoiceOver():
     from flask import send_file, make_response
+
+    if not voice_playback_enabled():
+        return cloud_feature_forbidden("Voice playback")
 
     try:
         langCode = int(request.json["langCode"])
@@ -1239,6 +1273,9 @@ def catalogMeta():
 
 @api_bp.route("/api/saveSettings", methods=["POST"])
 def saveSettings():
+    if not settings_writable():
+        return cloud_feature_forbidden("Settings changes")
+
     import config
 
     newConfig = request.json["config"]

@@ -1,0 +1,20 @@
+[Unit]
+Description=Genshin Text Search public API
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=yuka9611
+Group=yuka9611
+WorkingDirectory=/home/yuka9611/genshin-bot/genshin-text-search-api
+EnvironmentFile=/etc/genshin-text-search-api.env
+Environment=PYTHONDONTWRITEBYTECODE=1
+ExecStart=/home/yuka9611/genshin-bot/genshin-text-search-api/.venv/bin/gunicorn --workers 1 --threads 4 --timeout 120 --bind 127.0.0.1:5055 wsgi:app
+Restart=on-failure
+RestartSec=5
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

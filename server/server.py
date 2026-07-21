@@ -31,6 +31,12 @@ if not hasattr(pkgutil, "get_loader"):
 
 from flask import Flask, send_from_directory
 
+from cloud_runtime import (
+    cors_origins,
+    enforce_rate_limit,
+    is_cloud_mode,
+    trusted_proxy_enabled,
+)
 from utils.helpers import resource_path
 from utils.browser_session import start_browser_session_watchdog
 
@@ -54,7 +60,23 @@ def create_app() -> Flask:
     # 延迟导入 CORS（减少顶层 import）
     cors_started = time.perf_counter()
     from flask_cors import CORS
-    CORS(app)
+    if is_cloud_mode():
+        allowed_origins = cors_origins()
+        if allowed_origins:
+            CORS(
+                app,
+                resources={r"/api/*": {"origins": allowed_origins}},
+                allow_headers=["Content-Type"],
+                methods=["GET", "POST", "OPTIONS"],
+            )
+    else:
+        CORS(app)
+
+    if trusted_proxy_enabled():
+        from werkzeug.middleware.proxy_fix import ProxyFix
+        app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1, x_host=1)
+
+    app.before_request(enforce_rate_limit)
     _log_startup_profile("configure CORS", time.perf_counter() - cors_started)
 
     # 导入并注册API蓝图
@@ -65,21 +87,30 @@ def create_app() -> Flask:
     app.register_blueprint(api_bp)
     _log_startup_profile("register API blueprint", time.perf_counter() - register_started)
 
-    # ----------------------------
-    # Static frontend (webui/dist)
-    # ----------------------------
-    staticDir = resource_path("webui/dist")
+    @app.route("/healthz")
+    def healthcheck():
+        return {"status": "ok", "cloudMode": is_cloud_mode()}
 
-    @app.route("/")
-    def serveRoot():
-        return send_from_directory(staticDir, "index.html")
+    if is_cloud_mode():
+        @app.route("/")
+        def serveCloudRoot():
+            return {"service": "genshin-text-search-api", "status": "ok"}
+    else:
+        # ----------------------------
+        # Static frontend (webui/dist)
+        # ----------------------------
+        staticDir = resource_path("webui/dist")
 
-    @app.route("/<path:path>")
-    def serveStatic(path):
-        filePath = os.path.join(staticDir, path)
-        if os.path.exists(filePath):
-            return send_from_directory(staticDir, path)
-        return send_from_directory(staticDir, "index.html")
+        @app.route("/")
+        def serveRoot():
+            return send_from_directory(staticDir, "index.html")
+
+        @app.route("/<path:path>")
+        def serveStatic(path):
+            filePath = os.path.join(staticDir, path)
+            if os.path.exists(filePath):
+                return send_from_directory(staticDir, path)
+            return send_from_directory(staticDir, "index.html")
 
     _log_startup_profile("create_app", time.perf_counter() - started)
     return app
@@ -91,7 +122,7 @@ def maybe_open_browser(url: str):
     - 默认打开（方便发行版）
     - 若设置环境变量 GTS_NO_BROWSER=1 则不打开
     """
-    if os.environ.get("GTS_NO_BROWSER", "").strip() == "1":
+    if is_cloud_mode() or os.environ.get("GTS_NO_BROWSER", "").strip() == "1":
         return
     try:
         open_delay = max(0.0, float(os.environ.get("GTS_BROWSER_OPEN_DELAY", "0.3")))
@@ -223,7 +254,8 @@ if __name__ == "__main__":
     search_cache.increment_version()
 
     # 如果没有游戏目录或目录无效，弹出提示框让用户选择
-    _prompt_for_asset_dir_if_needed(config)
+    if not is_cloud_mode():
+        _prompt_for_asset_dir_if_needed(config)
 
     app = create_app()
     # 桌面发行版建议只监听本机
