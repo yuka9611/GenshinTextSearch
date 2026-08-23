@@ -12,6 +12,7 @@ from genshin_data_core.access import FilesystemGameDataAccess
 from genshin_data_core.compat import BWIKI_COMPAT, GTS_COMPAT
 from genshin_data_core.hall import (
     get_hall_desc_text_hash,
+    get_hall_facility_style_id,
     get_hall_name_text_hash,
     get_hall_style_id,
     is_public_hall,
@@ -72,3 +73,22 @@ def test_hall_schema_aliases_are_shared():
     assert get_hall_name_text_hash(row) == 1001
     assert get_hall_desc_text_hash(row) == 2001
     assert is_public_hall(row)
+
+
+def test_hall_schema_aliases_support_7_0_keys():
+    row = {
+        "MDCHMLFLPID": 1001,
+        "AAJDEFOOIKH": "BEYOND_HALL_PUBLIC",
+        "NMEDGNKECLH": 11,
+        "JMPHKBBFCDB": 2001,
+    }
+    assert get_hall_style_id(row) == 11
+    assert get_hall_name_text_hash(row) == 1001
+    assert get_hall_desc_text_hash(row) == 2001
+    assert is_public_hall(row)
+
+
+def test_hall_facility_schema_aliases_support_7_0_and_legacy_keys():
+    assert get_hall_facility_style_id({"ELPPMBJMBIO": 18}) == 18
+    assert get_hall_facility_style_id({"ELPPMBJMBIO": 0, "OJGEAGGJALA": 11}) == 11
+    assert get_hall_facility_style_id({"ELPPMBJMBIO": "18"}) is None

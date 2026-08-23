@@ -2141,11 +2141,24 @@ def _has_talk_dialogue_link_table() -> bool:
     return _table_exists("talk_dialogue_link")
 
 
+def _has_talk_dialogue_content_rows() -> bool:
+    if not _table_exists("talk_dialogue_content"):
+        return False
+    with closing(conn.cursor()) as cursor:
+        return cursor.execute("SELECT 1 FROM talk_dialogue_content LIMIT 1").fetchone() is not None
+
+
 def _quest_talk_dialogue_join_sql(
     qt_alias: str = "qt",
     d_alias: str = "d",
     tdl_alias: str = "tdl",
 ) -> str:
+    if _has_talk_dialogue_content_rows():
+        return (
+            f"join talk_dialogue_content {d_alias} "
+            f"on {d_alias}.talkId = {qt_alias}.talkId "
+            f"and {d_alias}.coopQuestId = coalesce({qt_alias}.coopQuestId, 0) "
+        )
     if _has_talk_dialogue_link_table():
         return (
             f"join talk_dialogue_link {tdl_alias} "

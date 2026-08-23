@@ -22,6 +22,7 @@ _QUEST_SCHEMA_VARIANTS: tuple[dict[str, Any], ...] = (
     {"quest_id": "FJIMHCGKKPJ", "title_hash": "HMPOGBDMBOK", "chapter_keys": ("NKEKKINIKEB", "ODOCBCAGDJA"), "talks_key": "DCHHEHNNEOO", "talk_id": "BPMABFNPCMI"},
     {"quest_id": "GMOMCKNPBGE", "title_hash": "ALLMCLJBBDM", "chapter_keys": None, "talks_key": "EOHJIHHMBAN", "talk_id": None},
     {"quest_id": "ANKFNLMKOII", "title_hash": "OCCBMCOGDOO", "chapter_keys": ("JBDLGLCIOHM", "HONEAMECBEN"), "talks_key": "GDDPNNHLGBL", "talk_id": "ANKFNLMKOII"},
+    {"quest_id": "OIFGMOHKPOI", "title_hash": "LKAHEACOLML", "chapter_keys": ("CKMCPKCGFKC", "BEADANLODNC"), "talks_key": "PFALHAKIILD", "talk_id": "OIFGMOHKPOI"},
 )
 
 _STEP_TALK_CONDITION_TYPES = {
@@ -80,42 +81,74 @@ class QuestParser:
     def extract_quest_talk_ids(self, obj: Any) -> list[int]:
         if not isinstance(obj, dict):
             return []
+        result: list[int] = []
+        seen: set[int] = set()
+
+        def collect_talk_rows(
+            talks: Any,
+            talk_id_keys: tuple[str, ...],
+            *,
+            allow_int: bool = False,
+            dedupe: bool = True,
+        ) -> None:
+            if not isinstance(talks, list):
+                return
+            for talk in talks:
+                if allow_int and isinstance(talk, int):
+                    talk_id = talk if talk > 0 else None
+                elif isinstance(talk, dict):
+                    talk_id = extract_first_positive_int(talk, *talk_id_keys)
+                else:
+                    talk_id = None
+                if talk_id is None or (dedupe and talk_id in seen):
+                    continue
+                if dedupe:
+                    seen.add(talk_id)
+                result.append(talk_id)
+
         schema = self._schema(obj)
         talks = obj.get(schema["talks_key"]) if schema is not None else None
         if not isinstance(talks, list) and self.profile.allow_subquest_id_fallback:
             talks = obj.get("GDDPNNHLGBL")
-        if not isinstance(talks, list):
-            return []
-        talk_id_key = schema["talk_id"] if schema is not None else "ANKFNLMKOII"
-        result: list[int] = []
-        seen: set[int] = set()
-        for talk in talks:
-            talk_id = None
-            if talk_id_key is None:
-                talk_id = talk if isinstance(talk, int) else None
-            elif isinstance(talk, dict):
-                if self.profile.name == "gts":
-                    value = talk.get(talk_id_key)
-                    talk_id = value if isinstance(value, int) else None
-                else:
-                    talk_id = extract_first_positive_int(
-                        talk, str(talk_id_key), "NFIEHACCECI", "BLKKAMEMBBJ",
-                        "ILHDNJDDEOP", "BPMABFNPCMI", "id",
+            if not isinstance(talks, list):
+                talks = obj.get("PFALHAKIILD")
+        if isinstance(talks, list):
+            talk_id_key = schema["talk_id"] if schema is not None else "ANKFNLMKOII"
+            collect_talk_rows(
+                talks,
+                tuple(
+                    key
+                    for key in (
+                        talk_id_key,
+                        "NFIEHACCECI",
+                        "BLKKAMEMBBJ",
+                        "ILHDNJDDEOP",
+                        "BPMABFNPCMI",
+                        "ANKFNLMKOII",
+                        "OIFGMOHKPOI",
+                        "id",
                     )
-            if not isinstance(talk_id, int):
-                continue
-            if self.profile.dedupe_top_level_talk_ids:
-                if talk_id <= 0 or talk_id in seen:
-                    continue
-                seen.add(talk_id)
-            result.append(talk_id)
+                    if isinstance(key, str)
+                ),
+                allow_int=schema is not None and schema["talk_id"] is None,
+                dedupe=self.profile.dedupe_top_level_talk_ids,
+            )
+
+        # Quest files also carry embedded Talk rows.  They are separate from
+        # the top-level dialogue list and changed from OBPMJEILMMK to
+        # OJACLOOEAMG in 7.0.
+        for embedded_key in ("OBPMJEILMMK", "OJACLOOEAMG"):
+            collect_talk_rows(obj.get(embedded_key), ("ANKFNLMKOII", "OIFGMOHKPOI"))
+
+        if not result:
+            return []
         return result
 
     @staticmethod
     def get_quest_subquests(obj: Any) -> list[dict[str, Any]]:
         if not isinstance(obj, dict):
             return []
-        for key in ("MEGJPCLADOG", "NLCNGJKMAEN", "subQuests", "GFLHMKOOHHA", "IKECHKLEFFK", "HLCINEMBGEF"):
+        for key in ("MEGJPCLADOG", "NLCNGJKMAEN", "subQuests", "GFLHMKOOHHA", "IKECHKLEFFK", "HLCINEMBGEF", "EBNBLBEIFFJ"):
             value = obj.get(key)
             if isinstance(value, list):
                 return [item for item in value if isinstance(item, dict)]
@@ -125,12 +158,12 @@ class QuestParser:
     def get_step_desc_text_map_hash(step_obj: Any) -> Optional[int]:
         return extract_first_positive_int(
             step_obj, "AJGGCMPLKHK", "stepDescTextMapHash", "OCMKKHHNKJO",
-            "BMBANCMPPOM", "NAEMBIJFJCA", "HMLBMECMBGA", "JDFENJAFCPF", "BMEACBBPBGK",
+            "BMBANCMPPOM", "NAEMBIJFJCA", "HMLBMECMBGA", "JDFENJAFCPF", "BMEACBBPBGK", "OANENPOPCFO",
         )
 
     @staticmethod
     def get_step_sub_id(step_obj: Any) -> Optional[int]:
-        return extract_first_positive_int(step_obj, "MPKBGPAKIOA", "subId", "KKMJBEPGLGD", "LAFBPKMMBHD", "NDOFAOCKPGE")
+        return extract_first_positive_int(step_obj, "MPKBGPAKIOA", "subId", "KKMJBEPGLGD", "LAFBPKMMBHD", "NDOFAOCKPGE", "KCGAKLCHDCC")
 
     @staticmethod
     def get_step_order(step_obj: Any) -> Optional[int]:
@@ -141,7 +174,7 @@ class QuestParser:
         if not isinstance(step_obj, dict):
             return []
         conditions = None
-        for key in ("POPHAFEBKIH", "AACKELGGJGC", "finishCond", "KBFJAAFDHKJ", "PGELADPAKLA", "FCBEKGAHMPD"):
+        for key in ("POPHAFEBKIH", "AACKELGGJGC", "finishCond", "KBFJAAFDHKJ", "PGELADPAKLA", "FCBEKGAHMPD", "ANBEKNMDKCH"):
             value = step_obj.get(key)
             if isinstance(value, list):
                 conditions = value
@@ -154,12 +187,12 @@ class QuestParser:
             if not isinstance(condition, dict):
                 continue
             cond_type = next((condition.get(key) for key in (
-                "HAHEIAHBPEJ", "DLPKMDPABFM", "type", "PAINLIBBLDK", "MEGMIMEDODJ", "BPEHONLLNNK",
+                "HAHEIAHBPEJ", "DLPKMDPABFM", "type", "PAINLIBBLDK", "MEGMIMEDODJ", "BPEHONLLNNK", "ALBFHGKNMLK",
             ) if condition.get(key)), None)
             if cond_type not in _STEP_TALK_CONDITION_TYPES:
                 continue
             params = next((condition.get(key) for key in (
-                "AAHAKNIPEDM", "IEKGEJMAOCN", "param", "paramList", "LNHLPKELCAL", "KFDJJBPNIHG", "PALPAGCBFDI",
+                "AAHAKNIPEDM", "IEKGEJMAOCN", "param", "paramList", "LNHLPKELCAL", "KFDJJBPNIHG", "PALPAGCBFDI", "OPDGHDAADJC",
             ) if isinstance(condition.get(key), list)), None)
             if not params:
                 continue
@@ -176,7 +209,7 @@ class QuestParser:
         initial = obj.get(schema["talks_key"]) if schema is not None else None
         if isinstance(initial, list):
             return [item for item in initial if isinstance(item, dict)]
-        for key in ("NFFIGDHFAJG", "talks", "IBEGAHMEABP", "DGJMIPFDEOF", "DCHHEHNNEOO", "GDDPNNHLGBL"):
+        for key in ("NFFIGDHFAJG", "talks", "IBEGAHMEABP", "DGJMIPFDEOF", "DCHHEHNNEOO", "GDDPNNHLGBL", "PFALHAKIILD"):
             value = obj.get(key)
             if isinstance(value, list):
                 return [item for item in value if isinstance(item, dict)]
@@ -186,7 +219,7 @@ class QuestParser:
         keys: list[str] = []
         if schema is not None and isinstance(schema.get("talk_id"), str):
             keys.append(schema["talk_id"])
-        keys.extend(("NFIEHACCECI", "id", "ILHDNJDDEOP", "BLKKAMEMBBJ", "BPMABFNPCMI", "ANKFNLMKOII"))
+        keys.extend(("NFIEHACCECI", "id", "ILHDNJDDEOP", "BLKKAMEMBBJ", "BPMABFNPCMI", "ANKFNLMKOII", "OIFGMOHKPOI"))
         return extract_first_positive_int(obj, *keys)
 
     @staticmethod
@@ -205,12 +238,12 @@ class QuestParser:
             if not isinstance(condition, dict):
                 continue
             cond_type = next((condition.get(key) for key in (
-                "_type", "type", "HAHEIAHBPEJ", "DLPKMDPABFM", "BPEHONLLNNK",
+                "_type", "type", "HAHEIAHBPEJ", "DLPKMDPABFM", "BPEHONLLNNK", "ALBFHGKNMLK",
             ) if condition.get(key)), None)
             if cond_type != "QUEST_COND_STATE_EQUAL":
                 continue
             params = next((condition.get(key) for key in (
-                "_param", "param", "paramList", "AAHAKNIPEDM", "PALPAGCBFDI",
+                "_param", "param", "paramList", "AAHAKNIPEDM", "PALPAGCBFDI", "OPDGHDAADJC",
             ) if isinstance(condition.get(key), list)), None)
             if not params:
                 continue

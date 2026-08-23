@@ -6,6 +6,12 @@ from DBConfig import conn
 from DBInit import ensure_base_schema
 from import_utils import reset_temp_table
 from quest_hash_map_utils import _quest_talk_dialogue_join_condition
+from quest_version_provenance import (
+    QUEST_CREATED_VERSION_OVERRIDE_TABLE,
+    count_manual_locked_quests,
+    ensure_quest_version_provenance_schema,
+    manual_created_version_audit_is_prepared,
+)
 from server_import import import_server_module
 from versioning import (
     VERSION_DIM_TABLE,
@@ -281,6 +287,7 @@ def build_guarded_created_updated_sql(table_name: str, key_columns: Sequence[str
             f"{_version_precedes_sql('?1', 'created_version_id')} THEN ?2 "
             "ELSE created_version_id END "
             f"WHERE {key_predicate_sql} "
+            f"AND NOT EXISTS (SELECT 1 FROM {QUEST_CREATED_VERSION_OVERRIDE_TABLE} o WHERE o.questId = quest.questId) "
         )
     return (
         f"UPDATE {table_name} SET "
@@ -503,6 +510,21 @@ def _build_qh_source_sql(
     """
     Build quest hash source SQL based on availability of quest_hash_map table.
     """
+    has_scoped_dialogue_content = (
+        cursor.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='talk_dialogue_content' LIMIT 1"
+        ).fetchone()
+        is not None
+        and cursor.execute("SELECT 1 FROM talk_dialogue_content LIMIT 1").fetchone()
+        is not None
+    )
+    dialogue_join_sql = (
+        "JOIN talk_dialogue_content d ON d.talkId = qt.talkId "
+        "AND d.coopQuestId = coalesce(qt.coopQuestId, 0)"
+        if has_scoped_dialogue_content
+        else "JOIN dialogue d ON d.talkId = qt.talkId "
+        f"AND ({_quest_talk_dialogue_join_condition('qt', 'd')})"
+    )
     if _quest_hash_map_available(cursor):
         if target_updated_version_id is not None:
             qh_sql = f"""
@@ -541,8 +563,7 @@ def _build_qh_source_sql(
             SELECT q.questId AS questId, d.textHash AS hash, 'dialogue' AS source_type
             FROM quest q
             JOIN questTalk qt ON qt.questId = q.questId
-            JOIN dialogue d ON d.talkId = qt.talkId
-               AND ({_quest_talk_dialogue_join_condition('qt', 'd')})
+            {dialogue_join_sql}
             JOIN quest_version qv ON qv.questId = q.questId
             WHERE qv.updated_version_id=?
               AND d.textHash IS NOT NULL
@@ -559,8 +580,7 @@ def _build_qh_source_sql(
         UNION ALL
         SELECT qt.questId AS questId, d.textHash AS hash, 'dialogue' AS source_type
         FROM questTalk qt
-        JOIN dialogue d ON d.talkId = qt.talkId
-           AND ({_quest_talk_dialogue_join_condition('qt', 'd')})
+        {dialogue_join_sql}
         WHERE d.textHash IS NOT NULL
           {target_filter_qt}
     """
@@ -629,6 +649,130 @@ def _build_update_sql(table: str, column: str, temp_table: str, overwrite_existi
     """
 
 
+def calculate_quest_created_version_candidates(
+    cursor,
+    *,
+    quest_ids: list[int] | set[int] | tuple[int, ...] | None = None,
+) -> dict[int, dict[str, int | str | None]]:
+    """Calculate the existing automatic quest-created-version result without writes.
+
+    This is intentionally the same CHS/title-dialogue ranking used by
+    :func:`backfill_quest_created_version_from_textmap`.  A missing TextMap
+    candidate falls back to ``git_created_version_id`` exactly as authoritative
+    history backfill does.  A row is unresolved only when both are unavailable.
+    """
+    target_filter_q = ""
+    target_filter_qt = ""
+    target_table = "_quest_candidate_target"
+    if quest_ids is not None:
+        cursor.execute(f"CREATE TEMP TABLE IF NOT EXISTS {target_table}(questId INTEGER PRIMARY KEY)")
+        cursor.execute(f"DELETE FROM {target_table}")
+        normalized: list[tuple[int]] = []
+        seen: set[int] = set()
+        for raw in quest_ids:
+            try:
+                value = int(raw)
+            except (TypeError, ValueError):
+                continue
+            if value in seen:
+                continue
+            seen.add(value)
+            normalized.append((value,))
+        if normalized:
+            cursor.executemany(
+                f"INSERT OR IGNORE INTO {target_table}(questId) VALUES (?)",
+                normalized,
+            )
+        target_filter_q = f" AND q.questId IN (SELECT questId FROM {target_table})"
+        target_filter_qt = f" AND qt.questId IN (SELECT questId FROM {target_table})"
+
+    qh_sql, qh_params = _build_qh_source_sql(
+        cursor,
+        target_filter_q=target_filter_q,
+        target_filter_qt=target_filter_qt,
+        target_updated_version_id=None,
+    )
+    chs_lang_id = get_quest_text_filter_lang_id(cursor)
+    created_lang_sql = "tm.lang = (SELECT id FROM langCode WHERE codeName = 'TextMapCHS.json' LIMIT 1)"
+    created_filter_sql = ""
+    created_filter_params: tuple[object, ...] = tuple()
+    if chs_lang_id is not None:
+        created_text_sql, created_text_params = build_quest_text_not_excluded_sql("tm.content")
+        created_dialogue_sql, created_dialogue_params = build_quest_version_dialogue_not_excluded_sql("tm.content")
+        created_lang_sql = "tm.lang = ?"
+        created_filter_sql = (
+            f" AND ({created_text_sql})"
+            f" AND (qh.source_type <> 'dialogue' OR {created_dialogue_sql})"
+        )
+        created_filter_params = (
+            chs_lang_id,
+            *created_text_params,
+            *created_dialogue_params,
+        )
+
+    query = f"""
+        WITH qh AS (
+            {qh_sql}
+        ),
+        candidates AS (
+            SELECT qh.questId, tm.created_version_id, COUNT(DISTINCT qh.hash) AS text_count
+            FROM qh
+            JOIN textMap tm ON tm.hash=qh.hash
+            WHERE tm.created_version_id IS NOT NULL
+              AND qh.hash<>0
+              AND {created_lang_sql}
+              {created_filter_sql}
+            GROUP BY qh.questId, tm.created_version_id
+        ),
+        ranked AS (
+            SELECT questId, created_version_id, text_count,
+                   ROW_NUMBER() OVER (
+                       PARTITION BY questId
+                       ORDER BY text_count DESC,
+                                {_version_sort_key_sql('created_version_id', _VERSION_SORT_KEY_MAX)},
+                                created_version_id
+                   ) AS rn
+            FROM candidates
+        )
+        SELECT q.questId, q.created_version_id, q.git_created_version_id,
+               r.created_version_id, r.text_count
+        FROM quest q
+        LEFT JOIN ranked r ON r.questId=q.questId AND r.rn=1
+        {('WHERE q.questId IN (SELECT questId FROM ' + target_table + ')' if quest_ids is not None else '')}
+        ORDER BY q.questId
+    """
+    rows = cursor.execute(query, (*qh_params, *created_filter_params)).fetchall()
+    result: dict[int, dict[str, int | str | None]] = {}
+    for quest_id, current_id, git_id, inferred_id, text_count in rows:
+        inferred = int(inferred_id) if inferred_id is not None else None
+        fallback = int(git_id) if git_id is not None else None
+        candidate = inferred if inferred is not None else fallback
+        if candidate is None:
+            status = "unresolved"
+            source = None
+        else:
+            status = "manual_difference" if current_id != candidate else "same"
+            source = "textmap" if inferred is not None else "git"
+        if status == "same":
+            final_created_version_id = candidate
+        else:
+            # A manual difference keeps the production value.  An unresolved
+            # candidate also keeps the current value and is never auto-locked.
+            final_created_version_id = int(current_id) if current_id is not None else None
+        result[int(quest_id)] = {
+            "questId": int(quest_id),
+            "current_created_version_id": int(current_id) if current_id is not None else None,
+            "git_created_version_id": fallback,
+            "textmap_candidate_created_version_id": inferred,
+            "candidate_created_version_id": candidate,
+            "candidate_source": source,
+            "candidate_text_count": int(text_count) if text_count is not None else None,
+            "status": status,
+            "final_created_version_id": final_created_version_id,
+        }
+    return result
+
+
 def backfill_quest_created_version_from_textmap(
     cursor,
     *,
@@ -642,6 +786,16 @@ def backfill_quest_created_version_from_textmap(
     """
     Backfill quest created_version_id from textMap.
     """
+    ensure_quest_version_provenance_schema(cursor)
+    quest_count_row = cursor.execute("SELECT COUNT(*) FROM quest").fetchone()
+    if int(quest_count_row[0] or 0) > 0 and not manual_created_version_audit_is_prepared(cursor):
+        raise RuntimeError(
+            "quest created-version backfill is gated: prepare the read-only "
+            "manual override audit before invoking automatic backfill"
+        )
+    locked_before = count_manual_locked_quests(cursor)
+    if locked_before:
+        print(f"Quest created-version backfill: manual-locked skipped={locked_before}")
     reset_temp_table(
         cursor,
         "CREATE TEMP TABLE IF NOT EXISTS _quest_inferred_created_version("
@@ -808,7 +962,7 @@ def backfill_quest_created_version_from_textmap(
                 """
             )
             cursor.execute(
-                """
+                f"""
                 UPDATE quest
                 SET created_version_id = (
                     SELECT final_created_version_id
@@ -816,6 +970,10 @@ def backfill_quest_created_version_from_textmap(
                     WHERE t.questId = quest.questId
                 )
                 WHERE questId IN (SELECT questId FROM _target_quest_id)
+                  AND NOT EXISTS (
+                      SELECT 1 FROM {QUEST_CREATED_VERSION_OVERRIDE_TABLE} locked
+                      WHERE locked.questId = quest.questId
+                  )
                   AND COALESCE(created_version_id, -1) <> COALESCE(
                       (
                           SELECT final_created_version_id
@@ -836,6 +994,10 @@ def backfill_quest_created_version_from_textmap(
                 WHERE t.questId = quest.questId
             )
             WHERE questId IN (SELECT questId FROM _quest_inferred_created_version)
+              AND NOT EXISTS (
+                  SELECT 1 FROM {QUEST_CREATED_VERSION_OVERRIDE_TABLE} locked
+                  WHERE locked.questId = quest.questId
+              )
               AND (created_version_id IS NULL OR {_version_precedes_sql(
                   "(SELECT t.inferred_created_version_id FROM _quest_inferred_created_version t WHERE t.questId = quest.questId)",
                   "created_version_id",

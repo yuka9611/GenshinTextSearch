@@ -264,6 +264,36 @@ def test_iter_hall_template_mappings_supports_6_7_keys():
     ]
 
 
+def test_iter_hall_template_mappings_supports_7_0_keys():
+    rows = [
+        {
+            "NMEDGNKECLH": 11,
+            "MDCHMLFLPID": 3153252249,
+            "JMPHKBBFCDB": 2073840156,
+            "AAJDEFOOIKH": "BEYOND_HALL_PRIVATE",
+        },
+        {
+            "NMEDGNKECLH": 1011,
+            "MDCHMLFLPID": 4116792297,
+            "JMPHKBBFCDB": 1271560124,
+            "AAJDEFOOIKH": "BEYOND_HALL_PUBLIC",
+        },
+    ]
+
+    result = list(entitySourceImport._iter_hall_template_mappings(rows))
+
+    assert result == [
+        (
+            2073840156,
+            entitySourceImport.SOURCE_TYPE_QIANXING_HALL,
+            11,
+            3153252249,
+            entitySourceImport._pack_extra(entitySourceImport.FIELD_DESC),
+            entitySourceImport.SUB_QIANXING_HALL,
+        )
+    ]
+
+
 def test_iter_hall_facility_mappings_accepts_bwiki_style_id_fallback_keys():
     rows = [
         {
@@ -1421,3 +1451,146 @@ def test_catalog_queries_prefer_entity_created_version_and_fallback_to_textmap(m
     connection.execute("UPDATE text_source_entity SET created_version_id=NULL")
     rows = databaseHelper.selectCatalogEntities("", 1)
     assert rows[0][5:7] == ("Version 2.0", "Version 3.0")
+
+
+def test_7_0_material_types_use_evidence_backed_categories():
+    rows = [
+        {
+            "id": 121653,
+            "materialType": "MATERIAL_ODETTE_QUEST_PHOTO_BOOK",
+            "nameTextMapHash": 2035765396,
+            "descTextMapHash": 873712061,
+        },
+        {
+            "id": 121663,
+            "materialType": "MATERIAL_ZDAQ_BOOK_PHOTO",
+            "nameTextMapHash": 2184681948,
+            "descTextMapHash": 738539005,
+        },
+        {
+            "id": 223111,
+            "materialType": "MATERIAL_TPS_ACCESSORY",
+            "nameTextMapHash": 1001,
+            "descTextMapHash": 1002,
+        },
+        {
+            "id": 121657,
+            "materialType": "MATERIAL_TPS_CLOAK_UPGRADE",
+            "nameTextMapHash": 165341188,
+            "descTextMapHash": 297869813,
+        },
+    ]
+
+    result = list(entitySourceImport._iter_material_mappings(rows))
+    categories = {(row[2], row[1], row[5]) for row in result if row[4] & 0xFF == entitySourceImport.FIELD_DESC}
+
+    assert categories == {
+        (121653, entitySourceImport.SOURCE_TYPE_ITEM, entitySourceImport.entity_constants.SUB_QUEST_ITEM),
+        (121663, entitySourceImport.SOURCE_TYPE_ITEM, entitySourceImport.entity_constants.SUB_QUEST_ITEM),
+        (
+            223111,
+            entitySourceImport.SOURCE_TYPE_BLUEPRINT,
+            entitySourceImport.SUB_TPS_WEAPON_ACCESSORY,
+        ),
+        (
+            121657,
+            entitySourceImport.SOURCE_TYPE_DRESSING,
+            entitySourceImport.SUB_TPS_CLOAK_UPGRADE,
+        ),
+    }
+
+
+def test_tps_accessory_rows_follow_material_relation_and_preserve_component_text():
+    materials = [
+        {
+            "id": 223111,
+            "materialType": "MATERIAL_TPS_ACCESSORY",
+            "nameTextMapHash": 3001,
+            "descTextMapHash": 3002,
+        }
+    ]
+    accessories = [
+        {
+            "id": 224505,
+            "MFJCLHGDLBP": 223111,
+            "KKJDFJMLMBA": 224001,
+            "nameTextMapHash": 3011,
+            "descTextMapHash": 3012,
+            "unlockDescTextMapHash": 3013,
+        }
+    ]
+
+    result = list(entitySourceImport._iter_tps_weapon_accessory_mappings(accessories, materials))
+
+    assert result == [
+        (
+            3011,
+            entitySourceImport.SOURCE_TYPE_BLUEPRINT,
+            223111,
+            3001,
+            entitySourceImport._pack_extra(entitySourceImport.FIELD_TITLE),
+            entitySourceImport.SUB_TPS_WEAPON_ACCESSORY,
+        ),
+        (
+            3012,
+            entitySourceImport.SOURCE_TYPE_BLUEPRINT,
+            223111,
+            3001,
+            entitySourceImport._pack_extra(entitySourceImport.FIELD_DESC),
+            entitySourceImport.SUB_TPS_WEAPON_ACCESSORY,
+        ),
+        (
+            3013,
+            entitySourceImport.SOURCE_TYPE_BLUEPRINT,
+            223111,
+            3001,
+            entitySourceImport._pack_extra(entitySourceImport.FIELD_SPECIAL_DESC),
+            entitySourceImport.SUB_TPS_WEAPON_ACCESSORY,
+        ),
+    ]
+
+
+def test_tps_excel_sources_are_part_of_entity_diff_plan_and_weapon_mapping():
+    assert "TpsWeaponExcelConfigData.json" in entitySourceImport._ENTITY_EXCEL_FILES
+    assert "TpsWeaponAccessoryExcelConfigData.json" in entitySourceImport._ENTITY_EXCEL_FILES
+    assert set(history_backfill._ENTITY_SNAPSHOT_FILE_KEYS) == set(
+        entitySourceImport._ENTITY_EXCEL_FILES
+    )
+
+    result = list(
+        entitySourceImport._iter_weapon_mappings(
+            [{"id": 224001, "nameTextMapHash": 4001, "descTextMapHash": 4002}]
+        )
+    )
+    assert result == [
+        (
+            4002,
+            entitySourceImport.SOURCE_TYPE_WEAPON,
+            224001,
+            4001,
+            entitySourceImport._pack_extra(entitySourceImport.FIELD_DESC),
+        )
+    ]
+
+
+def test_tps_weapon_snapshot_tracks_empty_object_to_array_transition(monkeypatch):
+    def fake_git_show_json(_repo_path, commit_sha, rel_path):
+        if rel_path.endswith("TpsWeaponExcelConfigData.json"):
+            if commit_sha == "6.7":
+                return {}
+            return [
+                {
+                    "id": 224001,
+                    "nameTextMapHash": 4001,
+                    "descTextMapHash": 4002,
+                }
+            ]
+        return []
+
+    monkeypatch.setattr(history_backfill, "_git_show_json", fake_git_show_json)
+    monkeypatch.setattr(entitySourceImport, "_load_overrides", lambda: ({}, set()))
+
+    assert history_backfill._snapshot_entity_keys("unused", "6.7") == set()
+    assert history_backfill._snapshot_entity_keys("unused", "7.0") == {
+        (entitySourceImport.SOURCE_TYPE_WEAPON, 224001)
+    }

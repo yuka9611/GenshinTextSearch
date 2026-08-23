@@ -16,6 +16,7 @@ import databaseHelper
 import questImport
 import quest_hash_map_utils
 import version_control
+from quest_version_provenance import mark_manual_created_version_audit_prepared
 
 
 def _bootstrap_quest_db(connection: sqlite3.Connection):
@@ -197,6 +198,15 @@ def _patch_modules(monkeypatch, connection: sqlite3.Connection):
     databaseHelper._CACHE["version"].clear()
     version_control._clear_version_sort_key_cache()
     questImport._set_talk_dialogue_link_presence(None)
+    provenance_cursor = connection.cursor()
+    mark_manual_created_version_audit_prepared(
+        provenance_cursor,
+        source_path="test-fixture:quest-version-backfill",
+        candidate_count=0,
+        difference_count=0,
+    )
+    connection.commit()
+    provenance_cursor.close()
 
 
 def _seed_short_generic_regression_quest(connection: sqlite3.Connection, quest_id: int = 4):

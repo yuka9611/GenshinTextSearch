@@ -11,6 +11,7 @@ from DBConfig import DATA_PATH, conn
 from import_utils import DEFAULT_BATCH_SIZE, executemany_batched, load_json_file
 from genshin_data_core.hall import (
     get_hall_desc_text_hash,
+    get_hall_facility_style_id,
     get_hall_name_text_hash,
     get_hall_style_id,
     is_public_hall,
@@ -28,7 +29,7 @@ from entity_constants import (
     SOURCE_TYPE_ITEM, SOURCE_TYPE_FOOD, SOURCE_TYPE_FURNISHING,
     SOURCE_TYPE_COSTUME, SOURCE_TYPE_SUIT, SOURCE_TYPE_WEAPON, SOURCE_TYPE_RELIQUARY,
     SOURCE_TYPE_MONSTER, SOURCE_TYPE_CREATURE,
-    SOURCE_TYPE_DRESSING, SOURCE_TYPE_GCG, SOURCE_TYPE_AVATAR_INTRO,
+    SOURCE_TYPE_DRESSING, SOURCE_TYPE_BLUEPRINT, SOURCE_TYPE_GCG, SOURCE_TYPE_AVATAR_INTRO,
     SOURCE_TYPE_ACHIEVEMENT, SOURCE_TYPE_VIEWPOINT, SOURCE_TYPE_DUNGEON, SOURCE_TYPE_LOADING_TIP,
     SOURCE_TYPE_QIANXING_EMOJI, SOURCE_TYPE_QIANXING_POSE, SOURCE_TYPE_QIANXING_EFFECT,
     SOURCE_TYPE_QIANXING_HALL,
@@ -38,6 +39,7 @@ from entity_constants import (
     SUB_NONE, SUB_CARD,
     SUB_COSTUME_DRESS, SUB_AVATAR_SKILL, SUB_QIANXING_PARADOX, SUB_QIANXING_SUIT,
     SUB_QIANXING_EMOJI, SUB_QIANXING_POSE, SUB_QIANXING_EFFECT, SUB_QIANXING_HALL,
+    SUB_TPS_WEAPON_ACCESSORY, SUB_TPS_CLOAK_UPGRADE,
     # 映射与标签
     MATERIAL_TYPE_TO_CATEGORY, SUB_CATEGORY_LABELS, SOURCE_TYPE_LABELS,
     # 工具函数
@@ -365,6 +367,8 @@ _ENTITY_EXCEL_FILES = [
     "AvatarSkillExcelConfigData.json",
     "AvatarCostumeExcelConfigData.json",
     "WeaponExcelConfigData.json",
+    "TpsWeaponExcelConfigData.json",
+    "TpsWeaponAccessoryExcelConfigData.json",
     "ReliquaryExcelConfigData.json",
     "AnimalCodexExcelConfigData.json",
     "AnimalDescribeExcelConfigData.json",
@@ -398,6 +402,10 @@ def _load_all_entity_data(excel_root: str) -> dict[str, Any]:
     avatar_skills = _load_rows(os.path.join(excel_root, "AvatarSkillExcelConfigData.json"))
     avatar_costumes = _load_rows(os.path.join(excel_root, "AvatarCostumeExcelConfigData.json"))
     weapons = _load_rows(os.path.join(excel_root, "WeaponExcelConfigData.json"))
+    tps_weapons = _load_rows(os.path.join(excel_root, "TpsWeaponExcelConfigData.json"))
+    tps_weapon_accessories = _load_rows(
+        os.path.join(excel_root, "TpsWeaponAccessoryExcelConfigData.json")
+    )
     reliquaries = _load_rows(os.path.join(excel_root, "ReliquaryExcelConfigData.json"))
     codex = _load_rows(os.path.join(excel_root, "AnimalCodexExcelConfigData.json"))
     animal_describes = _load_rows(os.path.join(excel_root, "AnimalDescribeExcelConfigData.json"))
@@ -431,6 +439,8 @@ def _load_all_entity_data(excel_root: str) -> dict[str, Any]:
         "avatar_skills": avatar_skills,
         "avatar_costumes": avatar_costumes,
         "weapons": weapons,
+        "tps_weapons": tps_weapons,
+        "tps_weapon_accessories": tps_weapon_accessories,
         "reliquaries": reliquaries,
         "codex": codex,
         "achievements": achievements,
@@ -455,7 +465,9 @@ def _print_entity_source_summary(data: dict[str, Any]):
         ("effects", "特效"), ("halls", "大厅模板"), ("hall_facilities", "大厅设施"),
         ("avatars", "角色"), ("avatar_skill_depots", "角色技能池"), ("avatar_skills", "角色技能"),
         ("avatar_costumes", "角色装扮"),
-        ("weapons", "武器"), ("reliquaries", "圣遗物"), ("codex", "图鉴"),
+        ("weapons", "武器"), ("tps_weapons", "TPS武器"),
+        ("tps_weapon_accessories", "TPS武器配件"),
+        ("reliquaries", "圣遗物"), ("codex", "图鉴"),
         ("achievements", "成就"), ("viewpoints", "观景点"), ("dungeons", "秘境"),
         ("loading_tips", "过场提示"), ("gcg_cards", "七圣召唤卡牌"),
         ("gcg_chars", "七圣召唤角色牌"), ("gcg_skills", "七圣召唤技能"),
@@ -489,6 +501,12 @@ def _build_rows_iter(data: dict[str, Any], overrides: dict[str, tuple[int, int]]
         ),
         _iter_avatar_costume_mappings(data["avatar_costumes"]),
         _pad_sub_category(_iter_weapon_mappings(data["weapons"])),
+        _pad_sub_category(_iter_weapon_mappings(data.get("tps_weapons", []))),
+        _iter_tps_weapon_accessory_mappings(
+            data.get("tps_weapon_accessories", []),
+            data.get("materials", []),
+            overrides,
+        ),
         _pad_sub_category(_iter_reliquary_mappings(data["reliquaries"])),
         _pad_sub_category(_iter_codex_mappings(data["codex"], data["describe_title_map"])),
         _iter_achievement_mappings(data["achievements"]),
@@ -1297,15 +1315,6 @@ def _iter_effect_mappings(rows: list[dict[str, Any]]):
         )
 
 
-def _get_hall_facility_style_id(row: dict[str, Any]) -> int | None:
-    return _extract_first_int(
-        row,
-        "OJGEAGGJALA", "DGBOKBNOJKE", "LGGBFCPPBBJ",
-        "OEFKFFGKKKP", "DOPFMOKHIIC", "JPGMJHBCOGK",
-        "FEIJJDIAHFJ", "KJJPGPAKCIF", "BBLFLDMDBNJ",
-    )
-
-
 def _iter_hall_template_mappings(rows: list[dict[str, Any]]):
     for row in rows:
         if is_public_hall(row):
@@ -1330,7 +1339,7 @@ def _iter_hall_facility_mappings(rows: list[dict[str, Any]]):
         facility_id = _as_nonzero_int(row.get("id"))
         title_hash = _as_nonzero_int(row.get("nameTextMapHash"))
         text_hash = _as_nonzero_int(row.get("descTextMapHash"))
-        style_id = _get_hall_facility_style_id(row)
+        style_id = get_hall_facility_style_id(row)
         if facility_id is None or title_hash is None or text_hash is None or style_id is None:
             continue
         yield (
@@ -1435,6 +1444,57 @@ def _iter_weapon_mappings(rows: list[dict[str, Any]]):
         if weapon_id is None or title_hash is None or text_hash is None:
             continue
         yield (text_hash, SOURCE_TYPE_WEAPON, weapon_id, title_hash, _pack_extra(FIELD_DESC))
+
+
+def _iter_tps_weapon_accessory_mappings(
+    rows: list[dict[str, Any]],
+    material_rows: list[dict[str, Any]],
+    overrides: dict[str, tuple[int, int]] | None = None,
+):
+    """Map dedicated TPS accessory text to its proven Material entity.
+
+    ``MFJCLHGDLBP`` is the material id consumed to unlock the accessory and
+    ``KKJDFJMLMBA`` is the associated TpsWeapon id.  The material row remains
+    the entity owner, while the dedicated config contributes component names,
+    descriptions, and unlock descriptions that are not present in
+    MaterialExcelConfigData.
+    """
+    material_by_id = {
+        material_id: material
+        for material in material_rows
+        if (material_id := _as_nonzero_int(material.get("id"))) is not None
+    }
+    for row in rows:
+        material_id = _as_nonzero_int(row.get("MFJCLHGDLBP"))
+        if material_id is None:
+            continue
+        material = material_by_id.get(material_id)
+        if material is None:
+            continue
+        material_type = str(material.get("materialType") or "").strip()
+        if material_type != "MATERIAL_TPS_ACCESSORY":
+            continue
+        title_hash = _as_nonzero_int(material.get("nameTextMapHash"))
+        if title_hash is None:
+            continue
+        source_type_code, sub_category = _classify_material(material, overrides)
+        material_hashes = _material_text_hashes(material)
+        for key, field_code in (
+            ("nameTextMapHash", FIELD_TITLE),
+            ("descTextMapHash", FIELD_DESC),
+            ("unlockDescTextMapHash", FIELD_SPECIAL_DESC),
+        ):
+            text_hash = _as_nonzero_int(row.get(key))
+            if text_hash is None or text_hash in material_hashes:
+                continue
+            yield (
+                text_hash,
+                source_type_code,
+                material_id,
+                title_hash,
+                _pack_extra(field_code),
+                sub_category,
+            )
 
 
 def _iter_reliquary_mappings(rows: list[dict[str, Any]]):

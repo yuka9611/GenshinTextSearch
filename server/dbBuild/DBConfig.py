@@ -14,10 +14,18 @@ LANG_PATH = os.path.join(DATA_PATH, "TextMap")
 
 # Default DB should be server/data.db (same DB used by runtime server).
 _default_db_path = os.path.join(_SERVER_DIR, "data.db")
-DB_PATH = _default_db_path
+DB_PATH = os.path.abspath(os.environ.get("GTS_DB_PATH", _default_db_path))
 
 # Allow shared use across threads in importer/runtime flows.
-conn = sqlite3.connect(DB_PATH, check_same_thread=False)
+_read_only = os.environ.get("GTS_DB_READ_ONLY", "").strip().lower() in {"1", "true", "yes"}
+if _read_only:
+    conn = sqlite3.connect(
+        f"file:{DB_PATH}?mode=ro",
+        uri=True,
+        check_same_thread=False,
+    )
+else:
+    conn = sqlite3.connect(DB_PATH, check_same_thread=False)
 
 # Readable files path.
 READABLE_PATH = os.path.join(DATA_PATH, "Readable")

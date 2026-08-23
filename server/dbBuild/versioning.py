@@ -11,6 +11,7 @@ from textmap_fts_sql import (
     build_textmap_fts_au_trigger_sql,
     build_textmap_fts_table_sql,
 )
+from quest_version_provenance import ensure_quest_version_provenance_schema
 
 SPECIAL_VERSION_LABEL_MAP = {
     "BinOutput": "1.5",
@@ -916,6 +917,12 @@ def ensure_version_schema():
     _backfill_version_sort_keys()
     _ensure_version_catalog_table()
     _ensure_quest_hash_map_table()
+    cur = conn.cursor()
+    try:
+        ensure_quest_version_provenance_schema(cur)
+        conn.commit()
+    finally:
+        cur.close()
 
     for table_name in ("textMap", "readable", "subtitle"):
         _ensure_column(table_name, "created_version_id", "INTEGER")
@@ -937,6 +944,19 @@ def ensure_version_schema():
                 coopQuestId INTEGER NOT NULL DEFAULT 0,
                 dialogueId INTEGER NOT NULL,
                 PRIMARY KEY (talkId, coopQuestId, dialogueId)
+            )
+            """
+        )
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS talk_dialogue_content (
+                talkId INTEGER NOT NULL,
+                coopQuestId INTEGER NOT NULL DEFAULT 0,
+                dialogueId INTEGER NOT NULL,
+                textHash INTEGER NOT NULL,
+                talkerId INTEGER,
+                talkerType TEXT,
+                PRIMARY KEY (talkId, coopQuestId, dialogueId, textHash)
             )
             """
         )
@@ -975,6 +995,8 @@ def ensure_version_schema():
     _ensure_index_for_table("dialogue", "CREATE INDEX IF NOT EXISTS dialogue_talkId_coopQuestId_dialogueId_index ON dialogue(talkId, coopQuestId, dialogueId)")
     _ensure_index_for_table("talk_dialogue_link", "CREATE INDEX IF NOT EXISTS talk_dialogue_link_dialogueId_index ON talk_dialogue_link(dialogueId)")
     _ensure_index_for_table("talk_dialogue_link", "CREATE INDEX IF NOT EXISTS talk_dialogue_link_talkId_coopQuestId_index ON talk_dialogue_link(talkId, coopQuestId)")
+    _ensure_index_for_table("talk_dialogue_content", "CREATE INDEX IF NOT EXISTS talk_dialogue_content_scope_index ON talk_dialogue_content(talkId, coopQuestId, dialogueId)")
+    _ensure_index_for_table("talk_dialogue_content", "CREATE INDEX IF NOT EXISTS talk_dialogue_content_hash_index ON talk_dialogue_content(textHash)")
     _ensure_index_for_table("quest", "CREATE INDEX IF NOT EXISTS quest_created_version_id_index ON quest(created_version_id)")
     _ensure_index_for_table("quest", "CREATE INDEX IF NOT EXISTS quest_git_created_version_id_index ON quest(git_created_version_id)")
     _ensure_index_for_table("npc", "CREATE INDEX IF NOT EXISTS npc_created_version_id_index ON npc(created_version_id)")

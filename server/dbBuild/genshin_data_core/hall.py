@@ -26,16 +26,65 @@ def extract_first_str(row: Any, *keys: str) -> str:
 
 
 def get_hall_style_id(row: Any) -> Optional[int]:
-    return extract_first_int(row, "COGKFPLDLLL", "DCOBMNILGJL", "OCHDBIAAHIO", "CKIGKAIIFFI")
+    return extract_first_int(
+        row,
+        "NMEDGNKECLH",
+        "COGKFPLDLLL",
+        "DCOBMNILGJL",
+        "OCHDBIAAHIO",
+        "CKIGKAIIFFI",
+    )
+
+
+def get_hall_facility_style_id(row: Any) -> Optional[int]:
+    if not isinstance(row, dict):
+        return None
+    for key in (
+        "ELPPMBJMBIO",
+        "OJGEAGGJALA",
+        "DGBOKBNOJKE",
+        "LGGBFCPPBBJ",
+        "OEFKFFGKKKP",
+        "DOPFMOKHIIC",
+        "JPGMJHBCOGK",
+        "FEIJJDIAHFJ",
+        "KJJPGPAKCIF",
+        "BBLFLDMDBNJ",
+    ):
+        value = row.get(key)
+        if isinstance(value, int) and value > 0:
+            return value
+    return None
 
 
 def get_hall_name_text_hash(row: Any) -> Optional[int]:
-    return extract_first_int(row, "LDCAAIEKMOE", "KMMKMJLOFGC", "CAMAHAEKAIH", "AOGCNHLHJMJ")
+    return extract_first_int(
+        row,
+        "MDCHMLFLPID",
+        "LDCAAIEKMOE",
+        "KMMKMJLOFGC",
+        "CAMAHAEKAIH",
+        "AOGCNHLHJMJ",
+    )
 
 
 def get_hall_desc_text_hash(row: Any) -> Optional[int]:
-    return extract_first_int(row, "BPKNEMEJEPF", "DKBHBHOOGAP", "PEODHMPDKNF", "PPOAOFDNLDJ")
+    return extract_first_int(
+        row,
+        "JMPHKBBFCDB",
+        "BPKNEMEJEPF",
+        "DKBHBHOOGAP",
+        "PEODHMPDKNF",
+        "PPOAOFDNLDJ",
+    )
 
 
 def is_public_hall(row: Any) -> bool:
-    return extract_first_str(row, "PEMNJBEBBOG", "BMIILBDKBIO", "KMDBAGPDKNG", "BNKLMBACEDF") == "BEYOND_HALL_PUBLIC"
+    return extract_first_str(
+        row,
+        "AAJDEFOOIKH",
+        "PEMNJBEBBOG",
+        "BMIILBDKBIO",
+        "KMDBAGPDKNG",
+        "BNKLMBACEDF",
+    ) == "BEYOND_HALL_PUBLIC"

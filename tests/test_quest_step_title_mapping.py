@@ -19,7 +19,7 @@ from genshin_data_core.quest import (
     extract_quest_talk_ids,
     get_step_talk_ids,
 )
-from genshin_data_core.sources import QuestSourceResolver, SOURCE_TYPE_HANGOUT
+from genshin_data_core.sources import QuestSourceResolver, SOURCE_TYPE_HANGOUT, iter_subquest_talk_rows
 
 
 class _DummyProgress:
@@ -149,6 +149,97 @@ def test_shared_quest_parser_supports_6_7_quest_brief_schema():
     assert extract_quest_talk_ids(obj) == [7610901, 7610902]
 
 
+def test_shared_quest_parser_supports_7_0_quest_and_subquest_schema():
+    obj = {
+        "OIFGMOHKPOI": 99041,
+        "LKAHEACOLML": 4183792175,
+        "CKMCPKCGFKC": 1611,
+        "PFALHAKIILD": [
+            {"OIFGMOHKPOI": 9904101},
+            {"OIFGMOHKPOI": 9904102},
+        ],
+        "EBNBLBEIFFJ": [
+            {
+                "BJAAAKHKKKL": 99041,
+                "KCGAKLCHDCC": 9904101,
+                "OANENPOPCFO": 1090861876,
+                "ANBEKNMDKCH": [
+                    {
+                        "ALBFHGKNMLK": "QUEST_CONTENT_COMPLETE_TALK",
+                        "OPDGHDAADJC": [9904101, 0],
+                    }
+                ],
+            }
+        ],
+    }
+
+    assert extract_quest_id(obj) == 99041
+    assert extract_quest_talk_ids(obj) == [9904101, 9904102]
+    assert get_step_talk_ids(obj["EBNBLBEIFFJ"][0]) == [9904101]
+    assert build_step_title_hash_by_talk_id(obj) == {9904101: 1090861876}
+
+
+def test_shared_quest_parser_supports_legacy_and_7_0_embedded_talk_rows():
+    assert extract_quest_talk_ids(
+        {
+            "ANKFNLMKOII": 70064,
+            "OBPMJEILMMK": [{"ANKFNLMKOII": 7006401}],
+        }
+    ) == [7006401]
+    assert extract_quest_talk_ids(
+        {
+            "OIFGMOHKPOI": 19094,
+            "OJACLOOEAMG": [
+                {"OIFGMOHKPOI": 1909407},
+                {"OIFGMOHKPOI": 1909410},
+            ],
+        }
+    ) == [1909407, 1909410]
+
+
+def test_7_0_subquest_talk_rows_keep_coop_scope_and_step_text():
+    obj = {
+        "EBNBLBEIFFJ": [
+            {
+                "BJAAAKHKKKL": 99041,
+                "KCGAKLCHDCC": 9904101,
+                "OANENPOPCFO": 1090861876,
+                "ANBEKNMDKCH": [
+                    {
+                        "ALBFHGKNMLK": "QUEST_CONTENT_COMPLETE_TALK",
+                        "OPDGHDAADJC": [9904101, 0],
+                    }
+                ],
+            }
+        ]
+    }
+
+    assert list(iter_subquest_talk_rows(obj, normal_coop_id=9904103)) == [
+        (99041, 9904101, 1090861876, 9904103)
+    ]
+
+
+def test_quest_source_raw_by_id_supports_7_0_brief_type_key(tmp_path):
+    brief_dir = tmp_path / "BinOutput" / "QuestBrief"
+    brief_dir.mkdir(parents=True)
+    (brief_dir / "9e8be0e2.json").write_text(
+        json.dumps(
+            {
+                "OIFGMOHKPOI": 7000,
+                "LKAHEACOLML": 587669031,
+                "ALBFHGKNMLK": "AQ",
+                "EBNBLBEIFFJ": [],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    access = FilesystemGameDataAccess(str(tmp_path))
+    raw = QuestSourceResolver(access).load_quest_source_raw_by_id()
+
+    assert raw.get(7000) == "AQ"
+
+
 def test_legacy_190xx_quest_ids_are_hangouts(monkeypatch):
     resolver = QuestSourceResolver(FilesystemGameDataAccess([]))
     monkeypatch.setattr(resolver, "load_quest_source_raw_by_id", lambda: {19001: "LQ"})
@@ -239,6 +330,80 @@ def test_build_step_title_hash_by_talk_id_supports_6_7_quest_brief_schema():
     assert mapping[7610901] == 1090861876
     assert mapping[7610903] == 1770283964
     assert mapping[7610904] == 1770283964
+
+
+def test_build_step_title_hash_by_talk_id_supports_7_0_hidden_then_visible_steps():
+    obj = {
+        "EBNBLBEIFFJ": [
+            {
+                "BJAAAKHKKKL": 77650,
+                "KCGAKLCHDCC": 7765001,
+                "OANENPOPCFO": 0,
+                "ANBEKNMDKCH": [
+                    {
+                        "OPDGHDAADJC": [7765001, 0],
+                        "ALBFHGKNMLK": "QUEST_CONTENT_FINISH_PLOT",
+                    }
+                ],
+            },
+            {
+                "BJAAAKHKKKL": 77650,
+                "KCGAKLCHDCC": 7765002,
+                "OANENPOPCFO": 695448396,
+                "ANBEKNMDKCH": [
+                    {
+                        "OPDGHDAADJC": [7765001, 0],
+                        "ALBFHGKNMLK": "QUEST_CONTENT_COMPLETE_TALK",
+                    }
+                ],
+            },
+            {
+                "BJAAAKHKKKL": 77654,
+                "KCGAKLCHDCC": 7765402,
+                "OANENPOPCFO": 0,
+                "ANBEKNMDKCH": [
+                    {
+                        "OPDGHDAADJC": [7765401, 0],
+                        "ALBFHGKNMLK": "QUEST_CONTENT_FINISH_PLOT",
+                    }
+                ],
+            },
+            {
+                "BJAAAKHKKKL": 77654,
+                "KCGAKLCHDCC": 7765403,
+                "OANENPOPCFO": 1003750004,
+                "ANBEKNMDKCH": [
+                    {
+                        "OPDGHDAADJC": [7765401, 0],
+                        "ALBFHGKNMLK": "QUEST_CONTENT_COMPLETE_TALK",
+                    }
+                ],
+            },
+        ]
+    }
+
+    mapping = build_step_title_hash_by_talk_id(obj)
+
+    assert mapping[7765001] == 695448396
+    assert mapping[7765401] == 1003750004
+
+
+def test_quest_brief_upsert_does_not_replace_step_title_with_null():
+    connection = sqlite3.connect(":memory:")
+    _create_textmap_and_quest_talk_tables(connection)
+    connection.execute(
+        "CREATE UNIQUE INDEX quest_talk_key ON questTalk(questId, talkId, coopQuestId)"
+    )
+    sql = questImport._build_quest_talk_insert_sql(upsert_step_title=True)
+
+    connection.execute(sql, (77650, 7765001, 695448396, 0))
+    connection.execute(sql, (77650, 7765001, None, 0))
+
+    row = connection.execute(
+        "SELECT stepTitleTextMapHash FROM questTalk WHERE questId=? AND talkId=?",
+        (77650, 7765001),
+    ).fetchone()
+    assert row == (695448396,)
 
 
 def test_build_step_title_hash_by_talk_id_keeps_first_match_for_conflicts():

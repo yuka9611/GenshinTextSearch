@@ -21,7 +21,7 @@ from genshin_data_core.sources import (
     QuestSourceResolver,
     extract_anecdote_core_fields,
 )
-from genshin_data_core.talk import is_non_dialog_talk_obj
+from genshin_data_core.talk import extract_talk_id, is_non_dialog_talk_obj
 
 
 def _quest_source_resolver(root) -> QuestSourceResolver:
@@ -133,10 +133,24 @@ def test_resolve_talk_file_path_supports_windows_and_posix_rel_paths(monkeypatch
     assert os.path.normpath(questImport._resolve_talk_file_path(r"Quest\foo.json")) == os.path.normpath(expected)
 
 
+def test_diff_talk_scope_normalizes_non_coop_to_zero_for_reused_talk_ids():
+    talk = {"IOKNFDJFGDH": 9904101, "PFALHAKIILD": []}
+
+    ordinary = diffUpdate._extract_talk_scope("Quest/9904101.json", talk)
+    coop = diffUpdate._extract_talk_scope("Coop/9904101_1.json", talk)
+
+    assert ordinary == (9904101, 0)
+    assert coop == (9904101, 9904101)
+    assert sorted({ordinary, coop}) == [ordinary, coop]
+
+
 def test_import_all_talk_items_uses_posix_logical_paths(monkeypatch, tmp_path):
     talk_dir = tmp_path / "BinOutput" / "Talk" / "Quest"
     talk_dir.mkdir(parents=True)
     (talk_dir / "foo.json").write_text("{}", encoding="utf-8")
+    nested_dir = talk_dir / "Nested"
+    nested_dir.mkdir()
+    (nested_dir / "bar.json").write_text("{}", encoding="utf-8")
 
     seen: list[str] = []
     monkeypatch.setattr(questImport, "DATA_PATH", str(tmp_path))
@@ -152,7 +166,64 @@ def test_import_all_talk_items_uses_posix_logical_paths(monkeypatch, tmp_path):
 
     questImport.importAllTalkItems(commit=False)
 
-    assert seen == ["Quest/foo.json"]
+    assert seen == ["Quest/foo.json", "Quest/Nested/bar.json"]
+
+
+def test_import_all_talk_items_merges_duplicate_logical_talk_scopes(monkeypatch, tmp_path):
+    connection = sqlite3.connect(":memory:")
+    _create_dialogue_tables(connection)
+    for folder, dialogue_id, text_hash in (
+        ("Activity", 990410101, 3728079010),
+        ("FreeGroup", 990410201, 2436563274),
+    ):
+        talk_dir = tmp_path / "BinOutput" / "Talk" / folder
+        talk_dir.mkdir(parents=True)
+        (talk_dir / "same.json").write_text(
+            json.dumps(
+                {
+                    "IOKNFDJFGDH": 9904101,
+                    "PFALHAKIILD": [
+                        {
+                            "OIFGMOHKPOI": dialogue_id,
+                            "OACNIBLFFDI": text_hash,
+                            "LFGCLNLPAPB": {
+                                "_id": "1005",
+                                "_type": "TALK_ROLE_NPC",
+                            },
+                        }
+                    ],
+                }
+            ),
+            encoding="utf-8",
+        )
+
+    monkeypatch.setattr(questImport, "DATA_PATH", str(tmp_path))
+    monkeypatch.setattr(questImport, "conn", connection)
+    monkeypatch.setattr(
+        questImport,
+        "_refresh_quest_hash_map_for_talk_ids",
+        lambda *args, **kwargs: None,
+    )
+    monkeypatch.setattr(questImport, "LightweightProgress", _DummyProgress)
+    questImport._set_talk_dialogue_link_presence(None)
+
+    assert questImport.importAllTalkItems(commit=False) == 2
+    assert connection.execute(
+        "SELECT dialogueId FROM talk_dialogue_link ORDER BY dialogueId"
+    ).fetchall() == [(990410101,), (990410201,)]
+    assert connection.execute(
+        "SELECT dialogueId, textHash FROM dialogue ORDER BY dialogueId"
+    ).fetchall() == [
+        (990410101, 3728079010),
+        (990410201, 2436563274),
+    ]
+    assert connection.execute(
+        "SELECT talkId, coopQuestId, dialogueId, textHash FROM talk_dialogue_content "
+        "ORDER BY talkId, dialogueId, textHash"
+    ).fetchall() == [
+        (9904101, 0, 990410101, 3728079010),
+        (9904101, 0, 990410201, 2436563274),
+    ]
 
 
 def test_diff_update_analyze_diff_tracks_talk_paths_with_forward_slashes():
@@ -325,6 +396,34 @@ def test_new_storyboard_group_schema_is_non_dialog_talk_obj():
     assert diffUpdate._resolve_talk_keys(obj) is None
 
 
+def test_7_0_activity_group_embedded_talk_rows_are_non_dialog():
+    obj = {"FAJAGGKJICO": 2050, "OJACLOOEAMG": [{"OIFGMOHKPOI": 205001}]}
+
+    assert is_non_dialog_talk_obj(obj)
+    assert diffUpdate._resolve_talk_keys(obj) is None
+
+
+def test_7_0_empty_talk_placeholder_is_non_dialog():
+    obj = {"IOKNFDJFGDH": 0, "PFALHAKIILD": [], "ALBFHGKNMLK": ""}
+
+    assert is_non_dialog_talk_obj(obj)
+    assert diffUpdate._resolve_talk_keys(obj) is None
+
+
+def test_diff_update_marks_non_dialog_placeholder_as_intentional_skip(monkeypatch, tmp_path):
+    talk_dir = tmp_path / "BinOutput" / "Talk"
+    talk_dir.mkdir(parents=True)
+    (talk_dir / "empty.json").write_text(
+        json.dumps(
+            {"IOKNFDJFGDH": 0, "PFALHAKIILD": [], "ALBFHGKNMLK": ""}
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(diffUpdate, "DATA_PATH", str(tmp_path))
+
+    assert diffUpdate._replace_talk_file_from_local("empty.json") == (None, True)
+
+
 def test_replace_talk_file_from_local_normalizes_rel_path(monkeypatch, tmp_path):
     talk_dir = tmp_path / "BinOutput" / "Talk" / "Quest"
     talk_dir.mkdir(parents=True)
@@ -367,7 +466,7 @@ def test_replace_talk_file_from_local_normalizes_rel_path(monkeypatch, tmp_path)
 
     assert changed_talk_id == 7008901
     assert skipped is False
-    assert deleted_scopes == [(7008901, None)]
+    assert deleted_scopes == [(7008901, 0)]
     assert imported_rels == ["Quest/foo.json"]
 
 
@@ -519,6 +618,55 @@ def test_import_talk_supports_6_7_schema(monkeypatch, tmp_path):
     ).fetchall() == [
         (761090101, 7610901, 3728079010, 1005, "TALK_ROLE_NPC"),
         (761090102, 7610901, 2436563274, "", "TALK_ROLE_PLAYER"),
+    ]
+
+
+def test_import_talk_supports_7_0_schema(monkeypatch, tmp_path):
+    connection = sqlite3.connect(":memory:")
+    _create_dialogue_tables(connection)
+
+    talk_dir = tmp_path / "BinOutput" / "Talk" / "Quest"
+    talk_dir.mkdir(parents=True)
+    talk_file = talk_dir / "foo.json"
+    talk_file.write_text(
+        json.dumps(
+            {
+                "IOKNFDJFGDH": 9904101,
+                "PFALHAKIILD": [
+                    {
+                        "OIFGMOHKPOI": 990410101,
+                        "OACNIBLFFDI": 3728079010,
+                        "LFGCLNLPAPB": {"_id": "1005", "_type": "TALK_ROLE_NPC"},
+                    },
+                    {
+                        "OIFGMOHKPOI": 990410102,
+                        "OACNIBLFFDI": 2436563274,
+                        "LFGCLNLPAPB": {"_id": "", "_type": "TALK_ROLE_PLAYER"},
+                    },
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    monkeypatch.setattr(questImport, "DATA_PATH", str(tmp_path))
+    monkeypatch.setattr(questImport, "conn", connection)
+    monkeypatch.setattr(questImport, "_refresh_quest_hash_map_for_talk_ids", lambda *args, **kwargs: None)
+    questImport._set_talk_dialogue_link_presence(None)
+
+    assert extract_talk_id({"IOKNFDJFGDH": 9904101, "PFALHAKIILD": []}) == 9904101
+    assert questImport.importTalk("Quest/foo.json", refresh_hash_map=False) == 2
+    assert connection.execute(
+        "SELECT talkId, coopQuestId, dialogueId FROM talk_dialogue_link ORDER BY dialogueId"
+    ).fetchall() == [
+        (9904101, 0, 990410101),
+        (9904101, 0, 990410102),
+    ]
+    assert connection.execute(
+        "SELECT dialogueId, talkId, textHash, talkerId, talkerType FROM dialogue ORDER BY dialogueId"
+    ).fetchall() == [
+        (990410101, 9904101, 3728079010, 1005, "TALK_ROLE_NPC"),
+        (990410102, 9904101, 2436563274, "", "TALK_ROLE_PLAYER"),
     ]
 
 
@@ -716,6 +864,46 @@ def test_database_helper_quest_dialogue_queries_use_talk_dialogue_link(monkeypat
     assert databaseHelper.selectQuestDialoguesPaged(1000) == [
         (1937334897, "TALK_ROLE_NPC", 203601, 10000201, 100002),
         (1937334897, "TALK_ROLE_NPC", 203601, 10000201, 10000201),
+    ]
+
+
+def test_database_helper_quest_dialogue_queries_use_scoped_content_for_hash_collisions(monkeypatch):
+    connection = sqlite3.connect(":memory:")
+    _create_dialogue_tables(connection)
+    _create_quest_tables(connection)
+    connection.execute(
+        "CREATE TABLE talk_dialogue_content ("
+        "talkId INTEGER NOT NULL, coopQuestId INTEGER NOT NULL DEFAULT 0, "
+        "dialogueId INTEGER NOT NULL, textHash INTEGER NOT NULL, "
+        "talkerId INTEGER, talkerType TEXT, "
+        "PRIMARY KEY (talkId, coopQuestId, dialogueId, textHash))"
+    )
+    connection.execute(
+        "INSERT INTO quest(questId, source_type, source_code_raw) VALUES (1000, 'AQ', 'AQ')"
+    )
+    connection.executemany(
+        "INSERT INTO questTalk(questId, talkId, coopQuestId) VALUES (?,?,?)",
+        [(1000, 100002, 0), (1000, 10000201, 0)],
+    )
+    connection.executemany(
+        "INSERT INTO talk_dialogue_content"
+        "(talkId, coopQuestId, dialogueId, textHash, talkerId, talkerType) "
+        "VALUES (?,?,?,?,?,?)",
+        [
+            (100002, 0, 10000201, 1937334897, 203601, "TALK_ROLE_NPC"),
+            (10000201, 0, 10000201, 2436563274, 204601, "TALK_ROLE_NPC"),
+        ],
+    )
+    connection.commit()
+
+    monkeypatch.setattr(databaseHelper, "conn", connection)
+    databaseHelper._CACHE["table"].clear()
+    databaseHelper._CACHE["column"].clear()
+
+    assert databaseHelper.countQuestDialogues(1000) == 2
+    assert databaseHelper.selectQuestDialoguesPaged(1000) == [
+        (1937334897, "TALK_ROLE_NPC", 203601, 10000201, 100002),
+        (2436563274, "TALK_ROLE_NPC", 204601, 10000201, 10000201),
     ]
 
 

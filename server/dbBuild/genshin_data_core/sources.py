@@ -89,7 +89,7 @@ def extract_storyboard_group_talk_ids(obj: Any) -> list[int]:
     if not isinstance(obj, dict):
         return []
     items = None
-    for key in ("NFFIGDHFAJG", "DGJMIPFDEOF", "talks", "GDDPNNHLGBL"):
+    for key in ("NFFIGDHFAJG", "DGJMIPFDEOF", "talks", "GDDPNNHLGBL", "PFALHAKIILD"):
         value = obj.get(key)
         if isinstance(value, list):
             items = value
@@ -99,7 +99,7 @@ def extract_storyboard_group_talk_ids(obj: Any) -> list[int]:
     result: list[int] = []
     seen: set[int] = set()
     for item in items:
-        talk_id = extract_first_positive_int(item, "NFIEHACCECI", "BLKKAMEMBBJ", "ANKFNLMKOII")
+        talk_id = extract_first_positive_int(item, "NFIEHACCECI", "BLKKAMEMBBJ", "ANKFNLMKOII", "OIFGMOHKPOI")
         if talk_id is not None and talk_id not in seen:
             seen.add(talk_id)
             result.append(talk_id)
@@ -112,21 +112,21 @@ def extract_anecdote_core_fields(
 ) -> Optional[dict[str, Any]]:
     if not isinstance(row, dict):
         return None
-    anecdote_id = extract_first_positive_int(row, "IDEHFGDCPDL", "GIJOCHMAJCI", "GBDGFHNLDFF", "DBGCFNMLHAJ")
+    anecdote_id = extract_first_positive_int(row, "IDEHFGDCPDL", "GIJOCHMAJCI", "GBDGFHNLDFF", "DBGCFNMLHAJ", "KKNGMIGLAOM")
     if anecdote_id is None:
         return None
-    title_keys = ["IBGEKMBPNNO", "EHGEFIODFHD", "titleTextMapHash"]
-    desc_keys = ["EBDFJDKDDFJ", "OBJANDCNDMA", "descTextMapHash"]
+    title_keys = ["IBGEKMBPNNO", "EHGEFIODFHD", "PFMAHKBHBAB", "titleTextMapHash"]
+    desc_keys = ["EBDFJDKDDFJ", "OBJANDCNDMA", "JKOECCLJMHB", "descTextMapHash"]
     if profile.anecdote_extended_aliases:
         title_keys[2:2] = ["PPANCKHJOGI", "EJMLGHMLPLD"]
         desc_keys[2:2] = ["AJKAHOPOBJB", "JKNBFACAMCF"]
     story_ids: list[int] = []
-    for key in ("MCGGPAGBGKO", "AEEMNELFAIO", "BBOMCGBIOFM", "LIIPHELCPKJ"):
+    for key in ("MCGGPAGBGKO", "AEEMNELFAIO", "BBOMCGBIOFM", "LIIPHELCPKJ", "OPLIDDEJLDL"):
         story_ids = _normalize_positive_ints(row.get(key))
         if story_ids:
             break
     legacy_ids: list[int] = []
-    for key in ("BHAGNOEMPHL", "HCFJCJFMPDC"):
+    for key in ("BHAGNOEMPHL", "HCFJCJFMPDC", "NNHDNJEGOPG"):
         legacy_ids = _normalize_positive_ints(row.get(key))
         if legacy_ids:
             break
@@ -203,7 +203,11 @@ class QuestSourceResolver:
             if not isinstance(quest_id, int) or quest_id <= 0 or not isinstance(obj, dict):
                 continue
             result[quest_id] = normalize_source_code_raw(
-                obj.get("HAHEIAHBPEJ") or obj.get("DLPKMDPABFM") or obj.get("MEGMIMEDODJ") or obj.get("BPEHONLLNNK")
+                obj.get("HAHEIAHBPEJ")
+                or obj.get("DLPKMDPABFM")
+                or obj.get("MEGMIMEDODJ")
+                or obj.get("BPEHONLLNNK")
+                or obj.get("ALBFHGKNMLK")
             )
         self._quest_source_raw_by_id = result
         return result
@@ -285,7 +289,7 @@ class QuestSourceResolver:
         result: dict[int, str] = {}
         for path in self.access.glob_paths("BinOutput/Talk/Storyboard/*.json"):
             obj = self._read_absolute(path)
-            talk_id = extract_first_positive_int(obj, "AADKDKPMGNO", "LDLMECNIJFC", "LBPGKDMGFBN")
+            talk_id = extract_first_positive_int(obj, "AADKDKPMGNO", "LDLMECNIJFC", "LBPGKDMGFBN", "IOKNFDJFGDH")
             if talk_id is None:
                 stem = os.path.splitext(os.path.basename(path))[0]
                 talk_id = int(stem) if stem.isdigit() else None
@@ -448,7 +452,7 @@ def iter_subquest_talk_rows(
 ):
     parser = parser or QuestParser(GTS_COMPAT)
     for subquest in parser.get_quest_subquests(obj):
-        quest_id = extract_first_positive_int(subquest, "JPBOKMKMHCJ", "mainQuestId", "CBOGAFHNHNI", "PHPKOAIPNFO") or fallback_quest_id
+        quest_id = extract_first_positive_int(subquest, "JPBOKMKMHCJ", "mainQuestId", "CBOGAFHNHNI", "PHPKOAIPNFO", "BJAAAKHKKKL") or fallback_quest_id
         step_hash = parser.get_step_desc_text_map_hash(subquest)
         for talk_id in parser.get_step_talk_ids(subquest):
             yield quest_id, talk_id, step_hash, normal_coop_id

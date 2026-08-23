@@ -27,6 +27,7 @@ from import_utils import (
     drop_temp_table,
     executemany_batched,
     fast_import_pragmas,
+    load_json_file,
     normalize_unique_ints,
     reset_temp_table,
     to_hash_value as _to_hash_value,
@@ -36,6 +37,11 @@ from quest_hash_map_utils import (
     count_unresolved_quest_versions as _count_unresolved_quest_versions,
     refresh_all_quest_hash_map as _refresh_all_quest_hash_map,
     unresolved_created_quest_ids as _unresolved_created_quest_ids,
+)
+from quest_version_provenance import (
+    QUEST_CREATED_VERSION_OVERRIDE_TABLE,
+    prepare_manual_created_version_overrides,
+    refresh_quest_text_versions,
 )
 from genshin_data_core.sources import (
     SOURCE_TYPE_ANECDOTE,
@@ -112,6 +118,39 @@ logging.basicConfig(
     ]
 )
 logger = logging.getLogger(__name__)
+
+_SOURCE_QUEST_VERSION_CACHE: dict[int, int | None] | None = None
+
+
+def _resolve_quest_version_from_source_file(cursor, quest_id: int) -> int | None:
+    """Resolve a quest's first source-file version when its file is hashed.
+
+    AnimeGameData can use content-addressed Quest filenames.  In that layout
+    ``BinOutput/Quest/{quest_id}.json`` is absent even though
+    ``source_file_version`` records the exact added file and its release.
+    Use the recorded path plus the shared Quest parser as a source-backed
+    fallback for Git provenance repair; never infer this from a version
+    mismatch alone.
+    """
+    global _SOURCE_QUEST_VERSION_CACHE
+    if _SOURCE_QUEST_VERSION_CACHE is None:
+        _SOURCE_QUEST_VERSION_CACHE = {}
+        if not _table_exists("source_file_version"):
+            return None
+        rows = cursor.execute(
+            "SELECT path, created_version FROM source_file_version "
+            "WHERE path LIKE 'BinOutput/Quest/%' AND created_version IS NOT NULL"
+        ).fetchall()
+        for path, raw_version in rows:
+            file_path = os.path.join(DATA_PATH, *str(path).split("/"))
+            obj = load_json_file(file_path)
+            row = _extract_quest_row(obj) if isinstance(obj, dict) else None
+            if row is None or row.quest_id in _SOURCE_QUEST_VERSION_CACHE:
+                continue
+            _SOURCE_QUEST_VERSION_CACHE[row.quest_id] = get_or_create_version_id(
+                str(raw_version)
+            )
+    return _SOURCE_QUEST_VERSION_CACHE.get(int(quest_id))
 if _pygit2 is not None:
     logger.info(f"pygit2 {_pygit2.__version__} 可用，将使用进程内 git 读取")
 else:
@@ -2163,6 +2202,10 @@ def _sync_created_version_from_git(cursor) -> int:
         UPDATE quest
         SET created_version_id = git_created_version_id
         WHERE git_created_version_id IS NOT NULL
+          AND NOT EXISTS (
+              SELECT 1 FROM quest_created_version_override locked
+              WHERE locked.questId = quest.questId
+          )
           AND (
               created_version_id IS NULL
               OR {_version_precedes_sql('git_created_version_id', 'created_version_id')}
@@ -2223,7 +2266,11 @@ def _update_quest_created_git_versions(cursor, quest_id: int, version_id: int) -
 
     created_updated = False
     git_updated = False
-    if should_update_version(existing_created_version, version_id, is_created=True):
+    locked_row = cursor.execute(
+        f"SELECT 1 FROM {QUEST_CREATED_VERSION_OVERRIDE_TABLE} WHERE questId=? LIMIT 1",
+        (quest_id,),
+    ).fetchone()
+    if locked_row is None and should_update_version(existing_created_version, version_id, is_created=True):
         cursor.execute(
             """
             UPDATE quest
@@ -3802,6 +3849,8 @@ _ENTITY_SNAPSHOT_FILE_KEYS = {
     "AvatarSkillExcelConfigData.json": "avatar_skills",
     "AvatarCostumeExcelConfigData.json": "avatar_costumes",
     "WeaponExcelConfigData.json": "weapons",
+    "TpsWeaponExcelConfigData.json": "tps_weapons",
+    "TpsWeaponAccessoryExcelConfigData.json": "tps_weapon_accessories",
     "ReliquaryExcelConfigData.json": "reliquaries",
     "AnimalCodexExcelConfigData.json": "codex",
     "AnimalDescribeExcelConfigData.json": "animal_describes",
@@ -3843,6 +3892,8 @@ def _load_entity_snapshot_data(repo_path: str, commit_sha: str) -> dict[str, obj
         "avatar_skills": rows_by_key.get("avatar_skills", []),
         "avatar_costumes": rows_by_key.get("avatar_costumes", []),
         "weapons": rows_by_key.get("weapons", []),
+        "tps_weapons": rows_by_key.get("tps_weapons", []),
+        "tps_weapon_accessories": rows_by_key.get("tps_weapon_accessories", []),
         "reliquaries": rows_by_key.get("reliquaries", []),
         "codex": rows_by_key.get("codex", []),
         "achievements": rows_by_key.get("achievements", []),
@@ -4427,6 +4478,12 @@ def validate_quest_versions(
                     return version_id
                 if source_type == SOURCE_TYPE_HANGOUT and source_code_raw == SOURCE_TYPE_HANGOUT:
                     return None
+                source_file_version = _resolve_quest_version_from_source_file(
+                    cursor,
+                    int(quest_id),
+                )
+                if source_file_version is not None:
+                    return source_file_version
                 _first_commit, version_id = _resolve_first_version_for_path(
                     repo_path,
                     f"BinOutput/Quest/{quest_id}.json",
@@ -4441,7 +4498,11 @@ def validate_quest_versions(
 
                     if task_type == "no_created_version":
                         quest_id, _created_version, git_version = quest
-                        if git_version:
+                        locked = cursor.execute(
+                            f"SELECT 1 FROM {QUEST_CREATED_VERSION_OVERRIDE_TABLE} WHERE questId=? LIMIT 1",
+                            (quest_id,),
+                        ).fetchone()
+                        if git_version and locked is None:
                             cursor.execute(
                                 "UPDATE quest SET created_version_id = ? WHERE questId = ?",
                                 (git_version, quest_id)
@@ -4452,7 +4513,7 @@ def validate_quest_versions(
                             pbar.update(1)
                         else:
                             version_id = _resolve_quest_first_version_id(quest_id)
-                            if version_id:
+                            if version_id and locked is None:
                                 cursor.execute(
                                     "UPDATE quest SET created_version_id = ? WHERE questId = ?",
                                     (version_id, quest_id)
@@ -4501,7 +4562,11 @@ def validate_quest_versions(
                         quest_id, created_version, git_version = quest
                         version_id = _resolve_quest_first_version_id(quest_id)
                         if version_id and version_id > 0:
-                            if created_version <= 0:
+                            locked = cursor.execute(
+                                f"SELECT 1 FROM {QUEST_CREATED_VERSION_OVERRIDE_TABLE} WHERE questId=? LIMIT 1",
+                                (quest_id,),
+                            ).fetchone()
+                            if created_version <= 0 and locked is None:
                                 cursor.execute(
                                     "UPDATE quest SET created_version_id = ? WHERE questId = ?",
                                     (version_id, quest_id)
@@ -4529,13 +4594,18 @@ def validate_quest_versions(
 
                     elif task_type == "quest_version_older":
                         quest_id, _lang, min_updated_version, _current_created_version = quest
-                        cursor.execute(
-                            "UPDATE quest SET created_version_id = ? WHERE questId = ?",
-                            (min_updated_version, quest_id)
-                        )
-                        fixed_count += 1
+                        locked = cursor.execute(
+                            f"SELECT 1 FROM {QUEST_CREATED_VERSION_OVERRIDE_TABLE} WHERE questId=? LIMIT 1",
+                            (quest_id,),
+                        ).fetchone()
+                        if locked is None:
+                            cursor.execute(
+                                "UPDATE quest SET created_version_id = ? WHERE questId = ?",
+                                (min_updated_version, quest_id)
+                            )
+                            fixed_count += 1
+                            _mark_fix_write()
                         processed += 1
-                        _mark_fix_write()
                         pbar.update(1)
 
             print(f"Processed {processed} anomaly task(s); fixed {fixed_count} row(s).")
@@ -4592,6 +4662,32 @@ def backfill_quest_versions_from_history(
 ) -> dict[str, int | str]:
     """执行任务版本快照回放。"""
     ensure_version_schema()
+    provenance_cursor = conn.cursor()
+    try:
+        provenance_stats = prepare_manual_created_version_overrides(
+            provenance_cursor,
+            required=True,
+        )
+        conn.commit()
+    finally:
+        provenance_cursor.close()
+    print(
+        "Quest version provenance gate prepared: "
+        f"locked={int(provenance_stats.get('locked_count', 0) or 0)}, "
+        f"audit={provenance_stats.get('audit_path', '')}"
+    )
+    pre_history_alignment_cursor = conn.cursor()
+    try:
+        pre_history_text_stats = refresh_quest_text_versions(pre_history_alignment_cursor)
+        conn.commit()
+    finally:
+        pre_history_alignment_cursor.close()
+    print(
+        "Quest pre-history task-text version alignment: "
+        f"hash_rows={pre_history_text_stats.get('association_rows', 0)}, "
+        f"shared_conflict_hashes={pre_history_text_stats.get('conflict_hashes', 0)}, "
+        f"unresolved={pre_history_text_stats.get('unresolved_rows', 0)}"
+    )
     repo_path = DATA_PATH
     replay_range = _resolve_snapshot_replay_range(
         repo_path,
@@ -4687,6 +4783,7 @@ def backfill_quest_versions_from_history(
     prefilled_updated_rows = 0
     final_total = 0
     final_unresolved_count = 0
+    text_provenance_stats: dict[str, int] = {}
 
     try:
         refreshed_qhm = _refresh_all_quest_hash_map(cursor, batch_size=batch_size)
@@ -4825,6 +4922,20 @@ def backfill_quest_versions_from_history(
     print("\n=== Quest Version Validation ===")
     validate_quest_versions(fix=True)
 
+    alignment_cursor = conn.cursor()
+    try:
+        text_provenance_stats = refresh_quest_text_versions(alignment_cursor)
+        conn.commit()
+    finally:
+        alignment_cursor.close()
+    print(
+        "Quest task-text version alignment: "
+        f"hash_rows={text_provenance_stats.get('association_rows', 0)}, "
+        f"adjustments={text_provenance_stats.get('textmap_adjustment_rows', 0)}, "
+        f"shared_conflict_hashes={text_provenance_stats.get('conflict_hashes', 0)}, "
+        f"unresolved={text_provenance_stats.get('unresolved_rows', 0)}"
+    )
+
     return {
         "replay_mode": replay_mode,
         "total_quests": final_total,
@@ -4832,6 +4943,11 @@ def backfill_quest_versions_from_history(
         "phase1_created_backfilled": prefilled_created_rows,
         "phase1_updated_backfilled": prefilled_updated_rows,
         "phase2_commit_created_backfilled": phase2_commit_created_backfilled,
+        "manual_locked_quests": int(provenance_stats.get("locked_count", 0) or 0),
+        "manual_locked_skipped": int(provenance_stats.get("locked_count", 0) or 0),
+        "task_text_hash_rows": int(text_provenance_stats.get("association_rows", 0) or 0),
+        "task_text_shared_conflict_hashes": int(text_provenance_stats.get("conflict_hashes", 0) or 0),
+        "task_text_unresolved_rows": int(text_provenance_stats.get("unresolved_rows", 0) or 0),
     }
 
 
@@ -4939,7 +5055,11 @@ def reset_history_version_marks(*, scope: str = "all"):
     try:
         for table_name in table_names:
             if table_name == 'quest':
-                cursor.execute(f"UPDATE {table_name} SET created_version_id=NULL, git_created_version_id=NULL")
+                cursor.execute(
+                    f"UPDATE {table_name} SET created_version_id=NULL, git_created_version_id=NULL "
+                    f"WHERE NOT EXISTS (SELECT 1 FROM {QUEST_CREATED_VERSION_OVERRIDE_TABLE} o "
+                    f"WHERE o.questId={table_name}.questId)"
+                )
                 cursor.execute("DELETE FROM quest_version")
             elif table_name in ('npc', 'text_source_entity'):
                 cursor.execute(f"UPDATE {table_name} SET created_version_id=NULL")

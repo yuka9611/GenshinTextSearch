@@ -16,6 +16,52 @@ QUEST_HASH_SOURCE_TYPE_DESC = "desc"
 QUEST_HASH_SOURCE_TYPE_LONG_DESC = "long_desc"
 QUEST_HASH_SOURCE_TYPE_DIALOGUE = "dialogue"
 TALK_DIALOGUE_LINK_TABLE = "talk_dialogue_link"
+TALK_DIALOGUE_CONTENT_TABLE = "talk_dialogue_content"
+
+
+def _table_exists(cursor, table_name: str) -> bool:
+    row = cursor.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name=? LIMIT 1",
+        (table_name,),
+    ).fetchone()
+    return row is not None
+
+
+def _table_has_rows(cursor, table_name: str) -> bool:
+    if not _table_exists(cursor, table_name):
+        return False
+    return cursor.execute(f"SELECT 1 FROM {table_name} LIMIT 1").fetchone() is not None
+
+
+def _ensure_talk_dialogue_content_schema(cursor):
+    """Keep the source-scoped dialogue payload beside the legacy link table.
+
+    ``dialogue.dialogueId`` is globally unique in the historical schema, but
+    AnimeGameData reuses that number across Talk scopes and source directories.
+    The scoped table preserves the actual hash/talker tuple without changing
+    the legacy table or its callers that only need a logical link.
+    """
+    cursor.execute(
+        f"""
+        CREATE TABLE IF NOT EXISTS {TALK_DIALOGUE_CONTENT_TABLE} (
+            talkId INTEGER NOT NULL,
+            coopQuestId INTEGER NOT NULL DEFAULT 0,
+            dialogueId INTEGER NOT NULL,
+            textHash INTEGER NOT NULL,
+            talkerId INTEGER,
+            talkerType TEXT,
+            PRIMARY KEY (talkId, coopQuestId, dialogueId, textHash)
+        )
+        """
+    )
+    cursor.execute(
+        f"CREATE INDEX IF NOT EXISTS {TALK_DIALOGUE_CONTENT_TABLE}_scope_index "
+        f"ON {TALK_DIALOGUE_CONTENT_TABLE}(talkId, coopQuestId, dialogueId)"
+    )
+    cursor.execute(
+        f"CREATE INDEX IF NOT EXISTS {TALK_DIALOGUE_CONTENT_TABLE}_hash_index "
+        f"ON {TALK_DIALOGUE_CONTENT_TABLE}(textHash)"
+    )
 QUEST_VERSION_TRACKED_HASH_SOURCE_TYPES = (
     QUEST_HASH_SOURCE_TYPE_TITLE,
     QUEST_HASH_SOURCE_TYPE_DIALOGUE,
@@ -48,13 +94,21 @@ def ensure_talk_dialogue_link_schema(cursor):
         f"CREATE INDEX IF NOT EXISTS {TALK_DIALOGUE_LINK_TABLE}_talkId_coopQuestId_index "
         f"ON {TALK_DIALOGUE_LINK_TABLE}(talkId, coopQuestId)"
     )
+    _ensure_talk_dialogue_content_schema(cursor)
 
 
 def _quest_talk_dialogue_link_join_sql(
+    cursor,
     qt_alias: str = "qt",
     tdl_alias: str = "tdl",
     d_alias: str = "d",
 ) -> str:
+    if _table_has_rows(cursor, TALK_DIALOGUE_CONTENT_TABLE):
+        return (
+            f"JOIN {TALK_DIALOGUE_CONTENT_TABLE} {d_alias} "
+            f"ON {d_alias}.talkId = {qt_alias}.talkId "
+            f"AND {d_alias}.coopQuestId = coalesce({qt_alias}.coopQuestId, 0) "
+        )
     return (
         f"JOIN {TALK_DIALOGUE_LINK_TABLE} {tdl_alias} "
         f"ON {tdl_alias}.talkId = {qt_alias}.talkId "
@@ -254,7 +308,7 @@ def _refresh_quest_hash_map_by_target_table(cursor):
         FROM questTalk qt
         JOIN _qhm_target_quest_id t ON t.questId = qt.questId
         """
-        + _quest_talk_dialogue_link_join_sql("qt", "tdl", "d")
+        + _quest_talk_dialogue_link_join_sql(cursor, "qt", "tdl", "d")
         + """
         WHERE d.textHash IS NOT NULL
           AND d.textHash <> 0

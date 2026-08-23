@@ -5,11 +5,13 @@ from import_utils import load_json_file
 
 _SUBTITLE_PATH_KEYS = [
     "AENCKCKHDFK",
+    "DEFNEHAFMMA",
     "dePath",
     "enPath",
     "esPath",
     "frPath",
     "HJBAJOBPLGE",
+    "JDNBKKPEFAI",
     "idPath",
     "INAGBNHLPIE",
     "itPath",
@@ -94,9 +96,14 @@ def build_readable_filename_map(localization_entries: list[dict], loc_id_to_titl
 
     for entry in localization_entries:
         loc_id = entry.get("id")
-        if loc_id not in loc_id_to_title_hash:
+        if not isinstance(loc_id, int) or not loc_id:
             continue
-        title_hash = loc_id_to_title_hash[loc_id]
+        # Some 7.0 readable files have a valid Localization id/path but no
+        # DocumentExcelConfigData row.  Keep the proven file ownership and
+        # readable id while leaving the title hash unknown; downstream metadata
+        # must classify these as READABLE rather than inventing a title/BOOK
+        # relationship from the filename.
+        title_hash = loc_id_to_title_hash.get(loc_id)
         for value in entry.values():
             if isinstance(value, str) and "Readable" in value:
                 add_mapping(value, title_hash, loc_id)

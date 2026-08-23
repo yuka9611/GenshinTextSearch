@@ -24,6 +24,10 @@ from version_control import (
     rebuild_version_catalog,
     set_current_version,
 )
+from quest_version_provenance import (
+    prepare_manual_created_version_overrides,
+    refresh_quest_text_versions,
+)
 
 
 class StageTimer:
@@ -130,6 +134,7 @@ def importTalk(
     log_skip: bool = True,
     refresh_hash_map: bool = True,
     touched_talk_collector: set[int] | None = None,
+    replace_scope: bool = True,
 ) -> int:
     return questImport.importTalk(
         fileName,
@@ -140,6 +145,7 @@ def importTalk(
         log_skip=log_skip,
         refresh_hash_map=refresh_hash_map,
         touched_talk_collector=touched_talk_collector,
+        replace_scope=replace_scope,
     )
 
 
@@ -166,6 +172,17 @@ def importAllTalkItems(
     batch_size: int = DEFAULT_BATCH_SIZE,
 ) -> int:
     return questImport.importAllTalkItems(
+        commit=commit,
+        batch_size=batch_size,
+    )
+
+
+def mergeAllTalkItems(
+    *,
+    commit: bool = True,
+    batch_size: int = DEFAULT_BATCH_SIZE,
+) -> int:
+    return questImport.mergeAllTalkItems(
         commit=commit,
         batch_size=batch_size,
     )
@@ -499,6 +516,20 @@ def main(
 ):
     stage_timer = StageTimer(enabled=enable_stage_profile)
     ensure_version_schema()
+    provenance_cursor = conn.cursor()
+    try:
+        provenance_stats = prepare_manual_created_version_overrides(
+            provenance_cursor,
+            required=True,
+        )
+        conn.commit()
+    finally:
+        provenance_cursor.close()
+    print(
+        "Full import quest provenance gate prepared: "
+        f"locked={int(provenance_stats.get('locked_count', 0) or 0)}, "
+        f"audit={provenance_stats.get('audit_path', '')}"
+    )
     # 确保断点表结构存在
     ensure_breakpoint_schema()
 
@@ -624,6 +655,19 @@ def main(
                 )
             elif stage == "version_catalog":
                 _run_stage(stage_timer, stage, rebuild_version_catalog, skip_asking=True)
+    provenance_cursor = conn.cursor()
+    try:
+        text_provenance_stats = refresh_quest_text_versions(provenance_cursor)
+        conn.commit()
+    finally:
+        provenance_cursor.close()
+    print(
+        "Full import task-text version alignment: "
+        f"hash_rows={text_provenance_stats.get('association_rows', 0)}, "
+        f"adjustments={text_provenance_stats.get('textmap_adjustment_rows', 0)}, "
+        f"shared_conflict_hashes={text_provenance_stats.get('conflict_hashes', 0)}, "
+        f"unresolved={text_provenance_stats.get('unresolved_rows', 0)}"
+    )
     stage_timer.print_summary()
     print("Done!")
 

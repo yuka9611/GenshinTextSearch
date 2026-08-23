@@ -82,6 +82,8 @@ SUB_QIANXING_POSE = 32      # 动作
 SUB_QIANXING_EFFECT = 33    # 特效
 SUB_QIANXING_HALL = 34      # 大厅设施
 SUB_AVATAR_SKILL = 35       # 角色技能
+SUB_TPS_WEAPON_ACCESSORY = 36  # TPS 武器配件图纸
+SUB_TPS_CLOAK_UPGRADE = 37     # TPS 战斗装束披风升级
 
 # ── materialType → (source_type_code, sub_category_code) ─────────
 MATERIAL_TYPE_TO_CATEGORY: dict[str, tuple[int, int]] = {
@@ -166,6 +168,12 @@ MATERIAL_TYPE_TO_CATEGORY: dict[str, tuple[int, int]] = {
     "MATERIAL_SEA_LAMP":                    (SOURCE_TYPE_ITEM, SUB_WIDGET),
     "MATERIAL_ARANARA":                     (SOURCE_TYPE_ITEM, SUB_QUEST_ITEM),
     "MATERIAL_DESHRET_MANUAL":              (SOURCE_TYPE_ITEM, SUB_QUEST_ITEM),
+    # 7.0 types are classified from Material descriptions and their dedicated
+    # TpsWeapon/TpsWeaponAccessory relations, not from the names alone.
+    "MATERIAL_ODETTE_QUEST_PHOTO_BOOK":     (SOURCE_TYPE_ITEM, SUB_QUEST_ITEM),
+    "MATERIAL_ZDAQ_BOOK_PHOTO":             (SOURCE_TYPE_ITEM, SUB_QUEST_ITEM),
+    "MATERIAL_TPS_ACCESSORY":               (SOURCE_TYPE_BLUEPRINT, SUB_TPS_WEAPON_ACCESSORY),
+    "MATERIAL_TPS_CLOAK_UPGRADE":           (SOURCE_TYPE_DRESSING, SUB_TPS_CLOAK_UPGRADE),
 }
 
 # ── 二级分类标签（也供 controllers 使用）────────────────────────────
@@ -206,6 +214,8 @@ SUB_CATEGORY_LABELS: dict[int, str] = {
     SUB_QIANXING_EFFECT: "特效",
     SUB_QIANXING_HALL: "大厅设施",
     SUB_AVATAR_SKILL: "角色技能",
+    SUB_TPS_WEAPON_ACCESSORY: "TPS武器配件图纸",
+    SUB_TPS_CLOAK_UPGRADE: "TPS披风升级",
 }
 
 # ── 内置大分类标签 ─────────────────────────────────────────────────

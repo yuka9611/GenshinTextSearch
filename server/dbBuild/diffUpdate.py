@@ -9,7 +9,7 @@ from lightweight_progress import LightweightProgress
 
 from DBConfig import conn, DATA_PATH, LANG_PATH
 import DBBuild
-from genshin_data_core.talk import is_non_dialog_talk_obj
+from genshin_data_core.talk import extract_talk_id, is_non_dialog_talk_obj
 import voiceItemImport
 import readableImport
 import readableMetaImport
@@ -28,6 +28,10 @@ from version_control import (
     get_or_create_version_id,
     rebuild_version_catalog,
     set_current_version,
+)
+from quest_version_provenance import (
+    prepare_manual_created_version_overrides,
+    refresh_quest_text_versions,
 )
 from versioning import resolve_version_label
 
@@ -351,21 +355,79 @@ def _resolve_talk_keys(obj: dict):
         return "KFCNJPJOJLA"
     if "LDLMECNIJFC" in obj and "GDDPNNHLGBL" in obj:
         return "LDLMECNIJFC"
+    if "IOKNFDJFGDH" in obj and "PFALHAKIILD" in obj:
+        return "IOKNFDJFGDH"
     return None
 
 
 def _extract_talk_scope(file_name: str, obj: dict):
     talk_key = _resolve_talk_keys(obj)
-    if talk_key is None:
-        return None
-    talk_id = obj.get(talk_key)
+    talk_id = obj.get(talk_key) if talk_key is not None else extract_talk_id(obj)
     if talk_id is None:
         return None
 
     normalized_file_name = _normalize_talk_rel_path(file_name) or ""
     coop_match = re.match(r"^Coop[\\/]([0-9]+)_[0-9]+.json$", normalized_file_name)
-    coop_quest_id = int(coop_match.group(1)) if coop_match else None
-    return talk_id, coop_quest_id
+    # Database and parser scope keys use 0 for ordinary Talk files. Keeping
+    # ``None`` here creates mixed ``(talk_id, None)`` / ``(talk_id, int)``
+    # tuples for reused IDs, which cannot be sorted on Python 3.
+    coop_quest_id = int(coop_match.group(1)) if coop_match else 0
+    try:
+        return int(talk_id), coop_quest_id
+    except (TypeError, ValueError):
+        return None
+
+
+def _collect_local_talk_scope_files() -> dict[tuple[int, int], list[str]]:
+    """Index current Talk source files by their logical import scope.
+
+    Talk IDs are not unique across source directories.  Rebuilding an affected
+    scope from every current path prevents a changed Activity/FreeGroup/Quest
+    file from deleting a different payload that shares the same logical ID.
+    """
+    talk_root = os.path.join(DATA_PATH, "BinOutput", "Talk")
+    scopes: dict[tuple[int, int], list[str]] = {}
+    if not os.path.isdir(talk_root):
+        return scopes
+
+    for root, _dirs, files in os.walk(talk_root):
+        for file_name in sorted(files):
+            if not file_name.endswith(".json"):
+                continue
+            full_path = os.path.join(root, file_name)
+            relative = os.path.relpath(full_path, talk_root).replace(os.sep, "/")
+            try:
+                with open(full_path, encoding="utf-8") as handle:
+                    obj = json.load(handle)
+            except (OSError, json.JSONDecodeError):
+                continue
+            scope = _extract_talk_scope(relative, obj)
+            if scope is None:
+                continue
+            scopes.setdefault(scope, []).append(relative)
+
+    for paths in scopes.values():
+        paths.sort()
+    return scopes
+
+
+def _rebuild_talk_scope_from_local(
+    scope: tuple[int, int],
+    source_paths: list[str],
+    talk_skipped_files: list[str],
+) -> None:
+    """Replace one logical Talk scope with the union of current source paths."""
+    talk_id, coop_quest_id = scope
+    _delete_talk_scope(talk_id, coop_quest_id)
+    for source_path in source_paths:
+        DBBuild.importTalk(
+            source_path,
+            commit=True,
+            skip_collector=talk_skipped_files,
+            log_skip=False,
+            refresh_hash_map=False,
+            replace_scope=False,
+        )
 
 
 def _delete_talk_scope(talk_id: int, coop_quest_id: int | None):
@@ -413,7 +475,11 @@ def _replace_talk_file_from_local(talk_file_rel: str):
     with open(full_path, encoding="utf-8") as f:
         obj = json.load(f)
     if is_non_dialog_talk_obj(obj):
-        return None, False
+        # 7.0 includes empty/container Talk files in the diff.  They are
+        # intentionally not dialogue payloads; keep the second return value
+        # as a skip marker so the stage can distinguish them from a real
+        # schema/path failure.
+        return None, True
     scope = _extract_talk_scope(normalized_talk_file_rel, obj)
     if scope is not None:
         _delete_talk_scope(scope[0], scope[1])
@@ -642,6 +708,13 @@ def _init_diff_update():
     _ensure_version_tables()
     ensure_version_schema()
     cur = conn.cursor()
+    provenance_stats = prepare_manual_created_version_overrides(cur, required=True)
+    conn.commit()
+    print(
+        "Diff update quest provenance gate prepared: "
+        f"locked={int(provenance_stats.get('locked_count', 0) or 0)}, "
+        f"audit={provenance_stats.get('audit_path', '')}"
+    )
     required_tables = ("dialogue", "quest", "textMap", "readable", "subtitle")
     existing = {
         row[0]
@@ -773,19 +846,31 @@ def _process_talk_stage(plan, repo_path, base_commit):
     处理talk阶段
     """
     talk_skipped_files: list[str] = []
+    intentional_non_dialog_files: list[str] = []
     touched_talk_ids: set[int] = set()
     anomalies = []
+    affected_scopes: set[tuple[int, int]] = set()
+    local_scope_files = _collect_local_talk_scope_files()
 
     # 处理删除的talk文件
     for talk_file in sorted(plan["talk_deleted"]):
-        deleted_talk_id = _delete_talk_file_from_old_commit(repo_path, base_commit, talk_file)
-        if deleted_talk_id is not None:
-            try:
-                touched_talk_ids.add(int(deleted_talk_id))
-            except (ValueError, TypeError) as e:
-                anomalies.append(
-                    f"Invalid talk ID format in deleted file {talk_file}: {str(e)}"
-                )
+        normalized_talk_file = _normalize_talk_rel_path(talk_file)
+        old_obj = (
+            _get_blob_json(
+                repo_path,
+                base_commit,
+                f"BinOutput/Talk/{normalized_talk_file}",
+            )
+            if normalized_talk_file is not None
+            else None
+        )
+        deleted_scope = (
+            _extract_talk_scope(normalized_talk_file, old_obj)
+            if normalized_talk_file is not None and isinstance(old_obj, dict)
+            else None
+        )
+        if deleted_scope is not None:
+            affected_scopes.add(deleted_scope)
         else:
             anomalies.append(
                 f"Failed to process deleted talk file {talk_file}"
@@ -793,20 +878,46 @@ def _process_talk_stage(plan, repo_path, base_commit):
 
     # 处理变更的talk文件
     for talk_file in sorted(plan["talk_changed"]):
-        changed_talk_id, skipped = _replace_talk_file_from_local(talk_file)
-        if changed_talk_id is not None:
-            try:
-                touched_talk_ids.add(int(changed_talk_id))
-            except (ValueError, TypeError) as e:
+        normalized_talk_file = _normalize_talk_rel_path(talk_file)
+        full_path = (
+            _resolve_local_talk_path(normalized_talk_file)
+            if normalized_talk_file is not None
+            else None
+        )
+        try:
+            with open(full_path, encoding="utf-8") as handle:
+                changed_obj = json.load(handle)
+        except (OSError, TypeError, json.JSONDecodeError):
+            changed_obj = None
+
+        changed_scope = (
+            _extract_talk_scope(normalized_talk_file, changed_obj)
+            if normalized_talk_file is not None and isinstance(changed_obj, dict)
+            else None
+        )
+        if changed_scope is not None:
+            affected_scopes.add(changed_scope)
+            if normalized_talk_file not in local_scope_files.get(changed_scope, []):
                 anomalies.append(
-                    f"Invalid talk ID format in changed file {talk_file}: {str(e)}"
+                    f"Changed talk file is not available in the local scope index: {talk_file}"
                 )
+        elif isinstance(changed_obj, dict) and is_non_dialog_talk_obj(changed_obj):
+            intentional_non_dialog_files.append(talk_file)
         else:
             anomalies.append(
                 f"Failed to process changed talk file {talk_file}"
             )
-        if skipped:
-            talk_skipped_files.append(talk_file)
+
+    # Rebuild each affected logical scope from all current source paths.  This
+    # keeps distinct source payloads when a Talk ID is reused by multiple
+    # directories, while retaining the existing link-based query semantics.
+    for scope in sorted(affected_scopes):
+        _rebuild_talk_scope_from_local(
+            scope,
+            local_scope_files.get(scope, []),
+            talk_skipped_files,
+        )
+        touched_talk_ids.add(int(scope[0]))
 
     # 刷新quest哈希映射
     if touched_talk_ids:
@@ -818,6 +929,12 @@ def _process_talk_stage(plan, repo_path, base_commit):
             )
 
     _print_skip_summary("diffupdate talk", talk_skipped_files)
+    if intentional_non_dialog_files:
+        print(
+            "[diffupdate talk] intentionally skipped non-dialog/container files: "
+            f"{len(intentional_non_dialog_files)}",
+            flush=True,
+        )
 
     if talk_skipped_files:
         anomalies.append(
@@ -1462,12 +1579,38 @@ def run_diff_update(
         mark_stage("source_file_version")
 
     if not stage_done("version_catalog"):
+        pre_history_cursor = conn.cursor()
+        try:
+            pre_history_text_stats = refresh_quest_text_versions(pre_history_cursor)
+            conn.commit()
+        finally:
+            pre_history_cursor.close()
+        print(
+            "Diff update pre-history task-text version alignment: "
+            f"hash_rows={pre_history_text_stats.get('association_rows', 0)}, "
+            f"shared_conflict_hashes={pre_history_text_stats.get('conflict_hashes', 0)}, "
+            f"unresolved={pre_history_text_stats.get('unresolved_rows', 0)}"
+        )
         _process_version_catalog_stage(plan, target_commit, base_commit)
         mark_stage("version_catalog")
 
     if not stage_done("finalize"):
         _process_finalize_stage(target_commit, normalized_remote_ref, target_version)
         mark_stage("finalize")
+
+    provenance_cursor = conn.cursor()
+    try:
+        text_provenance_stats = refresh_quest_text_versions(provenance_cursor)
+        conn.commit()
+    finally:
+        provenance_cursor.close()
+    print(
+        "Diff update task-text version alignment: "
+        f"hash_rows={text_provenance_stats.get('association_rows', 0)}, "
+        f"adjustments={text_provenance_stats.get('textmap_adjustment_rows', 0)}, "
+        f"shared_conflict_hashes={text_provenance_stats.get('conflict_hashes', 0)}, "
+        f"unresolved={text_provenance_stats.get('unresolved_rows', 0)}"
+    )
 
     _clear_diff_resume_state()
     _print_anomaly_summary(anomalies)
