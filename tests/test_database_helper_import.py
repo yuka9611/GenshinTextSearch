@@ -123,6 +123,68 @@ def test_version_filter_values_preserve_created_updated_split(monkeypatch):
     assert sorted(filters["updated"]) == ["4.1", "4.2"]
 
 
+def test_current_version_falls_back_to_app_meta_without_dbbuild(monkeypatch):
+    import databaseHelper
+
+    connection = sqlite3.connect(":memory:")
+    connection.execute("CREATE TABLE app_meta (k TEXT PRIMARY KEY, v TEXT)")
+    connection.executemany(
+        "INSERT INTO app_meta(k, v) VALUES (?, ?)",
+        [
+            (
+                "db_current_commit",
+                "be8d439be0796208fa6533d7e9f3eefaa7ecab26",
+            ),
+            (
+                "db_current_commit_title",
+                "CNRELWin7.0.0_R47194594_S46814653_D47194594",
+            ),
+        ],
+    )
+    monkeypatch.setattr(databaseHelper, "conn", connection)
+    monkeypatch.setattr(databaseHelper, "_versioning_get_current_version", None)
+
+    assert (
+        databaseHelper.get_current_version()
+        == "CNRELWin7.0.0_R47194594_S46814653_D47194594"
+    )
+
+    connection.execute(
+        "DELETE FROM app_meta WHERE k=?", ("db_current_commit_title",)
+    )
+    assert (
+        databaseHelper.get_current_version()
+        == "be8d439be0796208fa6533d7e9f3eefaa7ecab26"
+    )
+
+    connection.execute("DELETE FROM app_meta")
+    assert databaseHelper.get_current_version("fallback") == "fallback"
+
+
+def test_current_version_uses_app_meta_when_dbbuild_reader_fails(monkeypatch):
+    import databaseHelper
+
+    connection = sqlite3.connect(":memory:")
+    connection.execute("CREATE TABLE app_meta (k TEXT PRIMARY KEY, v TEXT)")
+    connection.execute(
+        "INSERT INTO app_meta(k, v) VALUES (?, ?)",
+        ("db_current_commit_title", "CNRELWin7.0.0_R47194594_S46814653_D47194594"),
+    )
+
+    def fail_version_reader(_default):
+        raise sqlite3.DatabaseError("unavailable")
+
+    monkeypatch.setattr(databaseHelper, "conn", connection)
+    monkeypatch.setattr(
+        databaseHelper, "_versioning_get_current_version", fail_version_reader
+    )
+
+    assert (
+        databaseHelper.get_current_version()
+        == "CNRELWin7.0.0_R47194594_S46814653_D47194594"
+    )
+
+
 def test_get_talker_name_uses_display_names_for_special_roles(monkeypatch):
     import databaseHelper
 

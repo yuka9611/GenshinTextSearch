@@ -3662,7 +3662,24 @@ def getTextMapByHash(hash_val: str, lang: int):
         return result[0] if result else None
 
 
-# 从 dbBuild/versioning.py 导入 get_current_version 函数
+# 从 dbBuild/versioning.py 导入 get_current_version 函数。精简部署可能不会包含
+# dbBuild；这种情况下仍应直接从运行时数据库元数据读取当前版本。
+def _get_current_version_from_app_meta(default: str = "unknown") -> str:
+    try:
+        with closing(conn.cursor()) as cursor:
+            for key in ("db_current_commit_title", "db_current_commit"):
+                row = cursor.execute(
+                    "SELECT v FROM app_meta WHERE k=? LIMIT 1", (key,)
+                ).fetchone()
+                if row and row[0]:
+                    value = str(row[0]).strip()
+                    if value:
+                        return value
+    except (AttributeError, sqlite3.DatabaseError):
+        pass
+    return default
+
+
 try:
     import sys
     import os
@@ -3677,13 +3694,20 @@ try:
     if spec and spec.loader:
         versioning = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(versioning)
-        get_current_version = versioning.get_current_version
+        _versioning_get_current_version = versioning.get_current_version
     else:
         raise ImportError("Failed to create module spec")
 except Exception:
-    # 如果导入失败，定义一个默认函数
-    def get_current_version():
-        return "unknown"
+    _versioning_get_current_version = None
+
+
+def get_current_version(default: str = "unknown") -> str:
+    if _versioning_get_current_version is not None:
+        try:
+            return _versioning_get_current_version(default)
+        except Exception:
+            pass
+    return _get_current_version_from_app_meta(default)
 
 
 def getVersionData(lang_code: int | None = None, include_current: bool = False):
