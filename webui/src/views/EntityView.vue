@@ -6,6 +6,7 @@ import api from '@/api/keywordQuery'
 import StylizedText from '@/components/StylizedText.vue'
 import useLanguage from '@/composables/useLanguage'
 import { getReadableCategoryLabel } from '@/utils/readableCategory'
+import useDisplayPreferenceRefresh from '@/composables/useDisplayPreferenceRefresh'
 
 const uiText = {
   pageTitle: '来源详情',
@@ -235,6 +236,8 @@ const loadEntity = async () => {
     loading.value = false
   }
 }
+
+useDisplayPreferenceRefresh(loadEntity, () => route.name === 'entityView')
 
 onBeforeMount(async () => {
   await loadLanguages()

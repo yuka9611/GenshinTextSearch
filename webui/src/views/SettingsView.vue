@@ -136,6 +136,7 @@
 import global from "@/global/global"
 import api from "@/api/basicInfo"
 import requestCache from "@/utils/requestCache"
+import { getDisplayPreferencesFingerprint } from "@/utils/displayPreferences"
 import { computed, onBeforeMount, ref } from "vue"
 import { ElMessage } from "element-plus"
 import useLanguage from "@/composables/useLanguage"
@@ -184,6 +185,15 @@ const voiceTagList = computed(() => {
     .sort((a, b) => Number(a.code) - Number(b.code))
 })
 const assetDirDirty = computed(() => assetDirDraft.value.trim() !== String(global.config.assetDir || "").trim())
+
+const applySavedPreferences = (preferences) => {
+  const previousDisplayPreferences = getDisplayPreferencesFingerprint()
+  Object.assign(global.config, preferences)
+  requestCache.clear()
+  if (getDisplayPreferencesFingerprint() !== previousDisplayPreferences) {
+    global.displayPreferencesRevision += 1
+  }
+}
 
 const syncAssetDirState = (data = {}) => {
   global.config.assetDir = data.assetDir || ""
@@ -363,8 +373,7 @@ const save = async () => {
 
     if (global.runtime.cloudMode) {
       const result = await saveUserPreferences(preferences)
-      Object.assign(global.config, result.preferences)
-      requestCache.clear()
+      applySavedPreferences(result.preferences)
       ElMessage({
         type: "success",
         message: result.synced && isSignedIn.value ? "检索偏好已同步到账号" : "检索偏好已保存到当前浏览器",
@@ -382,11 +391,12 @@ const save = async () => {
     if (response.json) {
       const newConfig = response.json
 
-      global.config.resultLanguages = newConfig.resultLanguages
-      global.config.defaultSearchLanguage = newConfig.defaultSearchLanguage
-      global.config.sourceLanguage = newConfig.sourceLanguage
-      global.config.isMale = newConfig.isMale
-      requestCache.clear()
+      applySavedPreferences({
+        resultLanguages: newConfig.resultLanguages,
+        defaultSearchLanguage: newConfig.defaultSearchLanguage,
+        sourceLanguage: newConfig.sourceLanguage,
+        isMale: newConfig.isMale,
+      })
 
       // 后端新版 getConfig() 会带 assetDirValid
       if (typeof newConfig.assetDirValid !== "undefined") {

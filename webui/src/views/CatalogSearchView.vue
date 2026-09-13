@@ -5,6 +5,7 @@ import { ElMessage } from 'element-plus'
 import api from '@/api/keywordQuery'
 import useLanguage from '@/composables/useLanguage'
 import useVersion from '@/composables/useVersion'
+import useDisplayPreferenceRefresh from '@/composables/useDisplayPreferenceRefresh'
 import SearchBar from '@/components/SearchBar.vue'
 import VersionFilter from '@/components/VersionFilter.vue'
 import ActiveFilterTags from '@/components/ActiveFilterTags.vue'
@@ -143,6 +144,11 @@ const handleSearch = () => {
   currentPage.value = 1
   doSearch(1)
 }
+
+useDisplayPreferenceRefresh(
+  () => doSearch(currentPage.value),
+  () => hasSearchCriteria.value,
+)
 
 const handlePageChange = (page) => {
   doSearch(page)

@@ -9,6 +9,7 @@ import useVersion from '@/composables/useVersion'
 import useSearchCommon from '@/composables/useSearchCommon'
 import ActiveFilterTags from '@/components/ActiveFilterTags.vue'
 import formatText from '@/utils/formatText'
+import useDisplayPreferenceRefresh from '@/composables/useDisplayPreferenceRefresh'
 
 const uiText = {
   pageTitle: '角色故事搜索',
@@ -227,6 +228,26 @@ const onAvatarClicked = async (avatar) => {
     loadingStories.value = false
   }
 }
+
+const refreshStoryResults = async () => {
+  const avatar = selectedAvatar.value
+  if (avatar && !useGlobalStoryEntries.value) {
+    await onAvatarClicked(avatar)
+    return
+  }
+  await onSearchClicked()
+}
+
+useDisplayPreferenceRefresh(
+  refreshStoryResults,
+  () => Boolean(
+    selectedAvatar.value ||
+    keyword.value.trim() ||
+    textFilter.value.trim() ||
+    createdVersionFilter.value.trim() ||
+    updatedVersionFilter.value.trim()
+  ),
+)
 
 setupVersionWatchers(onSearchClicked)
 

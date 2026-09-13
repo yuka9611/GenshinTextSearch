@@ -6,6 +6,7 @@ import SearchBar from '@/components/SearchBar.vue'
 import ActiveFilterTags from '@/components/ActiveFilterTags.vue'
 import useLanguage from '@/composables/useLanguage'
 import useVersion from '@/composables/useVersion'
+import useDisplayPreferenceRefresh from '@/composables/useDisplayPreferenceRefresh'
 
 const router = useRouter()
 
@@ -175,6 +176,28 @@ const loadDialogueGroups = async (page = 1) => {
     loadingDialogues.value = false
   }
 }
+
+const refreshNpcResults = async () => {
+  const previousNpc = selectedNpc.value
+  const previousPage = dialoguePage.value
+  await onNpcSearchClicked()
+  if (!previousNpc) return
+
+  const previousKey = getNpcCardKey(previousNpc)
+  const refreshedNpc = npcResults.value.find((entry) => getNpcCardKey(entry) === previousKey)
+  if (!refreshedNpc) return
+  selectedNpc.value = refreshedNpc
+  await loadDialogueGroups(previousPage)
+}
+
+useDisplayPreferenceRefresh(
+  refreshNpcResults,
+  () => npcSearched.value && Boolean(
+    npcKeyword.value.trim() ||
+    npcCreatedVersionFilter.value.trim() ||
+    npcUpdatedVersionFilter.value.trim()
+  ),
+)
 
 const onNpcClicked = async (npc) => {
   selectedNpc.value = npc

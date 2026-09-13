@@ -147,6 +147,7 @@ import VersionFilter from '@/components/VersionFilter.vue'
 import ActiveFilterTags from '@/components/ActiveFilterTags.vue'
 import useSearch from '@/composables/useSearch'
 import useAudioPlayer from '@/composables/useAudioPlayer'
+import useDisplayPreferenceRefresh from '@/composables/useDisplayPreferenceRefresh'
 
 
 
@@ -215,6 +216,8 @@ const handleSearch = async () => {
   hasSearched.value = true
   await onQueryButtonClicked()
 }
+
+useDisplayPreferenceRefresh(handleSearch, () => hasSearched.value)
 
 const clearFilter = (key) => {
   const map = {

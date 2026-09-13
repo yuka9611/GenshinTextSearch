@@ -1,4 +1,5 @@
 import { ref } from 'vue'
+import { getDisplayPreferencesFingerprint } from '@/utils/displayPreferences'
 
 class RequestCache {
   constructor() {
@@ -116,7 +117,8 @@ const requestCache = new RequestCache()
 export const withCache = (fn, cacheKeyFn) => {
   return async (...args) => {
     // 生成缓存键
-    const cacheKey = cacheKeyFn ? cacheKeyFn(...args) : fn.name + '_' + JSON.stringify(args)
+    const baseKey = cacheKeyFn ? cacheKeyFn(...args) : fn.name + '_' + JSON.stringify(args)
+    const cacheKey = `${baseKey}_${getDisplayPreferencesFingerprint()}`
     
     // 尝试从缓存获取
     const cachedData = requestCache.get(cacheKey, {})

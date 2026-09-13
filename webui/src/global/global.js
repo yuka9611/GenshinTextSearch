@@ -10,6 +10,7 @@ const globalState = reactive({
         settingsWritable: true,
         voicePlaybackEnabled: true,
     },
+    displayPreferencesRevision: 0,
     theme: document.documentElement.getAttribute('data-theme') || 'light',
 });
 

@@ -5,6 +5,7 @@ import router from "@/router"
 import { sanitizePayload, sanitizeText } from "@/utils/textSanitizer"
 import { apiBaseUrl } from "@/utils/apiUrl"
 import { recordSearchFromResponse } from "@/services/userData"
+import { injectDisplayPreferences } from "@/utils/displayPreferences"
 
 const MSG = Object.freeze({
     error: "错误",
@@ -34,6 +35,7 @@ if (apiBaseUrl) {
 }
 
 service.interceptors.request.use((config) => {
+    injectDisplayPreferences(config)
     if (!config.doNotShowLoadingScreen) {
         loadingScreen.startLoading()
     }

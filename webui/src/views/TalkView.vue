@@ -9,6 +9,7 @@ import StylizedText from "@/components/StylizedText.vue";
 import AudioPlayer from "@liripeng/vue-audio-player";
 import {Close, CopyDocument, VideoPlay} from "@element-plus/icons-vue";
 import {ElMessage} from "element-plus";
+import useDisplayPreferenceRefresh from '@/composables/useDisplayPreferenceRefresh'
 
 const UI_TEXT = Object.freeze({
     taskText: "任务文本",
@@ -459,7 +460,7 @@ const shouldShowUpdatedVersionTag = (createdTag, createdRaw, updatedTag, updated
 const displayLanguages = computed(() => {
     let langs = [...global.config.resultLanguages]
     let searchLang = parseInt(route.query.searchLang)
-    if (searchLang && !langs.includes(searchLang)) {
+    if (!global.runtime.cloudMode && searchLang && !langs.includes(searchLang)) {
         langs.push(searchLang)
     }
     return langs
@@ -667,6 +668,8 @@ const tableRowClassName = ({row, rowIndex}) => {
     }
     return classNames.join(' ')
 }
+
+useDisplayPreferenceRefresh(reloadPage, () => route.name === 'talkView')
 
 watch(() => route.fullPath, () => {
     if (route.name !== 'talkView') {

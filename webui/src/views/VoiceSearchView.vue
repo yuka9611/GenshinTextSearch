@@ -14,6 +14,7 @@ import useVersion from '@/composables/useVersion'
 import useSearchCommon from '@/composables/useSearchCommon'
 import ActiveFilterTags from '@/components/ActiveFilterTags.vue'
 import formatText from '@/utils/formatText'
+import useDisplayPreferenceRefresh from '@/composables/useDisplayPreferenceRefresh'
 
 const uiText = {
   pageTitle: '角色语音搜索',
@@ -320,6 +321,26 @@ const onAvatarClicked = async (avatar) => {
     loadingVoices.value = false
   }
 }
+
+const refreshVoiceResults = async () => {
+  const avatar = selectedAvatar.value
+  if (avatar && !useGlobalVoiceEntries.value) {
+    await onAvatarClicked(avatar)
+    return
+  }
+  await onSearchClicked()
+}
+
+useDisplayPreferenceRefresh(
+  refreshVoiceResults,
+  () => Boolean(
+    selectedAvatar.value ||
+    keyword.value.trim() ||
+    textFilter.value.trim() ||
+    createdVersionFilter.value.trim() ||
+    updatedVersionFilter.value.trim()
+  ),
+)
 
 const onVoicePlay = (voiceUrl) => {
   if (!voiceUrl) return

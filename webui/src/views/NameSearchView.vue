@@ -10,6 +10,7 @@ import useSearchCommon from '@/composables/useSearchCommon'
 import ActiveFilterTags from '@/components/ActiveFilterTags.vue'
 import formatText from '@/utils/formatText'
 import { READABLE_CATEGORY_OPTIONS, getReadableCategoryLabel } from '@/utils/readableCategory'
+import useDisplayPreferenceRefresh from '@/composables/useDisplayPreferenceRefresh'
 
 const router = useRouter()
 
@@ -193,6 +194,8 @@ const onSearchClicked = async () => {
 
   updateSearchSummary()
 }
+
+useDisplayPreferenceRefresh(onSearchClicked, () => hasSearched.value)
 
 watch(mode, async () => {
   if (!hasModeSpecificFilters()) {

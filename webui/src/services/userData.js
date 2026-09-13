@@ -177,7 +177,7 @@ const extractResultCount = (searchType, responseData) => {
 }
 
 const cleanFilters = (payload = {}) => {
-  const excluded = new Set(['keyword', 'titleKeyword', 'page', 'pageSize'])
+  const excluded = new Set(['keyword', 'titleKeyword', 'page', 'pageSize', 'displayPreferences'])
   return Object.fromEntries(
     Object.entries(payload).filter(([key, value]) => {
       if (excluded.has(key)) return false
