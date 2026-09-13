@@ -88,6 +88,92 @@ class TestSearchCache:
             controllers.search_cache.clear()
 
 
+class TestRequestResultLanguages:
+    def test_query_text_hash_uses_only_explicit_request_languages(self, monkeypatch, tmp_config):
+        calls = []
+
+        def fake_select(text_hash, langs=None):
+            calls.append(langs)
+            if langs == [9]:
+                return [("日本語", 9)]
+            if langs is None:
+                return [("fallback", 4)]
+            return []
+
+        monkeypatch.setattr(controllers.databaseHelper, "selectTextMapFromTextHash", fake_select)
+        monkeypatch.setattr(controllers, "selectVoicePathFromTextHash", lambda text_hash: [])
+        monkeypatch.setattr(controllers, "_attach_voice_metadata", lambda obj, paths, langs: None)
+        monkeypatch.setattr(
+            controllers.databaseHelper,
+            "getTextMapVersionInfo",
+            lambda text_hash, source_lang: (None, None),
+        )
+
+        token = tmp_config.push_request_display_preferences({
+            "resultLanguages": [9],
+            "sourceLanguage": 4,
+            "isMale": True,
+        })
+        try:
+            result = controllers.queryTextHashInfo(123, [9], 4, queryOrigin=False)
+        finally:
+            tmp_config.reset_request_display_preferences(token)
+
+        assert result["translates"] == {"9": "日本語"}
+        assert calls == [[9]]
+
+    def test_translate_cache_uses_request_display_preference_fingerprint(self, monkeypatch, tmp_config):
+        controllers.search_cache.clear()
+        calls = []
+        try:
+            monkeypatch.setattr(controllers, "_enrich_primary_sources", lambda contents, source_lang_code: None)
+
+            def fake_keyword_query(*_args, **_kwargs):
+                result_languages = controllers.config.getResultLanguages()
+                calls.append((
+                    tuple(result_languages),
+                    controllers.config.getSourceLanguage(),
+                    controllers.config.getIsMale(),
+                ))
+                return (
+                    [{
+                        "hash": 1,
+                        "translates": {
+                            str(lang): f"text-{lang}" for lang in result_languages
+                        },
+                    }],
+                    1,
+                )
+
+            monkeypatch.setattr(controllers, "_handle_keyword_only_query", fake_keyword_query)
+
+            first_token = tmp_config.push_request_display_preferences({
+                "resultLanguages": [9],
+                "sourceLanguage": 9,
+                "isMale": True,
+            })
+            try:
+                first_contents, _ = controllers.getTranslateObj("测试", 1)
+            finally:
+                tmp_config.reset_request_display_preferences(first_token)
+
+            second_token = tmp_config.push_request_display_preferences({
+                "resultLanguages": [4],
+                "sourceLanguage": 4,
+                "isMale": False,
+            })
+            try:
+                second_contents, _ = controllers.getTranslateObj("测试", 1)
+            finally:
+                tmp_config.reset_request_display_preferences(second_token)
+
+            assert first_contents[0]["translates"] == {"9": "text-9"}
+            assert second_contents[0]["translates"] == {"4": "text-4"}
+            assert calls == [((9,), 9, True), ((4,), 4, False)]
+        finally:
+            controllers.search_cache.clear()
+
+
 # ---------------------------------------------------------------------------
 # source_type filter helpers
 # ---------------------------------------------------------------------------

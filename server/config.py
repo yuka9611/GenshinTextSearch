@@ -1,6 +1,7 @@
 import json
 import os
 import sys
+from contextvars import ContextVar, Token
 from pathlib import Path
 
 
@@ -102,6 +103,77 @@ config = {
     "ftsMinTokenLength": 1,
     "ftsMaxTokenLength": 32,
 }
+
+
+_request_display_preferences: ContextVar[dict | None] = ContextVar(
+    "gts_request_display_preferences",
+    default=None,
+)
+
+
+def _default_display_preferences() -> dict:
+    return {
+        "resultLanguages": list(config.get("resultLanguages") or []),
+        "sourceLanguage": config.get("sourceLanguage"),
+        "isMale": config.get("isMale"),
+    }
+
+
+def normalize_request_display_preferences(value) -> dict:
+    """Validate per-request display settings without mutating global config."""
+    defaults = _default_display_preferences()
+    if not isinstance(value, dict):
+        return defaults
+
+    raw_result_languages = value.get("resultLanguages")
+    if (
+        isinstance(raw_result_languages, list)
+        and raw_result_languages
+        and all(type(item) is int and item > 0 for item in raw_result_languages)
+    ):
+        result_languages = list(dict.fromkeys(raw_result_languages))
+    else:
+        result_languages = defaults["resultLanguages"]
+
+    raw_source_language = value.get("sourceLanguage")
+    source_language = (
+        raw_source_language
+        if type(raw_source_language) is int and raw_source_language > 0
+        else defaults["sourceLanguage"]
+    )
+
+    raw_is_male = value.get("isMale")
+    is_male = raw_is_male if type(raw_is_male) is bool or raw_is_male == "both" else defaults["isMale"]
+
+    return {
+        "resultLanguages": result_languages,
+        "sourceLanguage": source_language,
+        "isMale": is_male,
+    }
+
+
+def push_request_display_preferences(value) -> Token:
+    return _request_display_preferences.set(normalize_request_display_preferences(value))
+
+
+def reset_request_display_preferences(token: Token) -> None:
+    _request_display_preferences.reset(token)
+
+
+def hasRequestDisplayPreferences() -> bool:
+    return _request_display_preferences.get() is not None
+
+
+def getResultLanguagesForResponse(*legacy_fallback_languages: int | None) -> list[int]:
+    """Return exact request languages, retaining legacy fallbacks for local callers."""
+    langs = getResultLanguages().copy()
+    if hasRequestDisplayPreferences():
+        return langs
+
+    for lang in legacy_fallback_languages:
+        if lang and lang not in langs:
+            langs.append(lang)
+    return langs
 
 
 def loadConfig():
@@ -220,10 +292,16 @@ def getDefaultSearchLanguage():
 
 
 def getResultLanguages():
+    request_preferences = _request_display_preferences.get()
+    if request_preferences is not None:
+        return list(request_preferences["resultLanguages"])
     return config["resultLanguages"]
 
 
 def getSourceLanguage():
+    request_preferences = _request_display_preferences.get()
+    if request_preferences is not None:
+        return request_preferences["sourceLanguage"]
     return config['sourceLanguage']
 
 
@@ -232,6 +310,9 @@ def getAssetDir():
 
 
 def getIsMale():
+    request_preferences = _request_display_preferences.get()
+    if request_preferences is not None:
+        return request_preferences["isMale"]
     return config['isMale']
 
 
@@ -356,4 +437,3 @@ def ensure_db_exists(bundled_rel_path: str = "data.db"):
 
 
 loadConfig()
-

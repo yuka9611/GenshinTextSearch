@@ -1137,10 +1137,8 @@ def _collect_entity_readable_entries(
 
 
 def _resolve_entity_query_langs(search_lang: int | None = None) -> tuple[list[int], int, int]:
-    langs = config.getResultLanguages().copy()
-    if search_lang and search_lang not in langs:
-        langs.append(search_lang)
     source_lang_code = config.getSourceLanguage()
+    langs = config.getResultLanguagesForResponse(search_lang)
     title_lang = search_lang if search_lang else source_lang_code
     return langs, source_lang_code, title_lang
 
@@ -1413,14 +1411,18 @@ def queryTextHashInfo(textHash: int, langs: 'list[int]', sourceLangCode: int, qu
     - queryOrigin=False 用于搜索阶段，跳过来源查询以大幅减少数据库查询
     """
     obj = {'translates': {}, 'voicePaths': [], 'availableVoiceLangs': [], 'hash': textHash}
-    # 去重并添加源语言
+    # 请求级偏好严格限制结果语言；本地旧调用仍附加来源语言并保留兜底。
     lang_list = list(dict.fromkeys(langs or []))
-    if sourceLangCode and sourceLangCode not in lang_list:
+    if (
+        not config.hasRequestDisplayPreferences()
+        and sourceLangCode
+        and sourceLangCode not in lang_list
+    ):
         lang_list.append(sourceLangCode)
 
     # 获取翻译
     translates = databaseHelper.selectTextMapFromTextHash(textHash, lang_list)
-    if not translates:
+    if not translates and not config.hasRequestDisplayPreferences():
         # 回退：如果选择的语言没有翻译，返回至少一种可用语言
         translates = databaseHelper.selectTextMapFromTextHash(textHash, None)
     for translate in translates:
@@ -1457,10 +1459,8 @@ def _resolve_avatar_query_langs(search_lang: int | None = None) -> tuple[list[in
     - 添加搜索语言（如果不在结果语言列表中）
     - 确定源语言和关键词语言
     """
-    langs = config.getResultLanguages().copy()
-    if search_lang and search_lang not in langs:
-        langs.append(search_lang)
     source_lang_code = config.getSourceLanguage()
+    langs = config.getResultLanguagesForResponse(search_lang)
     keyword_lang_code = search_lang if search_lang else source_lang_code
     return langs, source_lang_code, keyword_lang_code
 
@@ -2009,10 +2009,8 @@ def _handle_speaker_only_query(speaker_keyword: str, langCode: int, page: int, p
         return [], 0
 
     ans = []
-    langs = config.getResultLanguages().copy()
-    if langCode not in langs:
-        langs.append(langCode)
     sourceLangCode = config.getSourceLanguage()
+    langs = config.getResultLanguagesForResponse(langCode)
 
     seen_hashes = set()
     if normalized_source_type == "voice":
@@ -2150,10 +2148,8 @@ def _handle_speaker_and_keyword_query(speaker_keyword: str, keyword_trim: str, l
         return [], 0
 
     ans = []
-    langs = config.getResultLanguages().copy()
-    if langCode not in langs:
-        langs.append(langCode)
     sourceLangCode = config.getSourceLanguage()
+    langs = config.getResultLanguagesForResponse(langCode)
 
     seen_hashes = set()
 
@@ -2343,10 +2339,8 @@ def _handle_keyword_only_query(keyword: str, keyword_trim: str, langCode: int, p
     """
     处理仅关键词查询
     """
-    langs = config.getResultLanguages().copy()
-    if langCode not in langs:
-        langs.append(langCode)
     sourceLangCode = config.getSourceLanguage()
+    langs = config.getResultLanguagesForResponse(langCode)
 
     hash_value = _parse_int_keyword(keyword_trim)
     is_hash_query = hash_value is not None
@@ -3744,12 +3738,8 @@ def getDialogueGroup(
     page: int = 1,
     page_size: int = 200,
 ):
-    langs = config.getResultLanguages().copy()
-    if searchLang and searchLang not in langs:
-        langs.append(searchLang)
     sourceLangCode = config.getSourceLanguage()
-    if sourceLangCode and sourceLangCode not in langs:
-        langs.append(sourceLangCode)
+    langs = config.getResultLanguagesForResponse(searchLang, sourceLangCode)
 
     resolved_talk_id = int(talkId or 0)
     resolved_coop_quest_id = coopQuestId
@@ -4003,10 +3993,8 @@ def getQuestDialogues(
     page: int = 1,
     page_size: int = 200,
 ):
-    langs = config.getResultLanguages().copy()
-    if searchLang and searchLang not in langs:
-        langs.append(searchLang)
     sourceLangCode = config.getSourceLanguage()
+    langs = config.getResultLanguagesForResponse(searchLang)
 
     questCompleteName = databaseHelper.getQuestName(questId, sourceLangCode)
     questDescription = databaseHelper.getQuestDescription(questId, sourceLangCode)
@@ -4052,12 +4040,8 @@ def getTalkFromHash(
 ):
     requested_text_hash = textHash
     # 先查到文本所属的talk，然后查询对话所属的任务的标题，然后查询对话所有的内容，对于每一句话，查询多语言翻译、说话者
-    langs = config.getResultLanguages().copy()
-    if searchLang and searchLang not in langs:
-        langs.append(searchLang)
     sourceLangCode = config.getSourceLanguage()
-    if sourceLangCode and sourceLangCode not in langs:
-        langs.append(sourceLangCode)
+    langs = config.getResultLanguagesForResponse(searchLang, sourceLangCode)
 
     talkInfo = databaseHelper.getTalkInfo(textHash)
     if talkInfo is None:
@@ -4141,10 +4125,8 @@ def getTalkFromHash(
 
 
 def getReadableContent(readableId: int | None, fileName: str | None, searchLang: int | None = None):
-    langs = config.getResultLanguages().copy()
-    if searchLang and searchLang not in langs:
-        langs.append(searchLang)
     sourceLangCode = config.getSourceLanguage()
+    langs = config.getResultLanguagesForResponse(searchLang)
 
     langMap = databaseHelper.getLangCodeMap()
     targetLangStrs = []
@@ -4193,9 +4175,7 @@ def getReadableContent(readableId: int | None, fileName: str | None, searchLang:
     }
 
 def getSubtitleContext(fileName: str, _subtitleId: int | None = None, searchLang: int | None = None):
-    langs = config.getResultLanguages().copy()
-    if searchLang and searchLang not in langs:
-        langs.append(searchLang)
+    langs = config.getResultLanguagesForResponse(searchLang)
 
     # Always load subtitle context by file base to keep multi-language lines available.
     lines = databaseHelper.selectSubtitleContext(fileName, langs)

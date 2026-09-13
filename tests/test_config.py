@@ -1,4 +1,5 @@
 """Tests for server/config.py — uses tmp_config fixture to isolate file I/O."""
+from contextvars import Context
 import json
 
 
@@ -116,6 +117,111 @@ class TestGettersSetters:
     def test_setSourceLanguage(self, tmp_config):
         tmp_config.setSourceLanguage(4)
         assert tmp_config.getSourceLanguage() == 4
+
+
+class TestRequestDisplayPreferences:
+    def test_valid_preferences_override_only_the_current_context(self, tmp_config):
+        tmp_config.config.update({
+            "resultLanguages": [1, 4, 9],
+            "sourceLanguage": 1,
+            "isMale": "both",
+        })
+
+        token = tmp_config.push_request_display_preferences({
+            "resultLanguages": [9, 4, 9],
+            "sourceLanguage": 9,
+            "isMale": False,
+        })
+        try:
+            assert tmp_config.getResultLanguages() == [9, 4]
+            assert tmp_config.getSourceLanguage() == 9
+            assert tmp_config.getIsMale() is False
+        finally:
+            tmp_config.reset_request_display_preferences(token)
+
+        assert tmp_config.getResultLanguages() == [1, 4, 9]
+        assert tmp_config.getSourceLanguage() == 1
+        assert tmp_config.getIsMale() == "both"
+
+    def test_invalid_or_empty_fields_fall_back_independently(self, tmp_config):
+        tmp_config.config.update({
+            "resultLanguages": [1, 4],
+            "sourceLanguage": 1,
+            "isMale": "both",
+        })
+
+        token = tmp_config.push_request_display_preferences({
+            "resultLanguages": [],
+            "sourceLanguage": True,
+            "isMale": "male",
+        })
+        try:
+            assert tmp_config.getResultLanguages() == [1, 4]
+            assert tmp_config.getSourceLanguage() == 1
+            assert tmp_config.getIsMale() == "both"
+        finally:
+            tmp_config.reset_request_display_preferences(token)
+
+    def test_missing_fields_fall_back_independently(self, tmp_config):
+        tmp_config.config.update({
+            "resultLanguages": [1, 4],
+            "sourceLanguage": 1,
+            "isMale": "both",
+        })
+
+        token = tmp_config.push_request_display_preferences({"resultLanguages": [9]})
+        try:
+            assert tmp_config.getResultLanguages() == [9]
+            assert tmp_config.getSourceLanguage() == 1
+            assert tmp_config.getIsMale() == "both"
+        finally:
+            tmp_config.reset_request_display_preferences(token)
+
+    def test_contexts_with_different_preferences_do_not_leak(self, tmp_config):
+        tmp_config.config.update({
+            "resultLanguages": [1],
+            "sourceLanguage": 1,
+            "isMale": "both",
+        })
+
+        def read_preferences(preferences):
+            token = tmp_config.push_request_display_preferences(preferences)
+            try:
+                return (
+                    tmp_config.getResultLanguages(),
+                    tmp_config.getSourceLanguage(),
+                    tmp_config.getIsMale(),
+                )
+            finally:
+                tmp_config.reset_request_display_preferences(token)
+
+        japanese = Context().run(
+            read_preferences,
+            {"resultLanguages": [9], "sourceLanguage": 9, "isMale": True},
+        )
+        english = Context().run(
+            read_preferences,
+            {"resultLanguages": [4], "sourceLanguage": 4, "isMale": False},
+        )
+
+        assert japanese == ([9], 9, True)
+        assert english == ([4], 4, False)
+        assert tmp_config.getResultLanguages() == [1]
+
+    def test_request_languages_are_exact_while_defaults_keep_legacy_fallbacks(self, tmp_config):
+        tmp_config.config["resultLanguages"] = [9]
+
+        assert tmp_config.getResultLanguagesForResponse(1, 4) == [9, 1, 4]
+
+        token = tmp_config.push_request_display_preferences({
+            "resultLanguages": [9],
+            "sourceLanguage": 9,
+            "isMale": True,
+        })
+        try:
+            assert tmp_config.getResultLanguagesForResponse(1, 4) == [9]
+        finally:
+            tmp_config.reset_request_display_preferences(token)
 
 
 # ---------------------------------------------------------------------------

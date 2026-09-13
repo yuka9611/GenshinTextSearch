@@ -3,7 +3,10 @@ import io
 import json
 import sqlite3
 import sys
+import threading
+import time
 import types
+from concurrent.futures import ThreadPoolExecutor
 from urllib.parse import urlencode
 
 import pytest
@@ -15,6 +18,12 @@ import controllers.api as api
 def _app() -> Flask:
     app = Flask(__name__)
     app.config["TESTING"] = True
+    return app
+
+
+def _registered_app() -> Flask:
+    app = _app()
+    app.register_blueprint(api.api_bp)
     return app
 
 
@@ -297,6 +306,196 @@ class TestKeywordQueryEndpoint:
         assert calls["args"]["source_type"] == "story"
         assert calls["args"]["page"] == 2
         assert calls["args"]["page_size"] == 10
+
+
+class TestRequestDisplayPreferences:
+    def test_request_preferences_apply_to_keyword_detail_and_catalog_then_reset(
+        self,
+        monkeypatch,
+        tmp_config,
+    ):
+        import config
+
+        tmp_config.config.update({
+            "resultLanguages": [1, 4, 9],
+            "sourceLanguage": 1,
+            "isMale": "both",
+        })
+        observed = []
+
+        def capture(label):
+            observed.append((
+                label,
+                config.getResultLanguages(),
+                config.getSourceLanguage(),
+                config.getIsMale(),
+            ))
+
+        def fake_keyword(*_args, **_kwargs):
+            capture("keyword")
+            return ([], 0)
+
+        def fake_dialogues(*_args, **_kwargs):
+            capture("dialogues")
+            return ({"dialogues": []}, 0)
+
+        def fake_catalog(*_args, **_kwargs):
+            capture("catalog")
+            return {"contents": [], "total": 0, "page": 1, "pageSize": 50, "time": 0}
+
+        def fake_story(*_args, **_kwargs):
+            capture("story")
+            return {"stories": []}
+
+        monkeypatch.setattr(api.controllers_module, "getTranslateObj", fake_keyword)
+        monkeypatch.setattr(api.controllers_module, "getQuestDialogues", fake_dialogues)
+        monkeypatch.setattr(api.controllers_module, "searchCatalog", fake_catalog)
+        monkeypatch.setattr(api.controllers_module, "getAvatarStories", fake_story)
+
+        app = _registered_app()
+        client = app.test_client()
+        preferences = {
+            "resultLanguages": [9],
+            "sourceLanguage": 9,
+            "isMale": True,
+        }
+
+        keyword_response = client.post("/api/keywordQuery", json={
+            "langCode": 1,
+            "keyword": "测试",
+            "displayPreferences": preferences,
+        })
+        dialogue_response = client.post("/api/getQuestDialogues", json={
+            "questId": 42,
+            "searchLang": 1,
+            "displayPreferences": preferences,
+        })
+        catalog_response = client.post("/api/catalogSearch", json={
+            "langCode": 1,
+            "keyword": "风神",
+            "displayPreferences": preferences,
+        })
+        story_response = client.post("/api/avatarStory", json={
+            "avatarId": 10000003,
+            "searchLang": 1,
+            "displayPreferences": preferences,
+        })
+
+        assert keyword_response.status_code == 200
+        assert dialogue_response.status_code == 200
+        assert catalog_response.status_code == 200
+        assert story_response.status_code == 200
+        assert observed == [
+            ("keyword", [9], 9, True),
+            ("dialogues", [9], 9, True),
+            ("catalog", [9], 9, True),
+            ("story", [9], 9, True),
+        ]
+        assert config.getResultLanguages() == [1, 4, 9]
+        assert config.getSourceLanguage() == 1
+        assert config.getIsMale() == "both"
+
+    def test_missing_and_invalid_preferences_use_server_defaults(self, monkeypatch, tmp_config):
+        import config
+
+        tmp_config.config.update({
+            "resultLanguages": [1, 4],
+            "sourceLanguage": 1,
+            "isMale": "both",
+        })
+        observed = []
+
+        def fake_keyword(*_args, **_kwargs):
+            observed.append((
+                config.getResultLanguages(),
+                config.getSourceLanguage(),
+                config.getIsMale(),
+            ))
+            return ([], 0)
+
+        monkeypatch.setattr(api.controllers_module, "getTranslateObj", fake_keyword)
+        app = _registered_app()
+        client = app.test_client()
+        base_payload = {"langCode": 1, "keyword": "测试"}
+
+        client.post("/api/keywordQuery", json=base_payload)
+        client.post("/api/keywordQuery", json={
+            **base_payload,
+            "displayPreferences": {
+                "resultLanguages": [],
+                "sourceLanguage": True,
+                "isMale": "invalid",
+            },
+        })
+
+        assert observed == [
+            ([1, 4], 1, "both"),
+            ([1, 4], 1, "both"),
+        ]
+
+    def test_concurrent_requests_keep_preferences_isolated_and_serialize_database_access(
+        self,
+        monkeypatch,
+        tmp_config,
+    ):
+        import config
+
+        tmp_config.config.update({
+            "resultLanguages": [1, 4],
+            "sourceLanguage": 1,
+            "isMale": "both",
+        })
+        state_lock = threading.Lock()
+        start_barrier = threading.Barrier(2)
+        observed = []
+        active = 0
+        max_active = 0
+
+        def fake_keyword(*_args, **_kwargs):
+            nonlocal active, max_active
+            with state_lock:
+                active += 1
+                max_active = max(max_active, active)
+            try:
+                time.sleep(0.05)
+                observed.append((
+                    config.getResultLanguages(),
+                    config.getSourceLanguage(),
+                    config.getIsMale(),
+                ))
+                return ([], 0)
+            finally:
+                with state_lock:
+                    active -= 1
+
+        monkeypatch.setattr(api.controllers_module, "getTranslateObj", fake_keyword)
+        app = _registered_app()
+
+        def request_with(preferences):
+            start_barrier.wait(timeout=1)
+            with app.test_client() as client:
+                return client.post("/api/keywordQuery", json={
+                    "langCode": 1,
+                    "keyword": "测试",
+                    "displayPreferences": preferences,
+                }).status_code
+
+        preferences = [
+            {"resultLanguages": [9], "sourceLanguage": 9, "isMale": True},
+            {"resultLanguages": [4], "sourceLanguage": 4, "isMale": False},
+        ]
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            statuses = list(executor.map(request_with, preferences))
+
+        assert statuses == [200, 200]
+        assert max_active == 1
+        assert sorted(observed, key=lambda item: item[0]) == [
+            ([4], 4, False),
+            ([9], 9, True),
+        ]
+        assert config.getResultLanguages() == [1, 4]
+        assert config.getSourceLanguage() == 1
+        assert config.getIsMale() == "both"
 
 
 class TestCatalogSearchEndpoint:

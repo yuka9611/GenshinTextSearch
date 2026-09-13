@@ -70,10 +70,8 @@ def _entry_version_match(entry: dict, created_filter: str | None, updated_filter
 
 def _resolve_avatar_query_langs(search_lang: int | None = None) -> tuple[list[int], int, int]:
     import config
-    langs = config.getResultLanguages().copy()
-    if search_lang and search_lang not in langs:
-        langs.append(search_lang)
     source_lang_code = config.getSourceLanguage()
+    langs = config.getResultLanguagesForResponse(search_lang)
     keyword_lang_code = search_lang if search_lang else source_lang_code
     return langs, source_lang_code, keyword_lang_code
 

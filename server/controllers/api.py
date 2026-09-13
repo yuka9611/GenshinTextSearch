@@ -1,8 +1,9 @@
 import os
 import sqlite3
 import importlib
+import threading
 import time
-from flask import Blueprint, current_app, request, jsonify
+from flask import Blueprint, current_app, g, request, jsonify
 
 from cloud_runtime import (
     cloud_feature_forbidden,
@@ -22,6 +23,12 @@ from utils.cache import search_cache
 
 _controllers_module = None
 _database_helper_module = None
+
+# databaseHelper keeps one process-global SQLite connection. Although it allows
+# cross-thread use, concurrent cursors on that connection can fail with
+# InterfaceError/DatabaseError. Serialize API requests within each worker until
+# the database layer can move to request- or thread-local connections.
+_DATABASE_REQUEST_LOCK = threading.RLock()
 
 
 def _startup_profile_enabled() -> bool:
@@ -111,6 +118,35 @@ def get_lang_id(lang_code: str) -> int:
     return lang_code_map.get(lang_code.lower(), 1)
 
 api_bp = Blueprint('api', __name__)
+
+
+@api_bp.before_request
+def _apply_request_display_preferences():
+    _DATABASE_REQUEST_LOCK.acquire()
+    g.gts_database_request_lock_acquired = True
+
+    payload = request.get_json(silent=True)
+    if isinstance(payload, dict) and "displayPreferences" in payload:
+        import config
+
+        g.gts_display_preferences_token = config.push_request_display_preferences(
+            payload.get("displayPreferences")
+        )
+    return None
+
+
+@api_bp.teardown_request
+def _reset_request_display_preferences(_error):
+    try:
+        token = getattr(g, "gts_display_preferences_token", None)
+        if token is not None:
+            import config
+
+            config.reset_request_display_preferences(token)
+    finally:
+        if getattr(g, "gts_database_request_lock_acquired", False):
+            g.gts_database_request_lock_acquired = False
+            _DATABASE_REQUEST_LOCK.release()
 
 
 def _get_browser_client_id() -> str:
