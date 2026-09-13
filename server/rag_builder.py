@@ -81,6 +81,11 @@ def _make_chunk(
     normalized = _normalize_text(content)
     if not normalized:
         return None
+    if len(normalized) > MAX_CHARS:
+        raise RuntimeError(
+            f"chunk content exceeds {MAX_CHARS} Unicode characters: "
+            f"{doc_type} {source_key} block {ordinal} has {len(normalized)}"
+        )
     content_sha256 = _sha256_text(normalized)
     return RagChunk(
         chunkId=_chunk_id(doc_type, source_key, ordinal, content_sha256),
@@ -105,13 +110,14 @@ def _paragraph_units(text: str, max_chars: int = MAX_CHARS) -> list[str]:
     for paragraph in paragraphs or [normalized]:
         while len(paragraph) > max_chars:
             split_at = max(
-                paragraph.rfind(mark, 0, max_chars + 1)
+                paragraph.rfind(mark, 0, max_chars)
                 for mark in ("。", "！", "？", "；", "\n")
             )
             if split_at < max_chars // 2:
                 split_at = max_chars
             else:
                 split_at += 1
+            split_at = min(split_at, max_chars)
             units.append(paragraph[:split_at].strip())
             paragraph = paragraph[split_at:].strip()
         if paragraph:

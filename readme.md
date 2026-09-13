@@ -163,6 +163,21 @@ cd server/dbBuild
 python DBBuild.py --quest-only
 ```
 
+### 生成原神核心剧情 RAG 旁路索引
+
+以下命令以 immutable/read-only 模式读取 `server/data.db`，在独立目录原子生成
+简中剧情语料、FTS5 旁路库和 commit-bound manifest，不修改主数据库：
+
+```shell
+python server/rag_builder.py \
+  --database server/data.db \
+  --output-dir build/genshin-rag
+```
+
+产物为 `genshin_rag_chunks.jsonl`、`genshin_rag_fts.db` 和
+`genshin_rag_manifest.json`，覆盖任务对白、可读物、角色故事和角色语音。
+Qdrant 发布与 AstrBot 部署由各自项目负责。
+
 ## 开发说明
 
 ### 前端开发模式

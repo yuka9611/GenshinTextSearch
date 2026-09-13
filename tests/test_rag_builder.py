@@ -215,3 +215,11 @@ def test_prose_windows_preserve_text_when_overlap_would_exceed_limit():
     assert windows[0] == "甲" * 350
     assert windows[1] == "乙" * 350
     assert all(len(window) <= 350 for window in windows)
+
+
+def test_prose_windows_count_sentence_punctuation_inside_hard_limit():
+    text = "甲" * 350 + "。" + "乙" * 20
+    windows = rag_builder._prose_windows(text)
+
+    assert windows[0] == "甲" * 350
+    assert all(len(window) <= rag_builder.MAX_CHARS for window in windows)
