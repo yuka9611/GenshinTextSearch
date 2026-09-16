@@ -416,18 +416,15 @@ def _rebuild_talk_scope_from_local(
     source_paths: list[str],
     talk_skipped_files: list[str],
 ) -> None:
-    """Replace one logical Talk scope with the union of current source paths."""
+    """Replace one logical Talk scope with normalized current source paths."""
     talk_id, coop_quest_id = scope
-    _delete_talk_scope(talk_id, coop_quest_id)
-    for source_path in source_paths:
-        DBBuild.importTalk(
-            source_path,
-            commit=True,
-            skip_collector=talk_skipped_files,
-            log_skip=False,
-            refresh_hash_map=False,
-            replace_scope=False,
-        )
+    DBBuild.replaceTalkScopeFromFiles(
+        talk_id,
+        coop_quest_id,
+        source_paths,
+        commit=True,
+        skip_collector=talk_skipped_files,
+    )
 
 
 def _delete_talk_scope(talk_id: int, coop_quest_id: int | None):
@@ -1487,6 +1484,7 @@ def run_diff_update(
     stage_order = [
         "textmap",
         "talk",
+        "talk_cleanup",
         "quest",
         "quest_by_textmap",
         "core_tables",
@@ -1540,6 +1538,22 @@ def run_diff_update(
         talk_anomalies = _process_talk_stage(plan, repo_path, base_commit)
         anomalies.extend(talk_anomalies)
         mark_stage("talk")
+
+    if not stage_done("talk_cleanup"):
+        if plan["textmap_bases"] or plan["talk_changed"] or plan["talk_deleted"]:
+            cleanup_stats = DBBuild.pruneInvalidTalkData(commit=True)
+            if cleanup_stats.get("remaining_invalid_content", 0):
+                anomalies.append(
+                    "Talk cleanup left invalid content rows: "
+                    f"{cleanup_stats['remaining_invalid_content']}"
+                )
+            if cleanup_stats.get("remaining_orphan_links", 0):
+                anomalies.append(
+                    "Talk cleanup left orphan links: "
+                    f"{cleanup_stats['remaining_orphan_links']}"
+                )
+            print(f"Diff update Talk cleanup: {cleanup_stats}")
+        mark_stage("talk_cleanup")
 
     if not stage_done("quest"):
         quest_anomalies = _process_quest_stage(plan, target_version, prune_missing)

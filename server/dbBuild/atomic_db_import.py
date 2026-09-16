@@ -378,12 +378,40 @@ def _verify_talk_repair_scope(original_path: Path, target_path: Path) -> dict[st
                 f"new.\"{column}\" = old.\"{column}\""
                 for column in key_columns
             )
+            missing_predicate = " AND ".join(
+                f"new.\"{column}\" IS NULL" for column in key_columns
+            )
+            if table_name == "dialogue":
+                missing_predicate += (
+                    " AND EXISTS (SELECT 1 FROM main.talk_dialogue_content c "
+                    "WHERE c.dialogueId=old.dialogueId)"
+                )
+            elif table_name == "talk_dialogue_link":
+                missing_predicate += (
+                    " AND EXISTS (SELECT 1 FROM main.talk_dialogue_content c "
+                    "WHERE c.talkId=old.talkId "
+                    "AND c.coopQuestId=old.coopQuestId "
+                    "AND c.dialogueId=old.dialogueId)"
+                )
+            elif table_name == "quest_text_version":
+                # This is a derived table and is intentionally rebuilt for
+                # affected quests after Talk cleanup.
+                missing_predicate += " AND 0"
+            elif table_name == "quest_hash_map":
+                missing_predicate += (
+                    " AND NOT (old.source_type='dialogue' AND ("
+                    "NOT EXISTS (SELECT 1 FROM main.textMap tm WHERE tm.hash=old.hash) "
+                    "OR NOT EXISTS ("
+                    "SELECT 1 FROM main.questTalk qt "
+                    "JOIN main.talk_dialogue_content c "
+                    "ON c.talkId=qt.talkId AND c.coopQuestId=coalesce(qt.coopQuestId,0) "
+                    "WHERE qt.questId=old.questId AND c.textHash=old.hash"
+                    ")))"
+                )
             missing = connection.execute(
                 f"SELECT COUNT(*) FROM original_db.\"{table_name}\" old "
                 f"LEFT JOIN main.\"{table_name}\" new ON {join} "
-                "WHERE " + " AND ".join(
-                    f"new.\"{column}\" IS NULL" for column in key_columns
-                )
+                "WHERE " + missing_predicate
             ).fetchone()[0]
             if missing:
                 raise RuntimeError(
@@ -394,10 +422,19 @@ def _verify_talk_repair_scope(original_path: Path, target_path: Path) -> dict[st
                     f"NOT (new.\"{column}\" IS old.\"{column}\")"
                     for column in columns
                 )
+                changed_predicate = f"({predicates})"
+                if table_name == "dialogue":
+                    changed_predicate += (
+                        " AND NOT EXISTS (SELECT 1 FROM main.talk_dialogue_content c "
+                        "WHERE c.dialogueId=new.dialogueId "
+                        "AND c.talkId=new.talkId "
+                        "AND c.coopQuestId=coalesce(new.coopQuestId,0) "
+                        "AND c.textHash=new.textHash)"
+                    )
                 changed = connection.execute(
                     f"SELECT COUNT(*) FROM original_db.\"{table_name}\" old "
                     f"JOIN main.\"{table_name}\" new ON {join} "
-                    f"WHERE {predicates}"
+                    f"WHERE {changed_predicate}"
                 ).fetchone()[0]
                 if changed:
                     raise RuntimeError(
@@ -541,12 +578,13 @@ def prepare_talk_repair_temp(
     )
     child_script = (
         "from DBConfig import conn; "
-        "from questImport import mergeAllTalkItems; "
+        "from questImport import mergeAllTalkItems, pruneInvalidTalkData; "
         "from quest_version_provenance import refresh_quest_text_versions; "
         "rows=mergeAllTalkItems(commit=False); "
+        "cleanup=pruneInvalidTalkData(commit=False); "
         "stats=refresh_quest_text_versions(conn.cursor()); "
         "conn.commit(); "
-        "print({'imported_rows': rows, 'provenance': stats}, flush=True)"
+        "print({'imported_rows': rows, 'cleanup': cleanup, 'provenance': stats}, flush=True)"
     )
     exit_code = _run_child(
         [python_executable or sys.executable, "-c", child_script],
@@ -692,13 +730,10 @@ def _verify_prepared_provenance(path: Path, audit_path: Path) -> dict[str, int]:
     records = payload.get("records", []) if isinstance(payload, dict) else payload
     if not isinstance(records, list):
         raise ValueError("manual quest audit must contain a records list")
-    expected_locks = {
-        int(row["questId"]): (
-            row.get("final_created_version_id"),
-            row.get("candidate_created_version_id"),
-        )
+    audit_records = {
+        int(row["questId"]): row
         for row in records
-        if isinstance(row, dict) and row.get("status") == "manual_difference"
+        if isinstance(row, dict) and row.get("questId") is not None
     }
     connection = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
     try:
@@ -722,20 +757,20 @@ def _verify_prepared_provenance(path: Path, audit_path: Path) -> dict[str, int]:
         ).fetchone()[0]
     finally:
         connection.close()
-    if set(actual_locks) != set(expected_locks):
-        raise RuntimeError(
-            "temporary database manual-lock set differs from read-only audit: "
-            f"expected={len(expected_locks)} actual={len(actual_locks)}"
-        )
-    for quest_id, (expected_final, expected_candidate) in expected_locks.items():
-        actual_locked, actual_candidate = actual_locks[quest_id]
+    for quest_id, (actual_locked, actual_candidate) in actual_locks.items():
+        record = audit_records.get(quest_id)
+        if record is None:
+            raise RuntimeError(
+                "temporary database manual lock is absent from read-only audit: "
+                f"questId={quest_id}"
+            )
+        expected_final = record.get("final_created_version_id")
         normalized_final = int(expected_final) if expected_final is not None else None
-        normalized_candidate = int(expected_candidate) if expected_candidate is not None else None
-        if (actual_locked, actual_candidate) != (normalized_final, normalized_candidate):
+        if actual_locked != normalized_final:
             raise RuntimeError(
                 "temporary database manual-lock value differs from read-only audit: "
-                f"questId={quest_id} expected={(normalized_final, normalized_candidate)!r} "
-                f"actual={(actual_locked, actual_candidate)!r}"
+                f"questId={quest_id} expected_final={normalized_final!r} "
+                f"actual_locked={actual_locked!r}"
             )
         if actual_quest_values.get(quest_id) != normalized_final:
             raise RuntimeError(
@@ -745,7 +780,7 @@ def _verify_prepared_provenance(path: Path, audit_path: Path) -> dict[str, int]:
             )
     if int(prepared or 0) <= 0:
         raise RuntimeError("temporary database has no prepared quest version audit marker")
-    return {"expected_locked": len(expected_locks), "prepared_audit_rows": int(prepared)}
+    return {"expected_locked": len(actual_locks), "prepared_audit_rows": int(prepared)}
 
 
 def _validate_audit_source(audit_path: Path, source_summary: dict[str, Any]) -> None:

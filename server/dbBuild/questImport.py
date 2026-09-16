@@ -18,12 +18,15 @@ from quest_hash_map_utils import (
     TALK_DIALOGUE_CONTENT_TABLE as _TALK_DIALOGUE_CONTENT_TABLE,
     ensure_quest_hash_map_schema as _ensure_quest_hash_map_schema,
     ensure_talk_dialogue_link_schema as _ensure_talk_dialogue_link_schema,
+    refresh_dialogue_hash_map_for_quest_ids as _refresh_dialogue_hash_map_for_quest_ids,
+    refresh_dialogue_hash_map_for_talk_ids as _refresh_dialogue_hash_map_for_talk_ids,
     refresh_quest_hash_map_for_quest_ids as _refresh_quest_hash_map_for_quest_ids,
     refresh_quest_hash_map_for_talk_ids as _refresh_quest_hash_map_for_talk_ids,
 )
 from quest_version_provenance import (
     QUEST_CREATED_VERSION_OVERRIDE_TABLE,
     ensure_quest_version_provenance_schema,
+    refresh_quest_text_versions,
 )
 from genshin_data_core.access import FilesystemGameDataAccess
 from genshin_data_core.quest import GTS_QUEST_PARSER
@@ -35,8 +38,9 @@ from genshin_data_core.sources import (
     iter_subquest_talk_rows,
 )
 from genshin_data_core.talk import (
-    extract_talk_dialogue_payload,
+    extract_talk_dialogue_payload_with_schema,
     is_non_dialog_talk_obj,
+    normalize_talk_dialogue_rows,
 )
 from version_control import backfill_quest_created_version_from_textmap as _backfill_quest_created_version_from_textmap
 from version_control import (
@@ -2356,6 +2360,137 @@ def importAllHangoutsForDiff(
     }
 
 
+def _list_talk_files() -> list[str]:
+    talk_root = os.path.join(DATA_PATH, "BinOutput", "Talk")
+    if not os.path.isdir(talk_root):
+        return []
+    paths: list[str] = []
+    for root, dirs, files in os.walk(talk_root):
+        dirs.sort()
+        for file_name in sorted(files):
+            if file_name.endswith(".json"):
+                paths.append(
+                    _normalize_talk_rel_path(
+                        os.path.relpath(os.path.join(root, file_name), talk_root)
+                    )
+                )
+    return paths
+
+
+def _collect_normalized_talk_scopes(
+    talk_files: list[str],
+    skipped_files: list[str],
+    *,
+    valid_text_hashes: set[int] | None = None,
+) -> dict[tuple[int, int], list[tuple[Any, int, Any, Any]]]:
+    """Read all source files and normalize them once per logical scope."""
+    candidates: dict[tuple[int, int], list[tuple[int, list[tuple[Any, Any, Any, Any]]]]] = {}
+    for file_name in talk_files:
+        obj = _load_json_dict(_resolve_talk_file_path(file_name))
+        if obj is None:
+            skipped_files.append(file_name)
+            continue
+        if is_non_dialog_talk_obj(obj):
+            continue
+        parsed = extract_talk_dialogue_payload_with_schema(obj)
+        if parsed is None:
+            skipped_files.append(file_name)
+            continue
+        schema_rank, talk_id, rows = parsed
+        scope = (int(talk_id), _extract_talk_scope_id_from_file_name(file_name))
+        candidates.setdefault(scope, []).append((schema_rank, rows))
+
+    return {
+        scope: normalize_talk_dialogue_rows(
+            scope_candidates,
+            valid_text_hashes=valid_text_hashes,
+        )
+        for scope, scope_candidates in candidates.items()
+    }
+
+
+def _current_text_hashes(cursor) -> set[int] | None:
+    """Return current TextMap hashes when the table has usable data."""
+    try:
+        rows = cursor.execute(
+            "SELECT DISTINCT hash FROM textMap WHERE hash IS NOT NULL AND hash<>0"
+        ).fetchall()
+    except Exception:
+        return None
+    return {int(row[0]) for row in rows}
+
+
+def _write_talk_scope_rows(
+    cursor,
+    talk_id: int,
+    talk_scope_id: int,
+    dialogue_payload: list[tuple[Any, int, Any, Any]],
+    *,
+    batch_size: int,
+    preserve_existing_dialogue: bool,
+    touched_talk_collector: set[int] | None,
+) -> int:
+    if not dialogue_payload:
+        if touched_talk_collector is not None:
+            touched_talk_collector.add(talk_id)
+        return 0
+
+    if preserve_existing_dialogue:
+        sql = (
+            "INSERT OR IGNORE INTO dialogue "
+            "(dialogueId, talkerId, talkerType, talkId, textHash, coopQuestId) "
+            "VALUES (?,?,?,?,?,?)"
+        )
+    else:
+        sql = (
+            "INSERT INTO dialogue(dialogueId, talkerId, talkerType, talkId, textHash, coopQuestId) "
+            "VALUES (?,?,?,?,?,?) "
+            "ON CONFLICT(dialogueId) DO UPDATE SET "
+            "talkerId=excluded.talkerId, talkerType=excluded.talkerType, "
+            "talkId=excluded.talkId, textHash=excluded.textHash, "
+            "coopQuestId=excluded.coopQuestId "
+            "WHERE NOT (dialogue.talkerId IS excluded.talkerId) "
+            "OR NOT (dialogue.talkerType IS excluded.talkerType) "
+            "OR NOT (dialogue.talkId IS excluded.talkId) "
+            "OR NOT (dialogue.textHash IS excluded.textHash) "
+            "OR NOT (dialogue.coopQuestId IS excluded.coopQuestId)"
+        )
+
+    legacy_coop_id = None if talk_scope_id == QUEST_TALK_NORMAL_COOP_ID else talk_scope_id
+    rows = [
+        (dialogue_id, talker_id, talker_type, talk_id, text_hash, legacy_coop_id)
+        for dialogue_id, text_hash, talker_id, talker_type in dialogue_payload
+    ]
+    link_rows = [(talk_id, talk_scope_id, row[0]) for row in dialogue_payload]
+    content_rows = [
+        (talk_id, talk_scope_id, dialogue_id, text_hash, talker_id, talker_type)
+        for dialogue_id, text_hash, talker_id, talker_type in dialogue_payload
+    ]
+    executemany_batched(
+        cursor,
+        "INSERT OR IGNORE INTO talk_dialogue_link(talkId, coopQuestId, dialogueId) VALUES (?,?,?)",
+        link_rows,
+        batch_size=batch_size,
+    )
+    _set_talk_dialogue_link_presence(True)
+    executemany_batched(cursor, sql, rows, batch_size=batch_size)
+    executemany_batched(
+        cursor,
+        f"""
+        INSERT INTO {_TALK_DIALOGUE_CONTENT_TABLE}
+            (talkId, coopQuestId, dialogueId, textHash, talkerId, talkerType)
+        VALUES (?,?,?,?,?,?)
+        ON CONFLICT(talkId, coopQuestId, dialogueId, textHash) DO UPDATE SET
+            talkerId=excluded.talkerId, talkerType=excluded.talkerType
+        """,
+        content_rows,
+        batch_size=batch_size,
+    )
+    if touched_talk_collector is not None:
+        touched_talk_collector.add(talk_id)
+    return len(rows)
+
+
 def importTalk(
     fileName: str,
     *,
@@ -2388,8 +2523,8 @@ def importTalk(
             cursor.close()
         return 0
 
-    talk_payload = extract_talk_dialogue_payload(obj)
-    if talk_payload is None:
+    parsed = extract_talk_dialogue_payload_with_schema(obj)
+    if parsed is None:
         if skip_collector is not None:
             skip_collector.append(fileName)
         elif log_skip:
@@ -2398,7 +2533,8 @@ def importTalk(
             cursor.close()
         return 0
 
-    normalized_talk_id, dialogue_payload = talk_payload
+    schema_rank, normalized_talk_id, dialogue_payload = parsed
+    dialogue_payload = normalize_talk_dialogue_rows(((schema_rank, dialogue_payload),))
 
     talk_scope_id = _extract_talk_scope_id_from_file_name(fileName)
     if replace_scope:
@@ -2420,77 +2556,15 @@ def importTalk(
                 conn.commit()
         return 0
 
-    if preserve_existing_dialogue:
-        sql = (
-            "INSERT OR IGNORE INTO dialogue "
-            "(dialogueId, talkerId, talkerType, talkId, textHash, coopQuestId) "
-            "VALUES (?,?,?,?,?,?)"
-        )
-    else:
-        sql = (
-            "INSERT INTO dialogue(dialogueId, talkerId, talkerType, talkId, textHash, coopQuestId) "
-            "VALUES (?,?,?,?,?,?) "
-            "ON CONFLICT(dialogueId) DO UPDATE SET "
-            "talkerId=excluded.talkerId, "
-            "talkerType=excluded.talkerType, "
-            "talkId=excluded.talkId, "
-            "textHash=excluded.textHash, "
-            "coopQuestId=excluded.coopQuestId "
-            "WHERE "
-            "NOT (dialogue.talkerId IS excluded.talkerId) "
-            "OR NOT (dialogue.talkerType IS excluded.talkerType) "
-            "OR NOT (dialogue.talkId IS excluded.talkId) "
-            "OR NOT (dialogue.textHash IS excluded.textHash) "
-            "OR NOT (dialogue.coopQuestId IS excluded.coopQuestId)"
-        )
-
-    coopQuestId = None if talk_scope_id == QUEST_TALK_NORMAL_COOP_ID else talk_scope_id
-
-    rows = []
-    link_rows = []
-    content_rows = []
-    for dialogueId, textHash, talkRoleId, talkRoleType in dialogue_payload:
-        rows.append((dialogueId, talkRoleId, talkRoleType, normalized_talk_id, textHash, coopQuestId))
-        link_rows.append((normalized_talk_id, talk_scope_id, dialogueId))
-        content_rows.append(
-            (
-                normalized_talk_id,
-                talk_scope_id,
-                dialogueId,
-                textHash,
-                talkRoleId,
-                talkRoleType,
-            )
-        )
-
-    if link_rows:
-        executemany_batched(
-            cursor,
-            "INSERT OR IGNORE INTO talk_dialogue_link(talkId, coopQuestId, dialogueId) VALUES (?,?,?)",
-            link_rows,
-            batch_size=batch_size,
-        )
-        _set_talk_dialogue_link_presence(True)
-    if rows:
-        executemany_batched(cursor, sql, rows, batch_size=batch_size)
-        executemany_batched(
-            cursor,
-            f"""
-            INSERT INTO {_TALK_DIALOGUE_CONTENT_TABLE}
-                (talkId, coopQuestId, dialogueId, textHash, talkerId, talkerType)
-            VALUES (?,?,?,?,?,?)
-            ON CONFLICT(talkId, coopQuestId, dialogueId, textHash) DO UPDATE SET
-                talkerId=excluded.talkerId,
-                talkerType=excluded.talkerType
-            """,
-            content_rows,
-            batch_size=batch_size,
-        )
-    if touched_talk_collector is not None:
-        try:
-            touched_talk_collector.add(normalized_talk_id)
-        except Exception:
-            pass
+    imported_rows = _write_talk_scope_rows(
+        cursor,
+        normalized_talk_id,
+        talk_scope_id,
+        dialogue_payload,
+        batch_size=batch_size,
+        preserve_existing_dialogue=preserve_existing_dialogue,
+        touched_talk_collector=touched_talk_collector,
+    )
     if refresh_hash_map:
         _refresh_quest_hash_map_for_talk_ids(cursor, [normalized_talk_id], batch_size=batch_size)
 
@@ -2498,7 +2572,7 @@ def importTalk(
         cursor.close()
         if commit:
             conn.commit()
-    return len(rows)
+    return imported_rows
 
 
 def importAllTalkItems(
@@ -2512,20 +2586,9 @@ def importAllTalkItems(
         return 0
 
     imported_rows = 0
-    talk_files: list[str] = []
+    talk_files = _list_talk_files()
     skipped_files: list[str] = []
     touched_talk_ids: set[int] = set()
-
-    # Walk recursively: several 7.0 Talk payloads live below a second-level
-    # directory, and the old one-level traversal silently omitted them.
-    for root, dirs, files in os.walk(talk_root):
-        dirs.sort()
-        for file_name in sorted(files):
-            if not file_name.endswith(".json"):
-                continue
-            file_path = os.path.join(root, file_name)
-            relative = os.path.relpath(file_path, talk_root).replace(os.sep, "/")
-            talk_files.append(_normalize_talk_rel_path(relative))
 
     print(f"importing talk files ({len(talk_files)})")
     cursor = conn.cursor()
@@ -2537,25 +2600,23 @@ def importAllTalkItems(
         cursor.execute(f"DELETE FROM {_TALK_DIALOGUE_CONTENT_TABLE}")
         cursor.execute("DELETE FROM dialogue")
         _set_talk_dialogue_link_presence(False)
+        normalized_scopes = _collect_normalized_talk_scopes(
+            talk_files,
+            skipped_files,
+        )
         with LightweightProgress(len(talk_files), desc="Talk files", unit="files") as pbar:
             for file_name in talk_files:
-                imported_rows += importTalk(
-                    file_name,
-                    cursor=cursor,
-                    commit=False,
-                    batch_size=batch_size,
-                    skip_collector=skipped_files,
-                    log_skip=False,
-                    refresh_hash_map=False,
-                    touched_talk_collector=touched_talk_ids,
-                    # The full source tree can contain distinct Activity,
-                    # FreeGroup, Quest, or NPC payloads with the same logical
-                    # talk/scope.  The tables expose a logical union, so a
-                    # full rebuild must not let the last path erase earlier
-                    # source dialogue links.
-                    replace_scope=False,
-                )
                 pbar.update()
+        for (talk_id, scope_id), dialogue_payload in sorted(normalized_scopes.items()):
+            imported_rows += _write_talk_scope_rows(
+                cursor,
+                talk_id,
+                scope_id,
+                dialogue_payload,
+                batch_size=batch_size,
+                preserve_existing_dialogue=False,
+                touched_talk_collector=touched_talk_ids,
+            )
 
         # 謇ｹ驥乗峩譁ｰ蜩亥ｸ梧丐蟆・ｼ悟㍼蟆第焚謐ｮ蠎捺桃菴・        if touched_talk_ids:
             _refresh_quest_hash_map_for_talk_ids(
@@ -2598,15 +2659,7 @@ def mergeAllTalkItems(
         print("Talk folder not found, skipping.")
         return 0
 
-    talk_files: list[str] = []
-    for root, dirs, files in os.walk(talk_root):
-        dirs.sort()
-        for file_name in sorted(files):
-            if not file_name.endswith(".json"):
-                continue
-            file_path = os.path.join(root, file_name)
-            relative = os.path.relpath(file_path, talk_root).replace(os.sep, "/")
-            talk_files.append(_normalize_talk_rel_path(relative))
+    talk_files = _list_talk_files()
 
     imported_rows = 0
     skipped_files: list[str] = []
@@ -2641,24 +2694,49 @@ def mergeAllTalkItems(
             "textmap_unresolved_row_count, aligned_at "
             "FROM quest_text_version"
         )
+        normalized_scopes = _collect_normalized_talk_scopes(
+            talk_files,
+            skipped_files,
+            valid_text_hashes=_current_text_hashes(cursor),
+        )
+        actual_scopes: dict[tuple[int, int], set[tuple[Any, int, Any, Any]]] = {}
+        for row in cursor.execute(
+            f"SELECT talkId, coopQuestId, dialogueId, textHash, talkerId, talkerType "
+            f"FROM {_TALK_DIALOGUE_CONTENT_TABLE}"
+        ).fetchall():
+            talk_id, scope_id, dialogue_id, text_hash, talker_id, talker_type = row
+            actual_scopes.setdefault((int(talk_id), int(scope_id)), set()).add(
+                (dialogue_id, int(text_hash), talker_id, talker_type)
+            )
+        changed_scopes = []
+        for scope, payload in normalized_scopes.items():
+            expected = set(payload)
+            if actual_scopes.get(scope, set()) != expected:
+                changed_scopes.append((scope, payload))
+        print(f"Talk scopes requiring replacement: {len(changed_scopes)}")
         with LightweightProgress(len(talk_files), desc="Talk merge", unit="files") as pbar:
-            for file_name in talk_files:
-                imported_rows += importTalk(
-                    file_name,
-                    cursor=cursor,
-                    commit=False,
-                    batch_size=batch_size,
-                    skip_collector=skipped_files,
-                    log_skip=False,
-                    refresh_hash_map=False,
-                    touched_talk_collector=touched_talk_ids,
-                    replace_scope=False,
-                    preserve_existing_dialogue=True,
-                )
+            for _file_name in talk_files:
                 pbar.update()
 
+        for (talk_id, scope_id), dialogue_payload in sorted(changed_scopes):
+            _delete_talk_scope_rows(
+                cursor,
+                talk_id,
+                scope_id,
+                batch_size=batch_size,
+            )
+            imported_rows += _write_talk_scope_rows(
+                cursor,
+                talk_id,
+                scope_id,
+                dialogue_payload,
+                batch_size=batch_size,
+                preserve_existing_dialogue=True,
+                touched_talk_collector=touched_talk_ids,
+            )
+
         if touched_talk_ids:
-            _refresh_quest_hash_map_for_talk_ids(
+            _refresh_dialogue_hash_map_for_talk_ids(
                 cursor,
                 touched_talk_ids,
                 batch_size=batch_size,
@@ -2689,6 +2767,286 @@ def mergeAllTalkItems(
 
     _print_skip_summary("talk merge", skipped_files)
     return imported_rows
+
+
+def replaceTalkScopeFromFiles(
+    talk_id: int,
+    coop_quest_id: int,
+    source_paths: list[str],
+    *,
+    commit: bool = True,
+    batch_size: int = DEFAULT_BATCH_SIZE,
+    skip_collector: list[str] | None = None,
+) -> int:
+    """Replace one scope with its normalized current source representation."""
+    own_cursor = True
+    cursor = conn.cursor()
+    _ensure_talk_dialogue_link_schema(cursor)
+    local_skipped = skip_collector if skip_collector is not None else []
+    try:
+        normalized_scopes = _collect_normalized_talk_scopes(
+            source_paths,
+            local_skipped,
+            valid_text_hashes=_current_text_hashes(cursor),
+        )
+        scope = (int(talk_id), _normalize_coop_quest_id(coop_quest_id))
+        if source_paths and scope not in normalized_scopes:
+            raise RuntimeError(
+                f"Talk scope {scope} has source files but none could be parsed"
+            )
+        _delete_talk_scope_rows(
+            cursor,
+            scope[0],
+            scope[1],
+            batch_size=batch_size,
+        )
+        imported_rows = _write_talk_scope_rows(
+            cursor,
+            scope[0],
+            scope[1],
+            normalized_scopes.get(scope, []),
+            batch_size=batch_size,
+            preserve_existing_dialogue=False,
+            touched_talk_collector=None,
+        )
+        _refresh_dialogue_hash_map_for_talk_ids(
+            cursor,
+            [scope[0]],
+            batch_size=batch_size,
+        )
+        if commit:
+            conn.commit()
+        return imported_rows
+    except Exception:
+        if commit:
+            conn.rollback()
+        raise
+    finally:
+        cursor.close()
+
+
+def pruneInvalidTalkData(
+    *,
+    cursor=None,
+    commit: bool = True,
+    batch_size: int = DEFAULT_BATCH_SIZE,
+) -> dict[str, int]:
+    """Remove invalid Talk content and rebuild only its derived associations.
+
+    A Talk hash is valid when at least one row for that hash exists in any
+    language of the current TextMap.  The operation is intentionally limited
+    to Talk content, its scoped links, legacy projection, dialogue hash maps,
+    and task-text provenance.
+    """
+    own_cursor = cursor is None
+    if own_cursor:
+        cursor = conn.cursor()
+    _ensure_talk_dialogue_link_schema(cursor)
+    _ensure_quest_hash_map_schema(cursor)
+    stats = {
+        "invalid_content_deleted": 0,
+        "orphan_links_deleted": 0,
+        "legacy_projection_updated": 0,
+        "legacy_projection_deleted": 0,
+        "invalid_quest_hash_map_deleted": 0,
+        "remaining_invalid_content": 0,
+        "remaining_orphan_links": 0,
+    }
+    try:
+        affected_quest_ids: set[int] = set()
+        affected_talk_ids: set[int] = set()
+
+        orphan_link_query = """
+            SELECT l.talkId, l.coopQuestId, l.dialogueId
+            FROM talk_dialogue_link l
+            WHERE NOT EXISTS (
+                SELECT 1 FROM talk_dialogue_content c
+                WHERE c.talkId=l.talkId AND c.coopQuestId=l.coopQuestId
+                  AND c.dialogueId=l.dialogueId
+            )
+        """
+        invalid_content_predicate = (
+            f"c.textHash IS NULL OR c.textHash=0 OR NOT EXISTS "
+            f"(SELECT 1 FROM textMap tm WHERE tm.hash=c.textHash)"
+        )
+        affected_talk_ids.update(
+            int(row[0]) for row in cursor.execute(
+                f"""
+                SELECT DISTINCT c.talkId FROM {_TALK_DIALOGUE_CONTENT_TABLE} c
+                WHERE {invalid_content_predicate}
+                UNION
+                SELECT DISTINCT l.talkId FROM talk_dialogue_link l
+                WHERE NOT EXISTS (
+                    SELECT 1 FROM {_TALK_DIALOGUE_CONTENT_TABLE} c
+                    WHERE c.talkId=l.talkId AND c.coopQuestId=l.coopQuestId
+                      AND c.dialogueId=l.dialogueId
+                )
+                """
+            ).fetchall()
+        )
+        # The Talk scan above already contains every affected scope.  Reuse
+        # that small ID set to find impacted quests instead of rescanning all
+        # content and links with correlated NOT EXISTS predicates.
+        cursor.execute(
+            "CREATE TEMP TABLE IF NOT EXISTS _talk_cleanup_talk_id "
+            "(talkId INTEGER PRIMARY KEY)"
+        )
+        cursor.execute("DELETE FROM _talk_cleanup_talk_id")
+        executemany_batched(
+            cursor,
+            "INSERT OR IGNORE INTO _talk_cleanup_talk_id(talkId) VALUES (?)",
+            ((talk_id,) for talk_id in affected_talk_ids),
+            batch_size=batch_size,
+        )
+        affected_quest_ids.update(
+            int(row[0]) for row in cursor.execute(
+                """
+                SELECT DISTINCT qt.questId
+                FROM questTalk qt
+                JOIN _talk_cleanup_talk_id t ON t.talkId=qt.talkId
+                """
+            ).fetchall()
+        )
+
+        invalid_qhm = cursor.execute(
+            """
+            SELECT DISTINCT questId FROM quest_hash_map qhm
+            WHERE qhm.source_type='dialogue'
+              AND (qhm.hash IS NULL OR qhm.hash=0 OR NOT EXISTS (
+                  SELECT 1 FROM textMap tm WHERE tm.hash=qhm.hash
+              ))
+            """
+        ).fetchall()
+        affected_quest_ids.update(int(row[0]) for row in invalid_qhm if row[0] is not None)
+
+        cursor.execute(
+            f"""
+            DELETE FROM {_TALK_DIALOGUE_CONTENT_TABLE}
+            WHERE textHash IS NULL OR textHash=0 OR NOT EXISTS (
+                SELECT 1 FROM textMap tm WHERE tm.hash={_TALK_DIALOGUE_CONTENT_TABLE}.textHash
+            )
+            """
+        )
+        stats["invalid_content_deleted"] = max(0, cursor.rowcount)
+        cursor.execute(
+            """
+            DELETE FROM talk_dialogue_link
+            WHERE NOT EXISTS (
+                SELECT 1 FROM talk_dialogue_content c
+                WHERE c.talkId=talk_dialogue_link.talkId
+                  AND c.coopQuestId=talk_dialogue_link.coopQuestId
+                  AND c.dialogueId=talk_dialogue_link.dialogueId
+            )
+            """
+        )
+        stats["orphan_links_deleted"] = max(0, cursor.rowcount)
+
+        cursor.execute(
+            """
+            CREATE TEMP TABLE _talk_legacy_projection (
+                dialogueId INTEGER PRIMARY KEY,
+                talkId INTEGER,
+                coopQuestId INTEGER,
+                textHash INTEGER,
+                talkerId INTEGER,
+                talkerType TEXT
+            )
+            """
+        )
+        cursor.execute(
+            f"""
+            INSERT INTO _talk_legacy_projection
+                (dialogueId, talkId, coopQuestId, textHash, talkerId, talkerType)
+            SELECT dialogueId, talkId, coopQuestId, textHash, talkerId, talkerType
+            FROM (
+                SELECT c.*, ROW_NUMBER() OVER (
+                    PARTITION BY c.dialogueId
+                    ORDER BY c.talkId, c.coopQuestId, c.textHash
+                ) AS projection_rank
+                FROM {_TALK_DIALOGUE_CONTENT_TABLE} c
+            )
+            WHERE projection_rank=1
+            """
+        )
+        cursor.execute(
+            """
+            SELECT COUNT(*) FROM dialogue d
+            JOIN _talk_legacy_projection p ON p.dialogueId=d.dialogueId
+            WHERE NOT (d.talkerId IS p.talkerId)
+               OR NOT (d.talkerType IS p.talkerType)
+               OR NOT (d.talkId IS p.talkId)
+               OR NOT (d.textHash IS p.textHash)
+               OR NOT (d.coopQuestId IS CASE WHEN p.coopQuestId=0 THEN NULL ELSE p.coopQuestId END)
+            """
+        )
+        stats["legacy_projection_updated"] = int(cursor.fetchone()[0] or 0)
+        cursor.execute(
+            """
+            UPDATE dialogue
+            SET talkerId=(SELECT p.talkerId FROM _talk_legacy_projection p WHERE p.dialogueId=dialogue.dialogueId),
+                talkerType=(SELECT p.talkerType FROM _talk_legacy_projection p WHERE p.dialogueId=dialogue.dialogueId),
+                talkId=(SELECT p.talkId FROM _talk_legacy_projection p WHERE p.dialogueId=dialogue.dialogueId),
+                textHash=(SELECT p.textHash FROM _talk_legacy_projection p WHERE p.dialogueId=dialogue.dialogueId),
+                coopQuestId=(SELECT CASE WHEN p.coopQuestId=0 THEN NULL ELSE p.coopQuestId END
+                             FROM _talk_legacy_projection p WHERE p.dialogueId=dialogue.dialogueId)
+            WHERE dialogueId IN (SELECT dialogueId FROM _talk_legacy_projection)
+            """
+        )
+        cursor.execute(
+            """
+            DELETE FROM dialogue
+            WHERE NOT EXISTS (
+                SELECT 1 FROM _talk_legacy_projection p
+                WHERE p.dialogueId=dialogue.dialogueId
+            )
+            """
+        )
+        stats["legacy_projection_deleted"] = max(0, cursor.rowcount)
+
+        cursor.execute(
+            """
+            DELETE FROM quest_hash_map
+            WHERE source_type='dialogue'
+              AND (hash IS NULL OR hash=0 OR NOT EXISTS (
+                  SELECT 1 FROM textMap tm WHERE tm.hash=quest_hash_map.hash
+              ))
+            """
+        )
+        stats["invalid_quest_hash_map_deleted"] = max(0, cursor.rowcount)
+
+        if affected_quest_ids:
+            _refresh_dialogue_hash_map_for_quest_ids(
+                cursor, affected_quest_ids, batch_size=batch_size
+            )
+            refresh_quest_text_versions(cursor, quest_ids=affected_quest_ids)
+        elif affected_talk_ids:
+            _refresh_dialogue_hash_map_for_talk_ids(
+                cursor, affected_talk_ids, batch_size=batch_size
+            )
+
+        remaining = cursor.execute(
+            f"""
+            SELECT COUNT(*) FROM {_TALK_DIALOGUE_CONTENT_TABLE} c
+            WHERE c.textHash IS NULL OR c.textHash=0 OR NOT EXISTS (
+                SELECT 1 FROM textMap tm WHERE tm.hash=c.textHash
+            )
+            """
+        ).fetchone()
+        stats["remaining_invalid_content"] = int(remaining[0] or 0)
+        remaining_links = cursor.execute(
+            f"SELECT COUNT(*) FROM ({orphan_link_query})"
+        ).fetchone()
+        stats["remaining_orphan_links"] = int(remaining_links[0] or 0)
+        if own_cursor and commit:
+            conn.commit()
+        return stats
+    except Exception:
+        if own_cursor and commit:
+            conn.rollback()
+        raise
+    finally:
+        if own_cursor:
+            cursor.close()
 
 
 def importQuestBriefs(*, commit: bool = True, batch_size: int = DEFAULT_BATCH_SIZE):
@@ -2795,8 +3153,10 @@ def runQuestOnly(
     batch_size: int = DEFAULT_BATCH_SIZE,
 ):
     talk_rows = 0
+    talk_cleanup_stats: dict[str, int] = {}
     if include_talks:
         talk_rows = importAllTalkItems(commit=True, batch_size=batch_size)
+        talk_cleanup_stats = pruneInvalidTalkData(commit=True, batch_size=batch_size)
 
     if include_quests:
         quest_stats = importAllQuests(
@@ -2847,6 +3207,7 @@ def runQuestOnly(
     result["anecdote_new_count"] = int(anecdote_stats.get("new_quest_count", 0) or 0)
     result["anecdote_mapping_miss_count"] = int(anecdote_stats.get("mapping_miss_count", 0) or 0)
     result["talk_rows_imported"] = int(talk_rows or 0)
+    result["talk_cleanup"] = talk_cleanup_stats
     result["quests_processed"] = bool(include_quests)
     result["talks_processed"] = bool(include_talks)
     return result

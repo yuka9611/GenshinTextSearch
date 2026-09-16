@@ -206,6 +206,84 @@ def refresh_quest_hash_map_for_talk_ids(
     return touched
 
 
+def refresh_dialogue_hash_map_for_quest_ids(
+    cursor,
+    quest_ids,
+    *,
+    batch_size: int = DEFAULT_BATCH_SIZE,
+) -> int:
+    """Rebuild only dialogue provenance, preserving title/description rows."""
+    ensure_quest_hash_map_schema(cursor)
+    normalized_ids = normalize_unique_ints(quest_ids)
+    if not normalized_ids:
+        return 0
+    cursor.execute(
+        "CREATE TEMP TABLE IF NOT EXISTS _qhm_target_quest_id(questId INTEGER PRIMARY KEY)"
+    )
+    cursor.execute("DELETE FROM _qhm_target_quest_id")
+    executemany_batched(
+        cursor,
+        "INSERT OR IGNORE INTO _qhm_target_quest_id(questId) VALUES (?)",
+        ((qid,) for qid in normalized_ids),
+        batch_size=batch_size,
+    )
+    cursor.execute(
+        "DELETE FROM quest_hash_map "
+        "WHERE source_type=? AND questId IN (SELECT questId FROM _qhm_target_quest_id)",
+        (QUEST_HASH_SOURCE_TYPE_DIALOGUE,),
+    )
+    cursor.execute(
+        """
+        INSERT OR IGNORE INTO quest_hash_map(questId, hash, source_type)
+        SELECT DISTINCT qt.questId, c.textHash, ?
+        FROM questTalk qt
+        JOIN _qhm_target_quest_id target ON target.questId=qt.questId
+        JOIN talk_dialogue_content c
+          ON c.talkId=qt.talkId
+         AND c.coopQuestId=coalesce(qt.coopQuestId,0)
+        JOIN textMap tm ON tm.hash=c.textHash
+        WHERE c.textHash IS NOT NULL AND c.textHash<>0
+        """,
+        (QUEST_HASH_SOURCE_TYPE_DIALOGUE,),
+    )
+    return len(normalized_ids)
+
+
+def refresh_dialogue_hash_map_for_talk_ids(
+    cursor,
+    talk_ids,
+    *,
+    batch_size: int = DEFAULT_BATCH_SIZE,
+) -> int:
+    """Rebuild dialogue provenance for quests referencing the given Talk IDs."""
+    ensure_quest_hash_map_schema(cursor)
+    normalized_ids = normalize_unique_ints(talk_ids)
+    if not normalized_ids:
+        return 0
+    cursor.execute(
+        "CREATE TEMP TABLE IF NOT EXISTS _qhm_target_talk_id(talkId INTEGER PRIMARY KEY)"
+    )
+    cursor.execute("DELETE FROM _qhm_target_talk_id")
+    executemany_batched(
+        cursor,
+        "INSERT OR IGNORE INTO _qhm_target_talk_id(talkId) VALUES (?)",
+        ((tid,) for tid in normalized_ids),
+        batch_size=batch_size,
+    )
+    quest_rows = cursor.execute(
+        """
+        SELECT DISTINCT qt.questId
+        FROM questTalk qt
+        JOIN _qhm_target_talk_id target ON target.talkId=qt.talkId
+        """
+    ).fetchall()
+    return refresh_dialogue_hash_map_for_quest_ids(
+        cursor,
+        (row[0] for row in quest_rows),
+        batch_size=batch_size,
+    )
+
+
 def _refresh_quest_hash_map_by_target_table(cursor):
     excluded_sql, excluded_params = build_quest_text_excluded_sql("tm.content")
     filter_lang_id = get_quest_text_filter_lang_id(cursor)

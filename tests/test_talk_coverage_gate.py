@@ -42,6 +42,43 @@ def _create_talk_tables(connection):
     )
 
 
+def test_talk_coverage_gate_ignores_missing_textmap_alias_and_rejects_invalid_db_row(tmp_path):
+    talk_root = tmp_path / "BinOutput" / "Talk" / "Quest"
+    talk_root.mkdir(parents=True)
+    (talk_root / "7621402.json").write_text(
+        json.dumps(
+            {
+                "IOKNFDJFGDH": 7621402,
+                "PFALHAKIILD": [
+                    {"OIFGMOHKPOI": 1, "OACNIBLFFDI": 100, "LFGCLNLPAPB": {}},
+                    {"OIFGMOHKPOI": 1, "OACNIBLFFDI": 99, "LFGCLNLPAPB": {}},
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    connection = sqlite3.connect(":memory:")
+    _create_talk_tables(connection)
+    connection.execute("CREATE TABLE textMap(hash INTEGER, lang TEXT, content TEXT)")
+    connection.execute("INSERT INTO textMap VALUES (100, 'chs', '有效')")
+    connection.execute(
+        "INSERT INTO talk_dialogue_content VALUES (7621402, 0, 1, 100, NULL, NULL)"
+    )
+    connection.execute("INSERT INTO talk_dialogue_link VALUES (7621402, 0, 1)")
+    connection.commit()
+
+    report = assert_talk_dialogue_coverage(connection.cursor(), str(tmp_path))
+    assert report["source_unique_content_rows"] == 1
+    assert report["invalid_content_rows"] == 0
+
+    connection.execute(
+        "INSERT INTO talk_dialogue_content VALUES (7621402, 0, 1, 99, NULL, NULL)"
+    )
+    failed = audit_talk_dialogue_coverage(connection.cursor(), str(tmp_path))
+    assert failed["invalid_content_rows"] == 1
+    assert failed["extra_content_rows"] == 1
+
+
 def test_talk_coverage_gate_accepts_duplicate_source_scopes_and_detects_missing_rows(tmp_path):
     talk_root = tmp_path / "BinOutput" / "Talk"
     for folder, dialogue_id, text_hash in (

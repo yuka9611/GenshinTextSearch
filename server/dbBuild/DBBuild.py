@@ -188,6 +188,38 @@ def mergeAllTalkItems(
     )
 
 
+def replaceTalkScopeFromFiles(
+    talk_id: int,
+    coop_quest_id: int,
+    source_paths: list[str],
+    *,
+    commit: bool = True,
+    batch_size: int = DEFAULT_BATCH_SIZE,
+    skip_collector: list[str] | None = None,
+) -> int:
+    return questImport.replaceTalkScopeFromFiles(
+        talk_id,
+        coop_quest_id,
+        source_paths,
+        commit=commit,
+        batch_size=batch_size,
+        skip_collector=skip_collector,
+    )
+
+
+def pruneInvalidTalkData(
+    *,
+    cursor=None,
+    commit: bool = True,
+    batch_size: int = DEFAULT_BATCH_SIZE,
+) -> dict[str, int]:
+    return questImport.pruneInvalidTalkData(
+        cursor=cursor,
+        commit=commit,
+        batch_size=batch_size,
+    )
+
+
 def importAvatars(*, commit: bool = True, batch_size: int = DEFAULT_BATCH_SIZE):
     cursor = conn.cursor()
     avatars = _load_json_rows(os.path.join(DATA_PATH, "ExcelBinOutput", "AvatarExcelConfigData.json"))
@@ -556,6 +588,7 @@ def main(
         "readable",
         "subtitles",
         "textmap",
+        "talk_cleanup",
         "readable_meta",
         "entity_sources",
         "version_catalog"
@@ -637,6 +670,13 @@ def main(
                     stage,
                     textMapImport.importAllTextMap,
                     prune_missing=prune_missing,
+                    skip_asking=True,
+                )
+            elif stage == "talk_cleanup":
+                _run_stage(
+                    stage_timer,
+                    stage,
+                    pruneInvalidTalkData,
                     skip_asking=True,
                 )
             elif stage == "readable_meta":

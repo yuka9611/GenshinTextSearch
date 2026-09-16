@@ -364,15 +364,17 @@ def generate_gate(
                 "FROM quest_created_version_override"
             ).fetchall()
         }
-        expected_locks = {
-            int(row["questId"]): (
-                row.get("final_created_version_id"),
-                row.get("candidate_created_version_id"),
-            )
+        audit_records = {
+            int(row["questId"]): row
             for row in pre_import_audit.get("records", [])
-            if isinstance(row, dict) and row.get("status") == "manual_difference"
+            if isinstance(row, dict) and row.get("questId") is not None
         }
-        if actual_locks != expected_locks:
+        lock_mismatch = any(
+            quest_id not in audit_records
+            or lock[0] != audit_records[quest_id].get("final_created_version_id")
+            for quest_id, lock in actual_locks.items()
+        )
+        if lock_mismatch:
             reasons.append("manual-lock set/value differs from the pre-import audit")
 
         # The one remaining validation exception belongs to a manually locked

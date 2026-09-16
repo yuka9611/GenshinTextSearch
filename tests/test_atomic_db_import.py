@@ -95,6 +95,38 @@ def test_verify_prepared_provenance_checks_locked_and_quest_values(tmp_path):
     }
 
 
+def test_verify_prepared_provenance_allows_preexisting_audit_anomalies(tmp_path):
+    source = tmp_path / "source.db"
+    audit = tmp_path / "audit.json"
+    _make_source(source)
+    audit.write_text(
+        json.dumps(
+            {
+                "records": [
+                    {
+                        "questId": 303,
+                        "status": "same",
+                        "final_created_version_id": 7,
+                        "candidate_created_version_id": 7,
+                    },
+                    {
+                        "questId": 404,
+                        "status": "manual_difference",
+                        "final_created_version_id": 8,
+                        "candidate_created_version_id": 9,
+                    },
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    assert atomic_db_import._verify_prepared_provenance(source, audit) == {
+        "expected_locked": 1,
+        "prepared_audit_rows": 1,
+    }
+
+
 def test_rebase_audit_preserves_existing_manual_locks_and_new_differences(tmp_path):
     source = tmp_path / "source.db"
     audit = tmp_path / "audit.json"

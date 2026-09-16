@@ -21,7 +21,11 @@ from genshin_data_core.sources import (
     QuestSourceResolver,
     extract_anecdote_core_fields,
 )
-from genshin_data_core.talk import extract_talk_id, is_non_dialog_talk_obj
+from genshin_data_core.talk import (
+    extract_talk_id,
+    is_non_dialog_talk_obj,
+    normalize_talk_dialogue_rows,
+)
 
 
 def _quest_source_resolver(root) -> QuestSourceResolver:
@@ -114,6 +118,86 @@ def _create_quest_tables(connection: sqlite3.Connection):
     )
 
 
+def test_talk_normalizer_prefers_new_schema_but_keeps_multiple_valid_hashes():
+    rows = normalize_talk_dialogue_rows(
+        [
+            (3, [(101, 9001, 1, "OLD"), (102, 9002, 1, "OLD")]),
+            (1, [(101, 9003, 2, "NEW"), (102, 9004, 2, "NEW")]),
+            (1, [(101, 9005, 3, "NEW-OTHER")]),
+        ],
+        valid_text_hashes={9003, 9004, 9005},
+    )
+
+    assert rows == [
+        (101, 9003, 2, "NEW"),
+        (101, 9005, 3, "NEW-OTHER"),
+        (102, 9004, 2, "NEW"),
+    ]
+
+
+def test_prune_invalid_talk_data_repairs_links_projections_and_hash_maps(monkeypatch):
+    connection = sqlite3.connect(":memory:")
+    _create_dialogue_tables(connection)
+    _create_text_filter_tables(connection)
+    connection.execute(
+        "CREATE TABLE textMap(hash INTEGER, lang TEXT, content TEXT, created_version_id INTEGER)"
+    )
+    connection.execute(
+        "CREATE TABLE quest(questId INTEGER PRIMARY KEY, titleTextMapHash INTEGER, descTextMapHash INTEGER, longDescTextMapHash INTEGER, created_version_id INTEGER, source_type TEXT, source_code_raw TEXT)"
+    )
+    connection.execute(
+        "CREATE TABLE questTalk(questId INTEGER, talkId INTEGER, stepTitleTextMapHash INTEGER, coopQuestId INTEGER DEFAULT 0)"
+    )
+    connection.execute(
+        "CREATE TABLE quest_hash_map(questId INTEGER, hash INTEGER, source_type TEXT, PRIMARY KEY(questId, hash, source_type))"
+    )
+    questImport._ensure_talk_dialogue_link_schema(connection.cursor())
+    connection.execute(
+        "INSERT INTO textMap VALUES (11, 'chs', '有效对白', 1)"
+    )
+    connection.execute(
+        "INSERT INTO quest VALUES (76214, 0, 0, 0, 1, 'quest', 'quest')"
+    )
+    connection.execute("INSERT INTO questTalk VALUES (76214, 100, 0, 0)")
+    connection.executemany(
+        "INSERT INTO talk_dialogue_link VALUES (?,?,?)",
+        [(100, 0, 1), (100, 0, 999)],
+    )
+    connection.executemany(
+        "INSERT INTO talk_dialogue_content VALUES (?,?,?,?,?,?)",
+        [(100, 0, 1, 11, 7, 'NPC'), (100, 0, 1, 99, 7, 'NPC'), (100, 0, 999, 0, 7, 'NPC')],
+    )
+    connection.executemany(
+        "INSERT INTO dialogue(dialogueId, talkerId, talkerType, talkId, textHash, coopQuestId) VALUES (?,?,?,?,?,?)",
+        [(1, 7, 'NPC', 100, 99, None), (999, 7, 'NPC', 100, 99, None)],
+    )
+    connection.executemany(
+        "INSERT INTO quest_hash_map VALUES (?,?,?)",
+        [(76214, 11, 'dialogue'), (76214, 99, 'dialogue')],
+    )
+    connection.commit()
+
+    monkeypatch.setattr(questImport, "conn", connection)
+    stats = questImport.pruneInvalidTalkData(commit=True)
+
+    assert stats["invalid_content_deleted"] == 2
+    assert stats["orphan_links_deleted"] == 1
+    assert connection.execute(
+        "SELECT dialogueId, textHash FROM dialogue ORDER BY dialogueId"
+    ).fetchall() == [(1, 11)]
+    assert connection.execute(
+        "SELECT dialogueId, textHash FROM talk_dialogue_content"
+    ).fetchall() == [(1, 11)]
+    assert connection.execute(
+        "SELECT dialogueId FROM talk_dialogue_link"
+    ).fetchall() == [(1,)]
+    assert connection.execute(
+        "SELECT hash FROM quest_hash_map WHERE source_type='dialogue'"
+    ).fetchall() == [(11,)]
+    assert stats["remaining_invalid_content"] == 0
+    assert stats["remaining_orphan_links"] == 0
+
+
 def _create_text_filter_tables(connection: sqlite3.Connection):
     connection.execute(
         """
@@ -152,21 +236,12 @@ def test_import_all_talk_items_uses_posix_logical_paths(monkeypatch, tmp_path):
     nested_dir.mkdir()
     (nested_dir / "bar.json").write_text("{}", encoding="utf-8")
 
-    seen: list[str] = []
     monkeypatch.setattr(questImport, "DATA_PATH", str(tmp_path))
     monkeypatch.setattr(questImport, "conn", _DummyConn())
     monkeypatch.setattr(questImport, "LightweightProgress", _DummyProgress)
-    monkeypatch.setattr(questImport, "_refresh_quest_hash_map_for_talk_ids", lambda *args, **kwargs: None)
     monkeypatch.setattr(questImport, "_print_skip_summary", lambda *args, **kwargs: None)
-    monkeypatch.setattr(
-        questImport,
-        "importTalk",
-        lambda fileName, **kwargs: seen.append(fileName) or 0,
-    )
 
-    questImport.importAllTalkItems(commit=False)
-
-    assert seen == ["Quest/foo.json", "Quest/Nested/bar.json"]
+    assert questImport._list_talk_files() == ["Quest/foo.json", "Quest/Nested/bar.json"]
 
 
 def test_import_all_talk_items_merges_duplicate_logical_talk_scopes(monkeypatch, tmp_path):
