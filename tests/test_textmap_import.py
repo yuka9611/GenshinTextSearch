@@ -11,6 +11,50 @@ if DBBUILD_DIR not in sys.path:
     sys.path.insert(0, DBBUILD_DIR)
 
 import textMapImport
+import diffUpdate
+
+
+def test_recover_changed_textmap_scope_from_atomic_temp(tmp_path):
+    def build(path, rows):
+        connection = sqlite3.connect(path)
+        connection.executescript(
+            "CREATE TABLE app_meta(k TEXT PRIMARY KEY, v TEXT);"
+            "CREATE TABLE langCode(id INTEGER PRIMARY KEY, codeName TEXT);"
+            "CREATE TABLE textMap(id INTEGER PRIMARY KEY, lang INTEGER, hash INTEGER, "
+            "content TEXT, created_version_id INTEGER, updated_version_id INTEGER);"
+            "CREATE UNIQUE INDEX textMap_lang_hash ON textMap(lang, hash);"
+        )
+        connection.execute("INSERT INTO app_meta VALUES ('db_current_commit', 'base-sha')")
+        connection.executemany(
+            "INSERT INTO langCode VALUES (?, ?)",
+            [(1, "TextMapCHS.json"), (2, "TextMapEN.json")],
+        )
+        connection.executemany(
+            "INSERT INTO textMap(lang, hash, content, created_version_id, updated_version_id) "
+            "VALUES (?, ?, ?, ?, ?)",
+            rows,
+        )
+        connection.commit()
+        connection.close()
+
+    build(tmp_path / "data.db", [(1, 10, "same", 1, 1), (1, 20, "old", 1, 1), (2, 40, "same", 1, 1)])
+    build(
+        tmp_path / "data.db.tmp",
+        [(1, 10, "same", 1, 1), (1, 20, "new", 1, 2), (1, 30, "added", 2, 2), (2, 40, "same", 1, 2)],
+    )
+
+    scope = diffUpdate._recover_changed_textmap_hashes_from_main(
+        "base-sha",
+        {"TextMapCHS.json", "TextMapEN.json"},
+        temp_db_path=str(tmp_path / "data.db.tmp"),
+    )
+
+    assert scope == {"TextMapCHS.json": {20, 30}, "TextMapEN.json": {40}}
+    assert diffUpdate._recover_changed_textmap_hashes_from_main(
+        "wrong-sha",
+        {"TextMapCHS.json"},
+        temp_db_path=str(tmp_path / "data.db.tmp"),
+    ) is None
 
 
 def test_build_versioned_textmap_row_plan_inherits_versions_across_hash_change():

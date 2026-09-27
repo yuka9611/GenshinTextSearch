@@ -1,9 +1,10 @@
 import os
 import re
 import json
+import sqlite3
 import subprocess
 from datetime import datetime, timezone
-from pathlib import PurePosixPath
+from pathlib import Path, PurePosixPath
 
 from lightweight_progress import LightweightProgress
 
@@ -21,6 +22,7 @@ from import_utils import print_skip_summary as _print_skip_summary
 from text_source_path_utils import (
     build_readable_rel_path_from_record as _build_readable_record_rel_path,
     build_subtitle_rel_path_from_record as _build_subtitle_record_rel_path,
+    normalize_subtitle_rel_path,
 )
 from textmap_name_utils import parse_textmap_file_name, textmap_file_sort_key, analyze_textmap_version_exceptions, analyze_readable_version_exceptions, analyze_subtitle_version_exceptions, report_version_exceptions
 from version_control import (
@@ -301,6 +303,64 @@ def _record_source_file_versions(diff_entries: list[dict], version_label: str):
     cur.close()
 
 
+def _align_subtitle_file_created_versions(changed_files: list[str] | set[str]) -> int:
+    """Use the earlier of file provenance and the majority text creation version."""
+    paths = sorted(set(changed_files or []))
+    if not paths:
+        return 0
+
+    cur = conn.cursor()
+    corrected = 0
+    now_iso = _utc_now_iso()
+    try:
+        for path in paths:
+            parsed = normalize_subtitle_rel_path(path)
+            if parsed is None:
+                raise RuntimeError(f"Invalid changed Subtitle path: {path}")
+            _lang_name, lang_id, file_name = parsed
+            file_version = cur.execute(
+                "SELECT created_version FROM source_file_version WHERE path=?",
+                (path,),
+            ).fetchone()
+            if file_version is None:
+                raise RuntimeError(f"Missing Subtitle file provenance: {path}")
+            file_sort = cur.execute(
+                "SELECT version_sort_key FROM version_dim WHERE raw_version=?",
+                (file_version[0],),
+            ).fetchone()
+            if file_sort is None or file_sort[0] is None:
+                raise RuntimeError(f"Unresolved Subtitle file creation version: {path}")
+            majority = cur.execute(
+                """
+                SELECT vd.raw_version, vd.version_sort_key
+                FROM subtitle AS s
+                JOIN version_dim AS vd ON vd.id=s.created_version_id
+                WHERE s.fileName=? AND s.lang=?
+                GROUP BY s.created_version_id
+                ORDER BY COUNT(*) DESC, vd.version_sort_key ASC, vd.id ASC
+                LIMIT 1
+                """,
+                (file_name, lang_id),
+            ).fetchone()
+            if majority is None:
+                continue
+            if majority[1] is None:
+                raise RuntimeError(f"Unresolved majority Subtitle creation version: {path}")
+            if majority[1] < file_sort[0]:
+                cur.execute(
+                    "UPDATE source_file_version SET created_version=?, updated_at=? WHERE path=?",
+                    (majority[0], now_iso, path),
+                )
+                corrected += cur.rowcount
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        cur.close()
+    return corrected
+
+
 def _normalize_path(p: str | None) -> str | None:
     if p is None:
         return None
@@ -341,6 +401,8 @@ def _resolve_talk_keys(obj: dict):
         return None
     if is_non_dialog_talk_obj(obj):
         return None
+    if "talkId" in obj and "PCIAMAFDDAA" in obj:
+        return "talkId"
     if "talkId" in obj and "dialogList" in obj:
         return "talkId"
     if "ADHLLDAPKCM" in obj and "MOEOFGCKILF" in obj:
@@ -415,6 +477,7 @@ def _rebuild_talk_scope_from_local(
     scope: tuple[int, int],
     source_paths: list[str],
     talk_skipped_files: list[str],
+    valid_text_hashes: set[int] | None,
 ) -> None:
     """Replace one logical Talk scope with normalized current source paths."""
     talk_id, coop_quest_id = scope
@@ -422,8 +485,10 @@ def _rebuild_talk_scope_from_local(
         talk_id,
         coop_quest_id,
         source_paths,
-        commit=True,
+        commit=False,
         skip_collector=talk_skipped_files,
+        valid_text_hashes=valid_text_hashes,
+        refresh_hash_map=False,
     )
 
 
@@ -831,6 +896,65 @@ def _changed_textmap_hashes_by_base(plan) -> dict[str, set[int]]:
     return scoped_hashes
 
 
+def _recover_changed_textmap_hashes_from_main(
+    base_commit: str,
+    textmap_bases: set[str],
+    *,
+    temp_db_path: str | None = None,
+) -> dict[str, set[int]] | None:
+    """Recover the imported hash scope when an atomic temp DB resumes after TextMap."""
+    temp_path = Path(temp_db_path or os.environ.get("GTS_DB_PATH", ""))
+    if not str(temp_path).endswith(".tmp") or not temp_path.is_file():
+        return None
+    main_path = Path(str(temp_path)[:-4])
+    if not main_path.is_file():
+        return None
+
+    connection = sqlite3.connect(f"file:{temp_path}?mode=ro", uri=True)
+    try:
+        connection.execute("ATTACH DATABASE ? AS prior", (f"file:{main_path}?mode=ro",))
+        current_row = connection.execute(
+            "SELECT v FROM app_meta WHERE k='db_current_commit'"
+        ).fetchone()
+        prior_row = connection.execute(
+            "SELECT v FROM prior.app_meta WHERE k='db_current_commit'"
+        ).fetchone()
+        if not current_row or not prior_row or current_row[0] != base_commit or prior_row[0] != base_commit:
+            return None
+        lang_ids = {
+            str(code): int(lang_id)
+            for lang_id, code in connection.execute("SELECT id, codeName FROM langCode")
+        }
+        if not textmap_bases.issubset(lang_ids):
+            return None
+        result: dict[str, set[int]] = {}
+        for base_name in sorted(textmap_bases):
+            rows = connection.execute(
+                "SELECT current.hash FROM textMap current "
+                "LEFT JOIN prior.textMap previous "
+                "ON previous.lang=current.lang AND previous.hash=current.hash "
+                "WHERE current.lang=? AND (previous.id IS NULL "
+                "OR NOT (current.content IS previous.content) "
+                "OR NOT (current.created_version_id IS previous.created_version_id) "
+                "OR NOT (current.updated_version_id IS previous.updated_version_id))",
+                (lang_ids[base_name],),
+            )
+            changed = {int(row[0]) for row in rows}
+            if changed:
+                result[base_name] = changed
+        print(
+            "Diff update recovered TextMap hash scope from original DB: "
+            f"{sum(map(len, result.values()))} language-hash pairs",
+            flush=True,
+        )
+        return result
+    except sqlite3.DatabaseError as exc:
+        print(f"[WARN] TextMap hash scope recovery failed: {exc}", flush=True)
+        return None
+    finally:
+        connection.close()
+
+
 def _changed_textmap_hashes(plan) -> set[int]:
     hashes: set[int] = set()
     for scoped_hashes in _changed_textmap_hashes_by_base(plan).values():
@@ -908,22 +1032,34 @@ def _process_talk_stage(plan, repo_path, base_commit):
     # Rebuild each affected logical scope from all current source paths.  This
     # keeps distinct source payloads when a Talk ID is reused by multiple
     # directories, while retaining the existing link-based query semantics.
-    for scope in sorted(affected_scopes):
+    valid_text_hashes = DBBuild.loadCurrentTextHashes() if affected_scopes else None
+    if affected_scopes:
+        print(
+            "Diff update Talk valid TextMap hashes: "
+            f"{len(valid_text_hashes) if valid_text_hashes is not None else 'unavailable'}",
+            flush=True,
+        )
+    for processed, scope in enumerate(sorted(affected_scopes), start=1):
         _rebuild_talk_scope_from_local(
             scope,
             local_scope_files.get(scope, []),
             talk_skipped_files,
+            valid_text_hashes,
         )
         touched_talk_ids.add(int(scope[0]))
+        if processed % 500 == 0:
+            conn.commit()
+            print(f"Diff update Talk scopes: {processed}/{len(affected_scopes)}", flush=True)
+
+    if affected_scopes:
+        conn.commit()
 
     # 刷新quest哈希映射
     if touched_talk_ids:
         try:
             DBBuild.refreshQuestHashMapByTalkIds(touched_talk_ids, commit=True)
-        except Exception as e:
-            anomalies.append(
-                f"Failed to refresh quest hash map: {str(e)}"
-            )
+        except Exception as exc:
+            raise RuntimeError("Failed to refresh quest hash map after Talk replacement") from exc
 
     _print_skip_summary("diffupdate talk", talk_skipped_files)
     if intentional_non_dialog_files:
@@ -1526,7 +1662,14 @@ def run_diff_update(
         state["stage"] = stage_name
 
     if plan["textmap_bases"] and stage_done("textmap"):
-        plan["textmap_scope_failed"] = True
+        recovered_scope = _recover_changed_textmap_hashes_from_main(
+            base_commit,
+            plan["textmap_bases"],
+        )
+        if recovered_scope is None:
+            plan["textmap_scope_failed"] = True
+        else:
+            plan["changed_textmap_hashes_by_base"] = recovered_scope
 
     # Apply textMap changes first so downstream quest version checks can
     # use the latest textMap.updated_version marks for this target version.
@@ -1606,6 +1749,11 @@ def run_diff_update(
             f"unresolved={pre_history_text_stats.get('unresolved_rows', 0)}"
         )
         _process_version_catalog_stage(plan, target_commit, base_commit)
+        corrected_subtitle_files = _align_subtitle_file_created_versions(
+            plan["subtitle_changed"]
+        )
+        if corrected_subtitle_files:
+            print(f"Subtitle file creation versions aligned: {corrected_subtitle_files}")
         mark_stage("version_catalog")
 
     if not stage_done("finalize"):

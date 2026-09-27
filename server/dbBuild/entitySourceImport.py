@@ -1198,7 +1198,13 @@ def _gender_code(body_types: Any) -> int:
 
 
 def _get_body_types(row: dict[str, Any]) -> Any:
-    for key in ("BKBPADANEOC", "IAHOEKGIPPJ", "AFAENJLHMOD"):
+    for key in (
+        "JKOKOGCFAKF",  # 7.1 BeyondCostume and BeyondCostumeSuit
+        "GOCCLKKDFNM",  # 7.0 BeyondCostume and BeyondCostumeSuit
+        "BKBPADANEOC",
+        "IAHOEKGIPPJ",
+        "AFAENJLHMOD",
+    ):
         if key in row:
             return row.get(key)
     return None
@@ -1453,8 +1459,8 @@ def _iter_tps_weapon_accessory_mappings(
 ):
     """Map dedicated TPS accessory text to its proven Material entity.
 
-    ``MFJCLHGDLBP`` is the material id consumed to unlock the accessory and
-    ``KKJDFJMLMBA`` is the associated TpsWeapon id.  The material row remains
+    ``MFJCLHGDLBP``/``KOHCBGDKMPG`` is the material id consumed to unlock the
+    accessory. The material row remains
     the entity owner, while the dedicated config contributes component names,
     descriptions, and unlock descriptions that are not present in
     MaterialExcelConfigData.
@@ -1465,7 +1471,7 @@ def _iter_tps_weapon_accessory_mappings(
         if (material_id := _as_nonzero_int(material.get("id"))) is not None
     }
     for row in rows:
-        material_id = _as_nonzero_int(row.get("MFJCLHGDLBP"))
+        material_id = _as_nonzero_int(row.get("KOHCBGDKMPG") or row.get("MFJCLHGDLBP"))
         if material_id is None:
             continue
         material = material_by_id.get(material_id)

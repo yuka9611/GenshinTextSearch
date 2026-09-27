@@ -2777,6 +2777,8 @@ def replaceTalkScopeFromFiles(
     commit: bool = True,
     batch_size: int = DEFAULT_BATCH_SIZE,
     skip_collector: list[str] | None = None,
+    valid_text_hashes: set[int] | None = None,
+    refresh_hash_map: bool = True,
 ) -> int:
     """Replace one scope with its normalized current source representation."""
     own_cursor = True
@@ -2787,7 +2789,9 @@ def replaceTalkScopeFromFiles(
         normalized_scopes = _collect_normalized_talk_scopes(
             source_paths,
             local_skipped,
-            valid_text_hashes=_current_text_hashes(cursor),
+            valid_text_hashes=(
+                valid_text_hashes if valid_text_hashes is not None else _current_text_hashes(cursor)
+            ),
         )
         scope = (int(talk_id), _normalize_coop_quest_id(coop_quest_id))
         if source_paths and scope not in normalized_scopes:
@@ -2809,11 +2813,12 @@ def replaceTalkScopeFromFiles(
             preserve_existing_dialogue=False,
             touched_talk_collector=None,
         )
-        _refresh_dialogue_hash_map_for_talk_ids(
-            cursor,
-            [scope[0]],
-            batch_size=batch_size,
-        )
+        if refresh_hash_map:
+            _refresh_dialogue_hash_map_for_talk_ids(
+                cursor,
+                [scope[0]],
+                batch_size=batch_size,
+            )
         if commit:
             conn.commit()
         return imported_rows

@@ -21,6 +21,8 @@ def test_build_subtitle_filename_map_supports_obfuscated_path_keys():
             {"id": 105, "HJBAJOBPLGE": "CHS/Cs_MDAQ019_DragonInCity_CHS.mihoyobin"},
             {"id": 106, "DEFNEHAFMMA": "Subtitle/CHS/Cutscene_06.srt"},
             {"id": 107, "JDNBKKPEFAI": "CHS/Cs_MDAQ020_Trial_CHS.mihoyobin"},
+            {"id": 108, "FCNGPFLCLFA": "CHS/Cs_MDAQ021_Trial_CHS.mihoyobin"},
+            {"id": 109, "MBOPLLJEHCJ": "Subtitle/CHS/Cutscene_09.srt"},
         ]
     )
 
@@ -29,6 +31,8 @@ def test_build_subtitle_filename_map_supports_obfuscated_path_keys():
     assert mapping["Cutscene_03"] == {"subtitleId": 103}
     assert mapping["Cutscene_06"] == {"subtitleId": 106}
     assert mapping["Cs_MDAQ020_Trial_CHS"] == {"subtitleId": 107}
+    assert mapping["Cs_MDAQ021_Trial_CHS"] == {"subtitleId": 108}
+    assert mapping["Cutscene_09"] == {"subtitleId": 109}
     assert mapping["Cs_MDAQ019_DragonInCity_CHS"] == {"subtitleId": 105}
     assert "NotSubtitle" not in mapping
 

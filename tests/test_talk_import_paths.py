@@ -20,6 +20,7 @@ from genshin_data_core.sources import (
     ANECDOTE_SOURCE_STATUS_MAPPING_MISS,
     QuestSourceResolver,
     extract_anecdote_core_fields,
+    extract_storyboard_group_talk_ids,
 )
 from genshin_data_core.talk import (
     extract_talk_id,
@@ -464,11 +465,71 @@ def test_diff_update_resolve_talk_keys_supports_6_7_schema():
     assert diffUpdate._resolve_talk_keys(obj) == "LDLMECNIJFC"
 
 
+def test_diff_update_resolve_talk_keys_supports_7_1_schema():
+    obj = {"talkId": 6987810, "PCIAMAFDDAA": [{"id": 698781001, "LKECPJIFFEE": 3728079010}]}
+    assert diffUpdate._resolve_talk_keys(obj) == "talkId"
+    assert diffUpdate._extract_talk_scope("Storyboard/a8e1ffaf.json", obj) == (6987810, 0)
+
+
+def test_diff_talk_stage_reuses_textmap_hashes_across_scopes(monkeypatch, tmp_path):
+    talk_dir = tmp_path / "BinOutput" / "Talk" / "Storyboard"
+    talk_dir.mkdir(parents=True)
+    for talk_id in (6987810, 6987811):
+        (talk_dir / f"{talk_id}.json").write_text(
+            json.dumps({"talkId": talk_id, "PCIAMAFDDAA": [{"id": talk_id * 100 + 1}]}),
+            encoding="utf-8",
+        )
+    monkeypatch.setattr(diffUpdate, "DATA_PATH", str(tmp_path))
+    valid_hashes = {3728079010}
+    loads = []
+    replacements = []
+    commits = []
+    monkeypatch.setattr(diffUpdate, "conn", type("FakeConnection", (), {"commit": lambda self: commits.append(1)})())
+    monkeypatch.setattr(diffUpdate.DBBuild, "loadCurrentTextHashes", lambda: loads.append(1) or valid_hashes)
+    monkeypatch.setattr(
+        diffUpdate.DBBuild,
+        "replaceTalkScopeFromFiles",
+        lambda *args, **kwargs: replacements.append((args, kwargs)),
+    )
+    monkeypatch.setattr(diffUpdate.DBBuild, "refreshQuestHashMapByTalkIds", lambda *_args, **_kwargs: None)
+
+    anomalies = diffUpdate._process_talk_stage(
+        {"talk_deleted": set(), "talk_changed": {f"Storyboard/{talk_id}.json" for talk_id in (6987810, 6987811)}},
+        str(tmp_path),
+        "unused-base",
+    )
+
+    assert anomalies == []
+    assert len(loads) == 1
+    assert len(replacements) == 2
+    assert all(kwargs["valid_text_hashes"] is valid_hashes for _, kwargs in replacements)
+    assert all(kwargs["commit"] is False and kwargs["refresh_hash_map"] is False for _, kwargs in replacements)
+    assert commits == [1]
+
+
 def test_new_storyboard_group_schema_is_non_dialog_talk_obj():
     obj = {"ANCLPHMACIF": 0, "CIAOBJHFJJM": []}
 
     assert is_non_dialog_talk_obj(obj)
     assert diffUpdate._resolve_talk_keys(obj) is None
+
+
+def test_7_1_group_and_placeholder_shapes_are_non_dialog():
+    objects = (
+        {"DLLABGGCEBM": [{"id": 6980101}]},
+        {"talkId": 6980101},
+        {"PCIAMAFDDAA": []},
+        {"id": 6980101, "DGAIPHFGBOD": 1, "NNEHBCLEGHG": []},
+    )
+    for obj in objects:
+        assert is_non_dialog_talk_obj(obj)
+        assert diffUpdate._resolve_talk_keys(obj) is None
+
+
+def test_7_1_storyboard_group_extracts_talk_ids():
+    assert extract_storyboard_group_talk_ids(
+        {"DLLABGGCEBM": [{"id": 6980101}, {"id": 6980102}]}
+    ) == [6980101, 6980102]
 
 
 def test_7_0_activity_group_embedded_talk_rows_are_non_dialog():
@@ -997,6 +1058,10 @@ def test_load_storyboard_file_by_talk_id_indexes_hashed_storyboard_files(monkeyp
         json.dumps({"IOEDPLCPFFB": []}),
         encoding="utf-8",
     )
+    (storyboard_dir / "new-schema.json").write_text(
+        json.dumps({"talkId": 6989901, "PCIAMAFDDAA": []}),
+        encoding="utf-8",
+    )
 
     mapping = _quest_source_resolver(tmp_path).load_storyboard_file_by_talk_id()
 
@@ -1004,6 +1069,7 @@ def test_load_storyboard_file_by_talk_id_indexes_hashed_storyboard_files(monkeyp
         6987810: "BinOutput/Talk/Storyboard/a8e1ffaf.json",
         7002: "BinOutput/Talk/Storyboard/legacy.json",
         6980101: "BinOutput/Talk/Storyboard/6980101.json",
+        6989901: "BinOutput/Talk/Storyboard/new-schema.json",
     }
 
 
@@ -1047,6 +1113,27 @@ def test_extract_anecdote_core_fields_supports_6_7_anecdote_keys():
         "story_quest_ids": [510640101],
         "legacy_group_ids": [9878, 9864, 7010],
     }
+
+
+def test_extract_anecdote_core_fields_supports_7_1_keys():
+    core_fields = extract_anecdote_core_fields(
+        {
+            "JJDBNNAJGAA": 107701,
+            "NLBLEOBAOAJ": 2416311523,
+            "MBPANALDEMH": 3876969701,
+            "KOOFDCNNHGP": [510770101],
+            "MOLOLDDIDGH": [9878, 9864],
+        }
+    )
+    assert core_fields == {
+        "quest_id": 107701,
+        "title_text_map_hash": 2416311523,
+        "desc_text_map_hash": 3876969701,
+        "long_desc_text_map_hash": None,
+        "story_quest_ids": [510770101],
+        "legacy_group_ids": [9878, 9864],
+    }
+    assert extract_anecdote_core_fields({"NLBLEOBAOAJ": 2416311523}) is None
 
 
 def test_extract_anecdote_history_row_supports_current_story_keys():
@@ -1279,6 +1366,7 @@ def test_import_anecdote_mapping_miss_does_not_duplicate_no_talk(monkeypatch, tm
     mapping_miss_rows: list[str] = []
 
     monkeypatch.setattr(questImport, "conn", connection)
+    monkeypatch.setattr(questImport, "_get_quest_source_resolver", lambda: resolver)
     questImport._set_talk_dialogue_link_presence(None)
 
     quest_id, _is_new = questImport.importAnecdote(

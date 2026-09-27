@@ -15,6 +15,7 @@ class QuestFields(NamedTuple):
 
 
 _QUEST_SCHEMA_VARIANTS: tuple[dict[str, Any], ...] = (
+    {"quest_id": "id", "title_hash": "DOOCLIPFECE", "chapter_keys": ("chapterId",), "talks_key": "DLLABGGCEBM", "talk_id": "id", "signature_keys": ("DLLABGGCEBM", "JIJKODHIEED", "DOOCLIPFECE", "PCIAMAFDDAA")},
     {"quest_id": "NFIEHACCECI", "title_hash": "BPNEONFJEEO", "chapter_keys": ("BALAIBAGIEL",), "talks_key": "NFFIGDHFAJG", "talk_id": "NFIEHACCECI"},
     {"quest_id": "id", "title_hash": "titleTextMapHash", "chapter_keys": ("chapterId",), "talks_key": "talks", "talk_id": "id"},
     {"quest_id": "ILHDNJDDEOP", "title_hash": "MMOEEOFGHHG", "chapter_keys": ("IBNCKLKHAKG",), "talks_key": "IBEGAHMEABP", "talk_id": "ILHDNJDDEOP"},
@@ -43,7 +44,9 @@ class QuestParser:
         if not isinstance(obj, dict):
             return None
         for schema in _QUEST_SCHEMA_VARIANTS:
-            if schema["quest_id"] in obj:
+            if schema["quest_id"] in obj and (
+                "signature_keys" not in schema or any(key in obj for key in schema["signature_keys"])
+            ):
                 return schema
         return None
 
@@ -108,6 +111,8 @@ class QuestParser:
 
         schema = self._schema(obj)
         talks = obj.get(schema["talks_key"]) if schema is not None else None
+        if not isinstance(talks, list) and schema is not None and schema.get("talks_key") == "DLLABGGCEBM":
+            talks = obj.get("PCIAMAFDDAA")
         if not isinstance(talks, list) and self.profile.allow_subquest_id_fallback:
             talks = obj.get("GDDPNNHLGBL")
             if not isinstance(talks, list):
@@ -148,7 +153,7 @@ class QuestParser:
     def get_quest_subquests(obj: Any) -> list[dict[str, Any]]:
         if not isinstance(obj, dict):
             return []
-        for key in ("MEGJPCLADOG", "NLCNGJKMAEN", "subQuests", "GFLHMKOOHHA", "IKECHKLEFFK", "HLCINEMBGEF", "EBNBLBEIFFJ"):
+        for key in ("MEGJPCLADOG", "NLCNGJKMAEN", "subQuests", "GFLHMKOOHHA", "IKECHKLEFFK", "HLCINEMBGEF", "EBNBLBEIFFJ", "JIJKODHIEED"):
             value = obj.get(key)
             if isinstance(value, list):
                 return [item for item in value if isinstance(item, dict)]
@@ -157,13 +162,13 @@ class QuestParser:
     @staticmethod
     def get_step_desc_text_map_hash(step_obj: Any) -> Optional[int]:
         return extract_first_positive_int(
-            step_obj, "AJGGCMPLKHK", "stepDescTextMapHash", "OCMKKHHNKJO",
+            step_obj, "NBOJMAHCCGM", "AJGGCMPLKHK", "stepDescTextMapHash", "OCMKKHHNKJO",
             "BMBANCMPPOM", "NAEMBIJFJCA", "HMLBMECMBGA", "JDFENJAFCPF", "BMEACBBPBGK", "OANENPOPCFO",
         )
 
     @staticmethod
     def get_step_sub_id(step_obj: Any) -> Optional[int]:
-        return extract_first_positive_int(step_obj, "MPKBGPAKIOA", "subId", "KKMJBEPGLGD", "LAFBPKMMBHD", "NDOFAOCKPGE", "KCGAKLCHDCC")
+        return extract_first_positive_int(step_obj, "NFGFDHPPBIF", "MPKBGPAKIOA", "subId", "KKMJBEPGLGD", "LAFBPKMMBHD", "NDOFAOCKPGE", "KCGAKLCHDCC")
 
     @staticmethod
     def get_step_order(step_obj: Any) -> Optional[int]:
@@ -209,7 +214,7 @@ class QuestParser:
         initial = obj.get(schema["talks_key"]) if schema is not None else None
         if isinstance(initial, list):
             return [item for item in initial if isinstance(item, dict)]
-        for key in ("NFFIGDHFAJG", "talks", "IBEGAHMEABP", "DGJMIPFDEOF", "DCHHEHNNEOO", "GDDPNNHLGBL", "PFALHAKIILD"):
+        for key in ("DLLABGGCEBM", "PCIAMAFDDAA", "NFFIGDHFAJG", "talks", "IBEGAHMEABP", "DGJMIPFDEOF", "DCHHEHNNEOO", "GDDPNNHLGBL", "PFALHAKIILD"):
             value = obj.get(key)
             if isinstance(value, list):
                 return [item for item in value if isinstance(item, dict)]
@@ -225,7 +230,7 @@ class QuestParser:
     @staticmethod
     def _talk_start_subquest_ids(talk_obj: dict[str, Any]) -> list[int]:
         conditions = None
-        for key in ("MPFAEHLBPJE", "beginCond", "BLCEJLFCFPH"):
+        for key in ("JEDNDGCOMGC", "MPFAEHLBPJE", "beginCond", "BLCEJLFCFPH"):
             value = talk_obj.get(key)
             if isinstance(value, list):
                 conditions = value

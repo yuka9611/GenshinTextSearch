@@ -196,6 +196,8 @@ def replaceTalkScopeFromFiles(
     commit: bool = True,
     batch_size: int = DEFAULT_BATCH_SIZE,
     skip_collector: list[str] | None = None,
+    valid_text_hashes: set[int] | None = None,
+    refresh_hash_map: bool = True,
 ) -> int:
     return questImport.replaceTalkScopeFromFiles(
         talk_id,
@@ -204,7 +206,17 @@ def replaceTalkScopeFromFiles(
         commit=commit,
         batch_size=batch_size,
         skip_collector=skip_collector,
+        valid_text_hashes=valid_text_hashes,
+        refresh_hash_map=refresh_hash_map,
     )
+
+
+def loadCurrentTextHashes() -> set[int] | None:
+    cursor = conn.cursor()
+    try:
+        return questImport._current_text_hashes(cursor)
+    finally:
+        cursor.close()
 
 
 def pruneInvalidTalkData(

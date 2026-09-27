@@ -146,6 +146,8 @@ def importSubtitlesByFiles(
                     key = subtitle_key(clean_file_name, lang_id, start_time, end_time)
                     parsed_rows.append((key, start_time, end_time, text_content))
 
+                # Text changes get the target update version; timestamp-only
+                # moves keep their existing text version.
                 assigned_rows = assign_subtitle_versions_by_text(
                     existing_rows,
                     parsed_rows,
@@ -153,7 +155,11 @@ def importSubtitlesByFiles(
                 )
 
                 existing_map = {row[0]: (row[1], row[2], row[3]) for row in existing_rows}
-                to_delete = []
+                parsed_keys = {row[0] for row in parsed_rows}
+                # A changed SRT is a complete snapshot of this file and language.
+                # Keep the old rows until parsing/version assignment succeeds, then
+                # remove timestamps that no longer exist in the source file.
+                to_delete = list(existing_map.keys() - parsed_keys)
                 to_insert = []
 
                 for key, start_time, end_time, text_content, created_id, updated_id in assigned_rows:
@@ -194,8 +200,10 @@ def importSubtitlesByFiles(
                         )
 
                 if to_delete:
-                    placeholders = ",".join(["?"] * len(to_delete))
-                    cursor.execute(f"DELETE FROM subtitle WHERE subtitleKey IN ({placeholders})", to_delete)
+                    cursor.executemany(
+                        "DELETE FROM subtitle WHERE subtitleKey IS ? AND fileName=? AND lang=?",
+                        ((key, clean_file_name, lang_id) for key in to_delete),
+                    )
 
                 for row in to_insert:
                     writer.add(row)
@@ -244,6 +252,13 @@ def importSubtitlesByFiles(
     _print_summary("subtitle diff skipped paths", skipped_paths)
     if refresh_mapping:
         print(f"Subtitle mapping refresh rows: {mapping_updated_rows}")
+    if process_errors or skipped_paths:
+        if commit:
+            conn.rollback()
+        raise RuntimeError(
+            "Subtitle diff import incomplete: "
+            f"{len(process_errors)} parse/import errors, {len(skipped_paths)} skipped paths"
+        )
 
     if commit:
         conn.commit()

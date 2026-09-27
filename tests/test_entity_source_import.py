@@ -80,6 +80,46 @@ def test_iter_costume_mappings_supports_6_6_body_type_field():
     ]
 
 
+@pytest.mark.parametrize(
+    ("body_type_key", "body_types", "gender"),
+    [
+        ("GOCCLKKDFNM", ["BODY_BOY"], 1),
+        ("JKOKOGCFAKF", ["BODY_GIRL"], 2),
+        ("JKOKOGCFAKF", ["BODY_GIRL", "BODY_BOY"], 3),
+    ],
+)
+def test_iter_costume_mappings_supports_7_0_and_7_1_gender_keys(
+    body_type_key, body_types, gender
+):
+    row = {
+        "costumeId": 260003,
+        "nameTextMapHash": 2098177162,
+        "descriptionTextMapHash": 33590471,
+        body_type_key: body_types,
+    }
+
+    result = list(entitySourceImport._iter_costume_mappings([row]))
+
+    assert result[0][4] == entitySourceImport._pack_extra(
+        entitySourceImport.FIELD_DESC, gender
+    )
+
+
+def test_iter_suit_mappings_supports_7_1_gender_key():
+    row = {
+        "suitId": 265312,
+        "nameTextMapHash": 2365153540,
+        "descriptionTextMapHash": 338370744,
+        "JKOKOGCFAKF": ["BODY_BOY"],
+    }
+
+    result = list(entitySourceImport._iter_suit_mappings([row]))
+
+    assert result[0][4] == entitySourceImport._pack_extra(
+        entitySourceImport.FIELD_DESC, 1
+    )
+
+
 def test_iter_suit_mappings_emits_qianxing_suit_source_type_and_gender():
     rows = [
         {
@@ -1500,6 +1540,25 @@ def test_7_0_material_types_use_evidence_backed_categories():
     }
 
 
+def test_7_1_material_types_are_classified():
+    rows = [
+        {"id": 121629, "materialType": "MATERIAL_LUNARITEV2_INVITE", "nameTextMapHash": 1096654916, "descTextMapHash": 2702336053},
+        {"id": 121670, "materialType": "MATERIAL_VESNA_FASHION", "nameTextMapHash": 1299723588, "descTextMapHash": 1673658469},
+        {"id": 121662, "materialType": "MATERIAL_VODYANITSA_OUTLOOK", "nameTextMapHash": 585379004, "descTextMapHash": 3582910773},
+    ]
+    assert entitySourceImport._scan_unknown_material_types(rows, {}, set()) == {}
+    categories = {
+        (row[2], row[1], row[5])
+        for row in entitySourceImport._iter_material_mappings(rows)
+        if row[4] & 0xFF == entitySourceImport.FIELD_DESC
+    }
+    assert categories == {
+        (121629, entitySourceImport.SOURCE_TYPE_ITEM, entitySourceImport.entity_constants.SUB_QUEST_ITEM),
+        (121670, entitySourceImport.SOURCE_TYPE_DRESSING, entitySourceImport.entity_constants.SUB_NONE),
+        (121662, entitySourceImport.SOURCE_TYPE_DRESSING, entitySourceImport.entity_constants.SUB_NONE),
+    }
+
+
 def test_tps_accessory_rows_follow_material_relation_and_preserve_component_text():
     materials = [
         {
@@ -1521,6 +1580,17 @@ def test_tps_accessory_rows_follow_material_relation_and_preserve_component_text
     ]
 
     result = list(entitySourceImport._iter_tps_weapon_accessory_mappings(accessories, materials))
+    current_accessories = [
+        {
+            **accessories[0],
+            "KOHCBGDKMPG": 223111,
+            "GIGABHHHIMF": 224001,
+        }
+    ]
+    del current_accessories[0]["MFJCLHGDLBP"]
+    del current_accessories[0]["KKJDFJMLMBA"]
+    assert list(entitySourceImport._iter_tps_weapon_accessory_mappings(current_accessories, materials)) == result
+    assert list(entitySourceImport._iter_tps_weapon_accessory_mappings([{"id": 224505}], materials)) == []
 
     assert result == [
         (

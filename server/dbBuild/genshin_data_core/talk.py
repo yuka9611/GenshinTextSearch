@@ -50,6 +50,7 @@ def extract_talk_id(obj: Any) -> Optional[int]:
     if not isinstance(obj, dict):
         return None
     key_groups = (
+        ("talkId", "PCIAMAFDDAA"),
         ("talkId", "dialogList"),
         ("ADHLLDAPKCM", "MOEOFGCKILF"),
         ("FEOACBMDCKJ", "AAOAAFLLOJI"),
@@ -82,6 +83,15 @@ def is_non_dialog_talk_obj(
     if keys == {"activityId", "talks"}:
         return True
     if "talks" in obj and isinstance(obj.get("talks"), list):
+        return True
+    # 7.1 group files carry embedded Talk definitions, not dialogue payloads.
+    if "DLLABGGCEBM" in obj and isinstance(obj.get("DLLABGGCEBM"), list):
+        return True
+    if keys == {"talkId"}:
+        return True
+    if "PCIAMAFDDAA" in obj and "talkId" not in obj:
+        return True
+    if "DGAIPHFGBOD" in obj and "NNEHBCLEGHG" in obj and "id" in obj:
         return True
     # 7.0 ActivityGroup files contain embedded Talk rows under OJACLOOEAMG;
     # they are containers, not dialogue payloads.  The same field in a Quest
@@ -149,6 +159,7 @@ def is_non_dialog_talk_obj(
 # Keep this schema table shared by imports, coverage audits, and BwikiHelper's
 # compatibility loader so a new upstream Talk shape cannot silently diverge.
 TALK_DIALOGUE_SCHEMAS = (
+    ("talkId", "PCIAMAFDDAA", "id", "KBPOBGFGLKN", "type", "id", "LKECPJIFFEE"),
     ("talkId", "dialogList", "id", "talkRole", "type", "_id", "talkContentTextMapHash"),
     ("ADHLLDAPKCM", "MOEOFGCKILF", "ILHDNJDDEOP", "LCECPDILLEE", "_type", "_id", "GABLFFECBDO"),
     ("FEOACBMDCKJ", "AAOAAFLLOJI", "CCFPGAKINNB", "HJLEMJIGNFE", "type", "id", "BDOKCLNNDGN"),
@@ -159,17 +170,18 @@ TALK_DIALOGUE_SCHEMAS = (
     ("IOKNFDJFGDH", "PFALHAKIILD", "OIFGMOHKPOI", "LFGCLNLPAPB", "_type", "_id", "OACNIBLFFDI"),
 )
 
-# The compatibility table is ordered by discovery history, not source
-# freshness.  Keep freshness explicit so the 7.0 IOKN/PFAL schema wins over
-# the older hashed AADK/GALI schema when both describe one dialogue id.
+# Keep source freshness explicit when more than one schema describes a scoped
+# dialogue id.
 TALK_DIALOGUE_SCHEMA_PRIORITY = {
-    0: 0,  # readable talkId/dialogList shape
-    6: 1,  # current 7.0 IOKNFDJFGDH/PFALHAKIILD shape
-    5: 2,
-    4: 3,
-    3: 4,
-    2: 5,
-    1: 6,
+    0: 0,  # 7.1 talkId/PCIAMAFDDAA shape
+    1: 1,  # readable talkId/dialogList shape
+    8: 2,  # 7.0 IOKNFDJFGDH/PFALHAKIILD shape
+    7: 3,
+    6: 4,
+    5: 5,
+    4: 6,
+    3: 7,
+    2: 8,
 }
 
 
@@ -204,7 +216,7 @@ def extract_talk_dialogue_payload_with_schema(obj: Any):
             return None
         raw_dialogues = obj.get(dialogue_list_key)
         if not isinstance(raw_dialogues, list):
-            return talk_id, []
+            return TALK_DIALOGUE_SCHEMA_PRIORITY.get(schema_rank, schema_rank), talk_id, []
         rows = []
         for dialogue in raw_dialogues:
             if not isinstance(dialogue, dict):
