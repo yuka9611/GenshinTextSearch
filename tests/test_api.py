@@ -276,6 +276,31 @@ class TestKeywordQueryEndpoint:
         assert data["code"] == 200
         assert data["data"]["total"] == 1
 
+    @pytest.mark.parametrize(
+        "pagination",
+        [
+            {"page": 1, "pageSize": 101},
+            {"page": 101, "pageSize": 50},
+        ],
+    )
+    def test_keyword_query_rejects_pagination_over_work_budget_before_search(
+        self, monkeypatch, pagination
+    ):
+        def unexpected_search(*args, **kwargs):
+            pytest.fail("oversized pagination reached search/database work")
+
+        monkeypatch.setattr(api.controllers_module, "getTranslateObj", unexpected_search)
+
+        app = _app()
+        payload = {"langCode": 1, "keyword": "测试", **pagination}
+        with _request_context(app, "/api/keywordQuery", method="POST", json_body=payload):
+            resp, status_code = api.keywordQuery()
+
+        data = resp.get_json()
+        assert status_code == 400
+        assert data["code"] == 400
+        assert data["msg"] == "Pagination limit exceeded"
+
     def test_keyword_query_passes_story_source_type(self, monkeypatch):
         calls = {}
 

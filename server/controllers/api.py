@@ -23,6 +23,8 @@ from utils.cache import search_cache
 
 _controllers_module = None
 _database_helper_module = None
+MAX_KEYWORD_QUERY_PAGE_SIZE = 100
+MAX_KEYWORD_QUERY_CANDIDATES = 5000
 
 # databaseHelper keeps one process-global SQLite connection. Although it allows
 # cross-thread use, concurrent cursors on that connection can fail with
@@ -599,6 +601,12 @@ def keywordQuery():
 
     page = max(1, int(page) if page else 1)
     pageSize = max(1, int(pageSize) if pageSize else 50)
+
+    if (
+        pageSize > MAX_KEYWORD_QUERY_PAGE_SIZE
+        or page * pageSize > MAX_KEYWORD_QUERY_CANDIDATES
+    ):
+        return jsonify({"data": None, "code": 400, "msg": "Pagination limit exceeded"}), 400
 
     if voiceFilter not in ("all", "with", "without"):
         voiceFilter = "all"
