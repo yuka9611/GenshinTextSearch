@@ -135,7 +135,7 @@ def _build_lookup(data_path: str) -> _ReadableMetaLookup:
             continue
 
         readable_ids: list[int] = []
-        quest_id_list = row.get("questIDList")
+        quest_id_list = row.get("PLOJOMIPJGH", row.get("questIDList"))
         if isinstance(quest_id_list, list):
             for loc_id in quest_id_list:
                 if not isinstance(loc_id, int) or loc_id not in readable_localization_ids:

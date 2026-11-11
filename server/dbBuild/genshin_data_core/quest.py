@@ -162,7 +162,7 @@ class QuestParser:
     @staticmethod
     def get_step_desc_text_map_hash(step_obj: Any) -> Optional[int]:
         return extract_first_positive_int(
-            step_obj, "NBOJMAHCCGM", "AJGGCMPLKHK", "stepDescTextMapHash", "OCMKKHHNKJO",
+            step_obj, "descTextMapHash", "NBOJMAHCCGM", "AJGGCMPLKHK", "stepDescTextMapHash", "OCMKKHHNKJO",
             "BMBANCMPPOM", "NAEMBIJFJCA", "HMLBMECMBGA", "JDFENJAFCPF", "BMEACBBPBGK", "OANENPOPCFO",
         )
 

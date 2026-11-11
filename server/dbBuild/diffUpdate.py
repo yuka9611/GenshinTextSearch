@@ -23,6 +23,7 @@ from text_source_path_utils import (
     build_readable_rel_path_from_record as _build_readable_record_rel_path,
     build_subtitle_rel_path_from_record as _build_subtitle_record_rel_path,
     normalize_subtitle_rel_path,
+    build_subtitle_rel_path,
 )
 from textmap_name_utils import parse_textmap_file_name, textmap_file_sort_key, analyze_textmap_version_exceptions, analyze_readable_version_exceptions, analyze_subtitle_version_exceptions, report_version_exceptions
 from version_control import (
@@ -317,13 +318,16 @@ def _align_subtitle_file_created_versions(changed_files: list[str] | set[str]) -
             parsed = normalize_subtitle_rel_path(path)
             if parsed is None:
                 raise RuntimeError(f"Invalid changed Subtitle path: {path}")
-            _lang_name, lang_id, file_name = parsed
+            lang_name, lang_id, file_name = parsed
+            # Diff plans pass language-relative Windows paths, while provenance
+            # is recorded under full Git paths. Rebuild the same canonical key.
+            provenance_path = build_subtitle_rel_path(file_name, lang_name)
             file_version = cur.execute(
                 "SELECT created_version FROM source_file_version WHERE path=?",
-                (path,),
+                (provenance_path,),
             ).fetchone()
             if file_version is None:
-                raise RuntimeError(f"Missing Subtitle file provenance: {path}")
+                raise RuntimeError(f"Missing Subtitle file provenance: {provenance_path}")
             file_sort = cur.execute(
                 "SELECT version_sort_key FROM version_dim WHERE raw_version=?",
                 (file_version[0],),
@@ -349,7 +353,7 @@ def _align_subtitle_file_created_versions(changed_files: list[str] | set[str]) -
             if majority[1] < file_sort[0]:
                 cur.execute(
                     "UPDATE source_file_version SET created_version=?, updated_at=? WHERE path=?",
-                    (majority[0], now_iso, path),
+                    (majority[0], now_iso, provenance_path),
                 )
                 corrected += cur.rowcount
         conn.commit()

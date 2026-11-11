@@ -143,6 +143,11 @@ def _resolve_quest_version_from_source_file(cursor, quest_id: int) -> int | None
         ).fetchall()
         for path, raw_version in rows:
             file_path = os.path.join(DATA_PATH, *str(path).split("/"))
+            # The provenance index deliberately retains deleted historical paths.
+            # Only current files can establish their identity in this snapshot;
+            # obsolete hashed paths must not abort every queued quest repair.
+            if not os.path.isfile(file_path):
+                continue
             obj = load_json_file(file_path)
             row = _extract_quest_row(obj) if isinstance(obj, dict) else None
             if row is None or row.quest_id in _SOURCE_QUEST_VERSION_CACHE:

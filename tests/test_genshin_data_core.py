@@ -162,3 +162,76 @@ def test_7_1_quest_and_talk_shapes_keep_title_steps_and_dialogue():
         100001, [(10000101, 1076121409, "1005", "TALK_ROLE_NPC")]
     )
     assert extract_talk_dialogue_payload({"talkId": 100001, "PCIAMAFDDAA": None}) == (100001, [])
+
+
+def test_7_2_quest_step_titles_and_brief_source_fallback(tmp_path):
+    import json
+
+    quest = {
+        "id": 1000, "titleTextMapHash": 492422065,
+        "subQuests": [{"subId": 100001, "descTextMapHash": 66312846,
+                       "finishCond": [{"type": "QUEST_CONTENT_FINISH_PLOT", "param": [100002, 0]}]}],
+        "talks": [{"id": 100001, "beginCond": [{"type": "QUEST_COND_STATE_EQUAL", "param": ["100001", "2"]}]}],
+    }
+    for parser in (GTS_QUEST_PARSER, BWIKI_QUEST_PARSER):
+        assert parser.build_step_title_hash_by_talk_id(quest) == {100001: 66312846, 100002: 66312846}
+        assert parser.get_step_desc_text_map_hash({"descTextMapHash": 0}) is None
+    folder = tmp_path / "BinOutput" / "QuestBrief"
+    folder.mkdir(parents=True)
+    for quest_id, payload in ((1000, quest), (1001, dict(quest, id=1001, type="WQ")), (1002, {"id": 1002})):
+        (folder / f"{quest_id}.json").write_text(json.dumps(payload), encoding="utf-8")
+    resolver = QuestSourceResolver(FilesystemGameDataAccess(str(tmp_path)))
+    assert resolver.resolve_quest_source_fields(1000) == ("AQ", "AQ")
+    assert resolver.resolve_quest_source_fields(1001) == ("WQ", "WQ")
+    assert resolver.resolve_quest_source_fields(1002) == ("UNKNOWN", "UNKNOWN")
+
+
+def test_7_2_anecdote_fields_are_shared_and_require_identity():
+    row = {"EPKOBMEGGPJ": 100001, "DEKFJBEENEP": 1253956347, "MPDLGALMBIA": 3335685669,
+           "ALMEKBFJDIM": [510000101], "GFNPFMJFEGA": [9801, 1605]}
+    for profile in (GTS_COMPAT, BWIKI_COMPAT):
+        assert extract_anecdote_core_fields(row, profile) == {
+            "quest_id": 100001, "title_text_map_hash": 1253956347, "desc_text_map_hash": 3335685669,
+            "long_desc_text_map_hash": None, "story_quest_ids": [510000101], "legacy_group_ids": [9801, 1605],
+            **({"group_ids": [510000101]} if profile is BWIKI_COMPAT else {}),
+        }
+        assert extract_anecdote_core_fields({"DEKFJBEENEP": 1253956347}, profile) is None
+
+
+def test_7_2_talk_preserves_roles_and_wins_over_old_schema():
+    from genshin_data_core.talk import extract_talk_dialogue_payload_with_schema, normalize_talk_dialogue_rows
+
+    new = {"talkId": 100001, "dialogList": [
+        {"id": 10000101, "talkContentTextMapHash": 1076121409, "talkRole": {"id": "1005", "type": "TALK_ROLE_NPC"}},
+        {"id": 10000102, "talkContentTextMapHash": 202, "talkRole": {"_id": "", "type": "TALK_ROLE_PLAYER"}},
+        {"id": 10000103, "talkContentTextMapHash": 303, "talkRole": {"type": "TALK_ROLE_NPC"}},
+    ]}
+    old = {"talkId": 100001, "PCIAMAFDDAA": [
+        {"id": 10000101, "LKECPJIFFEE": 99, "KBPOBGFGLKN": {"id": "old", "type": "TALK_ROLE_NPC"}}]}
+    assert extract_talk_dialogue_payload(new) == (100001, [
+        (10000101, 1076121409, "1005", "TALK_ROLE_NPC"),
+        (10000102, 202, "", "TALK_ROLE_PLAYER"), (10000103, 303, -1, None)])
+    new_rank, _, new_rows = extract_talk_dialogue_payload_with_schema(new)
+    old_rank, _, old_rows = extract_talk_dialogue_payload_with_schema(old)
+    normalized = normalize_talk_dialogue_rows([(old_rank, old_rows), (new_rank, new_rows)])
+    assert (10000101, 1076121409, 1005, "TALK_ROLE_NPC") in normalized
+    assert all(row[1] != 99 for row in normalized)
+
+
+def test_hangout_codex_title_and_description_support_decoded_and_7_1_keys(tmp_path):
+    import json
+
+    folder = tmp_path / "BinOutput" / "CodexQuest"
+    folder.mkdir(parents=True)
+    for qid, row in (
+        (11034, {"mainQuestTitle": {"textId": 3540194415}, "mainQuestDesp": {"textId": 3250230750}}),
+        (11036, {"NFFJLFOECKD": {"textId": 123}, "AFAPBOFJAIK": {"textId": 456}}),
+        (11039, {"mainQuestTitle": {"textType": "MainQuestTitle"}}),
+    ):
+        (folder / f"{qid}.json").write_text(json.dumps(row), encoding="utf-8")
+    for profile in (GTS_COMPAT, BWIKI_COMPAT):
+        resolver = QuestSourceResolver(FilesystemGameDataAccess(str(tmp_path)), profile)
+        assert resolver.load_hangout_codex_hashes(1034) == (3540194415, 3250230750)
+        assert resolver.load_hangout_codex_hashes(1036) == (123, 456)
+        assert resolver.load_hangout_codex_hashes(1039) == (None, None)
+        assert resolver.load_hangout_codex_hashes(9999) == (None, None)

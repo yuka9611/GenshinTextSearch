@@ -782,3 +782,42 @@ def test_apply_textmap_version_patch_rows_updates_rows_by_id():
         ]
     finally:
         conn.close()
+
+
+def test_quest_source_file_version_skips_deleted_hash_and_keeps_current_mapping(monkeypatch, tmp_path):
+    import json
+
+    database = sqlite3.connect(":memory:")
+    database.execute("CREATE TABLE source_file_version(path TEXT, created_version TEXT)")
+    database.executemany("INSERT INTO source_file_version VALUES (?, ?)", [
+        ("BinOutput/Quest/deleted-hash.json", "6.5"),
+        ("BinOutput/Quest/current-hash.json", "7.2"),
+    ])
+    folder = tmp_path / "BinOutput" / "Quest"
+    folder.mkdir(parents=True)
+    (folder / "current-hash.json").write_text(json.dumps({"id": 7039, "titleTextMapHash": 123}), encoding="utf-8")
+    monkeypatch.setattr(history_backfill, "DATA_PATH", str(tmp_path))
+    monkeypatch.setattr(history_backfill, "_SOURCE_QUEST_VERSION_CACHE", None)
+    monkeypatch.setattr(history_backfill, "_table_exists", lambda _name: True)
+    monkeypatch.setattr(history_backfill, "get_or_create_version_id", lambda version: {"7.2": 72}[version])
+    try:
+        assert history_backfill._resolve_quest_version_from_source_file(database.cursor(), 7039) == 72
+        assert history_backfill._resolve_quest_version_from_source_file(database.cursor(), 9999) is None
+    finally:
+        database.close()
+
+
+def test_quest_source_file_version_with_only_deleted_paths_is_unresolved(monkeypatch, tmp_path):
+    database = sqlite3.connect(":memory:")
+    database.execute("CREATE TABLE source_file_version(path TEXT, created_version TEXT)")
+    database.execute("INSERT INTO source_file_version VALUES ('BinOutput/Quest/02927243.json', '6.5')")
+    monkeypatch.setattr(history_backfill, "DATA_PATH", str(tmp_path))
+    monkeypatch.setattr(history_backfill, "_SOURCE_QUEST_VERSION_CACHE", None)
+    monkeypatch.setattr(history_backfill, "_table_exists", lambda _name: True)
+    def must_not_guess(_version):
+        raise AssertionError("A missing file does not establish a quest identity")
+    monkeypatch.setattr(history_backfill, "get_or_create_version_id", must_not_guess)
+    try:
+        assert history_backfill._resolve_quest_version_from_source_file(database.cursor(), 70830) is None
+    finally:
+        database.close()

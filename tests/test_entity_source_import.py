@@ -83,6 +83,9 @@ def test_iter_costume_mappings_supports_6_6_body_type_field():
 @pytest.mark.parametrize(
     ("body_type_key", "body_types", "gender"),
     [
+        ("GDLFCMAJHME", ["BODY_BOY"], 1),
+        ("GDLFCMAJHME", ["BODY_GIRL"], 2),
+        ("GDLFCMAJHME", ["BODY_GIRL", "BODY_BOY"], 3),
         ("GOCCLKKDFNM", ["BODY_BOY"], 1),
         ("JKOKOGCFAKF", ["BODY_GIRL"], 2),
         ("JKOKOGCFAKF", ["BODY_GIRL", "BODY_BOY"], 3),
@@ -1590,6 +1593,8 @@ def test_tps_accessory_rows_follow_material_relation_and_preserve_component_text
     del current_accessories[0]["MFJCLHGDLBP"]
     del current_accessories[0]["KKJDFJMLMBA"]
     assert list(entitySourceImport._iter_tps_weapon_accessory_mappings(current_accessories, materials)) == result
+    current_accessories[0]["PGBPCKKBEFL"] = current_accessories[0].pop("KOHCBGDKMPG")
+    assert list(entitySourceImport._iter_tps_weapon_accessory_mappings(current_accessories, materials)) == result
     assert list(entitySourceImport._iter_tps_weapon_accessory_mappings([{"id": 224505}], materials)) == []
 
     assert result == [
@@ -1664,3 +1669,28 @@ def test_tps_weapon_snapshot_tracks_empty_object_to_array_transition(monkeypatch
     assert history_backfill._snapshot_entity_keys("unused", "7.0") == {
         (entitySourceImport.SOURCE_TYPE_WEAPON, 224001)
     }
+
+
+@pytest.mark.parametrize("material_type, category", [
+    ("MATERIAL_WORKER_NOTEBOOK", entitySourceImport.SOURCE_TYPE_ITEM),
+    ("MATERIAL_CHANGE_ORNAMENT", entitySourceImport.SOURCE_TYPE_DRESSING),
+])
+def test_7_2_material_categories(material_type, category):
+    row = {"id": 1, "materialType": material_type, "nameTextMapHash": 2, "descTextMapHash": 3}
+    assert entitySourceImport._scan_unknown_material_types([row], {}, set()) == {}
+    assert list(entitySourceImport._iter_material_mappings([row]))[0][1] == category
+
+
+def test_7_2_hall_aliases_preserve_public_template_text():
+    row = {"PJCJILOJOFF": 1, "FBMNAICIKLB": 2, "NDGJCBJKAAG": 3, "AEMBLHDJNHM": "BEYOND_HALL_PUBLIC"}
+    assert entitySourceImport.get_hall_style_id(row) == 1
+    assert entitySourceImport.get_hall_name_text_hash(row) == 2
+    assert entitySourceImport.get_hall_desc_text_hash(row) == 3
+    assert entitySourceImport.is_public_hall(row)
+    row["AEMBLHDJNHM"] = "BEYOND_HALL_PRIVATE"
+    assert not entitySourceImport.is_public_hall(row)
+
+
+def test_7_2_hall_facility_style_ignores_other_numeric_field():
+    assert entitySourceImport.get_hall_facility_style_id({"GIHBGKOICBD": 12, "AKGIGJGJJAK": 1}) == 12
+    assert entitySourceImport.get_hall_facility_style_id({"AKGIGJGJJAK": 1}) is None

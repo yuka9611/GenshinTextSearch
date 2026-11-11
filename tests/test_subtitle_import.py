@@ -166,7 +166,8 @@ def test_missing_changed_subtitle_file_rolls_back_other_file_updates(tmp_path, m
     connection.close()
 
 
-def test_subtitle_file_creation_uses_earlier_majority_text_version(monkeypatch):
+@pytest.mark.parametrize("path_style", ["git", "relative", "plan"])
+def test_subtitle_file_creation_uses_earlier_majority_text_version(monkeypatch, path_style):
     connection = sqlite3.connect(":memory:")
     connection.executescript(
         """
@@ -192,6 +193,14 @@ def test_subtitle_file_creation_uses_earlier_majority_text_version(monkeypatch):
     )
     monkeypatch.setattr(diffUpdate, "conn", connection)
     paths = {"Subtitle/EN/older-text.srt", "Subtitle/EN/older-file.srt"}
+    if path_style == "relative":
+        paths = {path.removeprefix("Subtitle/") for path in paths}
+    elif path_style == "plan":
+        plan = diffUpdate._analyze_diff([
+            {"action": "M", "old_path": None, "new_path": path} for path in paths
+        ])
+        paths = plan["subtitle_changed"]
+        assert paths == {"EN\\older-text.srt", "EN\\older-file.srt"}
 
     assert diffUpdate._align_subtitle_file_created_versions(paths) == 1
     assert diffUpdate._align_subtitle_file_created_versions(paths) == 0
@@ -211,3 +220,24 @@ def test_subtitle_file_creation_uses_earlier_majority_text_version(monkeypatch):
         ("older-text", 3, 1),
     ]
     connection.close()
+
+
+def test_7_2_subtitle_localization_aliases_and_non_subtitle_exclusion():
+    from localization_utils import build_subtitle_filename_map
+    rows = [
+        {"id": 9, "BFDDHOKGBOH": "Subtitle/CHS/Cs_a.srt", "OKIHBKFCDND": "Subtitle/CHS/Cs_b.srt"},
+        {"id": 10, "BFDDHOKGBOH": "Readable/CHS/book.txt"},
+    ]
+    assert build_subtitle_filename_map(rows) == {"Cs_a": {"subtitleId": 9}, "Cs_b": {"subtitleId": 9}}
+
+
+def test_7_2_document_localization_ids_keep_titles(tmp_path):
+    import json
+    from localization_utils import load_document_loc_title_hash
+    excel = tmp_path / "ExcelBinOutput"
+    excel.mkdir()
+    (excel / "DocumentExcelConfigData.json").write_text(json.dumps([
+        {"id": 100236, "titleTextMapHash": 1210651911, "PLOJOMIPJGH": [300008]},
+        {"id": 100110, "titleTextMapHash": 272183383, "questIDList": [200001]},
+    ]))
+    assert load_document_loc_title_hash(str(tmp_path)) == {300008: 1210651911, 200001: 272183383}

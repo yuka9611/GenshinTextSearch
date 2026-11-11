@@ -28,6 +28,7 @@ def extract_first_str(row: Any, *keys: str) -> str:
 def get_hall_style_id(row: Any) -> Optional[int]:
     return extract_first_int(
         row,
+        "PJCJILOJOFF",  # 7.2
         "OANKFNDIFGE",
         "NMEDGNKECLH",
         "COGKFPLDLLL",
@@ -41,6 +42,7 @@ def get_hall_facility_style_id(row: Any) -> Optional[int]:
     if not isinstance(row, dict):
         return None
     for key in (
+        "GIHBGKOICBD",  # 7.2; AKGIGJGJJAK is a distinct facility field
         "GCABMKJNPCK",
         "ELPPMBJMBIO",
         "OJGEAGGJALA",
@@ -62,6 +64,7 @@ def get_hall_facility_style_id(row: Any) -> Optional[int]:
 def get_hall_name_text_hash(row: Any) -> Optional[int]:
     return extract_first_int(
         row,
+        "FBMNAICIKLB",  # 7.2
         "NOBNAHLBFEG",
         "MDCHMLFLPID",
         "LDCAAIEKMOE",
@@ -74,6 +77,7 @@ def get_hall_name_text_hash(row: Any) -> Optional[int]:
 def get_hall_desc_text_hash(row: Any) -> Optional[int]:
     return extract_first_int(
         row,
+        "NDGJCBJKAAG",  # 7.2
         "HOCAJGPPDII",
         "JMPHKBBFCDB",
         "BPKNEMEJEPF",
@@ -86,6 +90,7 @@ def get_hall_desc_text_hash(row: Any) -> Optional[int]:
 def is_public_hall(row: Any) -> bool:
     return extract_first_str(
         row,
+        "AEMBLHDJNHM",  # 7.2
         "DFIKEPIFLPG",
         "AAJDEFOOIKH",
         "PEMNJBEBBOG",

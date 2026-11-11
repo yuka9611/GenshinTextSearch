@@ -87,6 +87,8 @@ SUB_TPS_CLOAK_UPGRADE = 37     # TPS 战斗装束披风升级
 
 # ── materialType → (source_type_code, sub_category_code) ─────────
 MATERIAL_TYPE_TO_CATEGORY: dict[str, tuple[int, int]] = {
+    "MATERIAL_WORKER_NOTEBOOK":             (SOURCE_TYPE_ITEM, SUB_NONE),
+    "MATERIAL_CHANGE_ORNAMENT":             (SOURCE_TYPE_DRESSING, SUB_NONE),
     "MATERIAL_QUEST":                       (SOURCE_TYPE_ITEM, SUB_QUEST_ITEM),
     "MATERIAL_FURNITURE_FORMULA":           (SOURCE_TYPE_BLUEPRINT, SUB_FURN_BLUEPRINT),
     "MATERIAL_GCG_CARD_FACE":              (SOURCE_TYPE_GCG, SUB_CARD_FACE),

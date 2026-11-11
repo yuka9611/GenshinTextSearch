@@ -4,6 +4,8 @@ from import_utils import load_json_file
 
 
 _SUBTITLE_PATH_KEYS = [
+    "BFDDHOKGBOH",  # 7.2
+    "OKIHBKFCDND",
     "AENCKCKHDFK",
     "DEFNEHAFMMA",
     "FCNGPFLCLFA",
@@ -58,7 +60,7 @@ def load_document_loc_title_hash(data_path: str) -> dict:
     loc_id_to_title_hash = {}
     for entry in data:
         title_hash = entry.get("titleTextMapHash")
-        quest_id_list = entry.get("questIDList", [])
+        quest_id_list = entry.get("PLOJOMIPJGH", entry.get("questIDList", []))
         for loc_id in quest_id_list:
             loc_id_to_title_hash[loc_id] = title_hash
     return loc_id_to_title_hash

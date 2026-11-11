@@ -112,21 +112,21 @@ def extract_anecdote_core_fields(
 ) -> Optional[dict[str, Any]]:
     if not isinstance(row, dict):
         return None
-    anecdote_id = extract_first_positive_int(row, "JJDBNNAJGAA", "IDEHFGDCPDL", "GIJOCHMAJCI", "GBDGFHNLDFF", "DBGCFNMLHAJ", "KKNGMIGLAOM")
+    anecdote_id = extract_first_positive_int(row, "EPKOBMEGGPJ", "JJDBNNAJGAA", "IDEHFGDCPDL", "GIJOCHMAJCI", "GBDGFHNLDFF", "DBGCFNMLHAJ", "KKNGMIGLAOM")
     if anecdote_id is None:
         return None
-    title_keys = ["NLBLEOBAOAJ", "IBGEKMBPNNO", "EHGEFIODFHD", "PFMAHKBHBAB", "titleTextMapHash"]
-    desc_keys = ["MBPANALDEMH", "EBDFJDKDDFJ", "OBJANDCNDMA", "JKOECCLJMHB", "descTextMapHash"]
+    title_keys = ["DEKFJBEENEP", "NLBLEOBAOAJ", "IBGEKMBPNNO", "EHGEFIODFHD", "PFMAHKBHBAB", "titleTextMapHash"]
+    desc_keys = ["MPDLGALMBIA", "MBPANALDEMH", "EBDFJDKDDFJ", "OBJANDCNDMA", "JKOECCLJMHB", "descTextMapHash"]
     if profile.anecdote_extended_aliases:
         title_keys[2:2] = ["PPANCKHJOGI", "EJMLGHMLPLD"]
         desc_keys[2:2] = ["AJKAHOPOBJB", "JKNBFACAMCF"]
     story_ids: list[int] = []
-    for key in ("KOOFDCNNHGP", "MCGGPAGBGKO", "AEEMNELFAIO", "BBOMCGBIOFM", "LIIPHELCPKJ", "OPLIDDEJLDL"):
+    for key in ("ALMEKBFJDIM", "KOOFDCNNHGP", "MCGGPAGBGKO", "AEEMNELFAIO", "BBOMCGBIOFM", "LIIPHELCPKJ", "OPLIDDEJLDL"):
         story_ids = _normalize_positive_ints(row.get(key))
         if story_ids:
             break
     legacy_ids: list[int] = []
-    for key in ("MOLOLDDIDGH", "BHAGNOEMPHL", "HCFJCJFMPDC", "NNHDNJEGOPG"):
+    for key in ("GFNPFMJFEGA", "MOLOLDDIDGH", "BHAGNOEMPHL", "HCFJCJFMPDC", "NNHDNJEGOPG"):
         legacy_ids = _normalize_positive_ints(row.get(key))
         if legacy_ids:
             break
@@ -148,7 +148,7 @@ def extract_anecdote_core_fields(
 def extract_nested_text_map_hash(node: Any) -> Optional[int]:
     if isinstance(node, int) and node != 0:
         return node
-    return extract_first_positive_int(node, "BKGOAJFIHCO", "AEMBEELBLML", "textMapHash", "hash")
+    return extract_first_positive_int(node, "textId", "BKGOAJFIHCO", "AEMBEELBLML", "textMapHash", "hash")
 
 
 def extract_hangout_coop_quest_ids(coop_obj: Any) -> list[int]:
@@ -209,7 +209,7 @@ class QuestSourceResolver:
                 or obj.get("MEGMIMEDODJ")
                 or obj.get("BPEHONLLNNK")
                 or obj.get("ALBFHGKNMLK")
-                or (SOURCE_TYPE_AQ if "id" in obj and ("JIJKODHIEED" in obj or "DOOCLIPFECE" in obj) else None)
+                or (SOURCE_TYPE_AQ if "id" in obj and ("JIJKODHIEED" in obj or "DOOCLIPFECE" in obj or "subQuests" in obj or "titleTextMapHash" in obj) else None)
             )
         self._quest_source_raw_by_id = result
         return result
@@ -376,8 +376,8 @@ class QuestSourceResolver:
             obj = self.access.get_codex_quest_output(candidate_id)
             if not isinstance(obj, dict):
                 continue
-            title = extract_nested_text_map_hash(obj.get("HCGANIMKKLM"))
-            desc = extract_nested_text_map_hash(obj.get("NCBJBOHPGNA"))
+            title = extract_nested_text_map_hash(obj.get("mainQuestTitle") or obj.get("NFFJLFOECKD") or obj.get("HCGANIMKKLM"))
+            desc = extract_nested_text_map_hash(obj.get("mainQuestDesp") or obj.get("AFAPBOFJAIK") or obj.get("NCBJBOHPGNA"))
             if title is not None or desc is not None:
                 return title, desc
         return None, None

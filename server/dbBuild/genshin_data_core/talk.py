@@ -173,8 +173,8 @@ TALK_DIALOGUE_SCHEMAS = (
 # Keep source freshness explicit when more than one schema describes a scoped
 # dialogue id.
 TALK_DIALOGUE_SCHEMA_PRIORITY = {
-    0: 0,  # 7.1 talkId/PCIAMAFDDAA shape
-    1: 1,  # readable talkId/dialogList shape
+    0: 1,  # 7.1 talkId/PCIAMAFDDAA shape
+    1: 0,  # 7.2 readable talkId/dialogList shape
     8: 2,  # 7.0 IOKNFDJFGDH/PFALHAKIILD shape
     7: 3,
     6: 4,
@@ -225,12 +225,16 @@ def extract_talk_dialogue_payload_with_schema(obj: Any):
             if dialogue_id is None or text_hash_key not in dialogue:
                 continue
             talk_role = dialogue.get(talk_role_key)
+            # 7.2 decoded Talk uses id; older decoded snapshots use _id.
+            role_id_key = talk_role_id_key
+            if dialogue_list_key == "dialogList" and isinstance(talk_role, dict) and "id" in talk_role:
+                role_id_key = "id"
             if (
                 isinstance(talk_role, dict)
-                and talk_role_id_key in talk_role
+                and role_id_key in talk_role
                 and talk_role_type_key in talk_role
             ):
-                talker_id = talk_role[talk_role_id_key]
+                talker_id = talk_role[role_id_key]
                 talker_type = talk_role[talk_role_type_key]
             else:
                 talker_id = -1
