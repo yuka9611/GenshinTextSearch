@@ -1,5 +1,5 @@
 <script setup>
-import { onBeforeMount, ref, computed } from 'vue'
+import { ref, computed } from 'vue'
 import api from '@/api/keywordQuery'
 import SearchBar from '@/components/SearchBar.vue'
 import TranslateDisplay from '@/components/ResultEntry.vue'
@@ -10,6 +10,7 @@ import useSearchCommon from '@/composables/useSearchCommon'
 import ActiveFilterTags from '@/components/ActiveFilterTags.vue'
 import formatText from '@/utils/formatText'
 import useDisplayPreferenceRefresh from '@/composables/useDisplayPreferenceRefresh'
+import useSearchHistoryReplay from '@/composables/useSearchHistoryReplay'
 
 const uiText = {
   pageTitle: '角色故事搜索',
@@ -84,10 +85,10 @@ const {
   globalAvatarLabel: uiText.globalAvatar,
 })
 
-onBeforeMount(async () => {
+const searchReady = (async () => {
   await loadLanguages()
   await loadVersionOptions()
-})
+})()
 
 const filteredStories = computed(() => {
   const text = normalizeText(textFilter.value)
@@ -129,6 +130,7 @@ const resetStoryState = () => {
 }
 
 const onSearchClicked = async () => {
+  if (restoringHistory.value) return
   const avatarKeyword = keyword.value.trim()
   const titleKeyword = textFilter.value.trim()
   const createdKeyword = createdVersionFilter.value.trim()
@@ -281,6 +283,21 @@ const clearAllFilters = () => {
   updatedVersionFilter.value = ''
   onSearchClicked()
 }
+
+const { restoringHistory } = useSearchHistoryReplay({
+  searchType: 'story',
+  ready: () => searchReady,
+  restore: (replay) => {
+    const { filters } = replay
+    if (replay.language !== null) selectedInputLanguage.value = replay.language
+    keyword.value = ''
+    textFilter.value = replay.keyword
+    createdVersionFilter.value = filters.createdVersion || ''
+    updatedVersionFilter.value = filters.updatedVersion || ''
+  },
+  search: onSearchClicked,
+})
+
 </script>
 
 <template>

@@ -1,5 +1,5 @@
 <script setup>
-import { onBeforeMount, ref, computed, watch } from 'vue'
+import { ref, computed, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import api from '@/api/keywordQuery'
 import SearchBar from '@/components/SearchBar.vue'
@@ -11,6 +11,7 @@ import ActiveFilterTags from '@/components/ActiveFilterTags.vue'
 import formatText from '@/utils/formatText'
 import { READABLE_CATEGORY_OPTIONS, getReadableCategoryLabel } from '@/utils/readableCategory'
 import useDisplayPreferenceRefresh from '@/composables/useDisplayPreferenceRefresh'
+import useSearchHistoryReplay from '@/composables/useSearchHistoryReplay'
 
 const router = useRouter()
 
@@ -91,10 +92,10 @@ const readableResults = ref([])
 const hasSearched = ref(false)
 const lastSearchTime = ref(null)
 
-onBeforeMount(async () => {
+const searchReady = (async () => {
   await loadLanguages()
   await loadVersionOptions()
-})
+})()
 
 const currentResults = computed(() => (mode.value === 'quest' ? filteredQuestResults.value : filteredReadableResults.value))
 const currentSearchPlaceholder = computed(() => (
@@ -167,6 +168,7 @@ const updateSearchSummary = () => {
 }
 
 const onSearchClicked = async () => {
+  if (restoringHistory.value) return
   if (!hasModeSpecificFilters()) {
     searchSummary.value = mode.value === 'quest' ? uiText.emptyInput : uiText.readableEmptyInput
     questResults.value = []
@@ -198,6 +200,7 @@ const onSearchClicked = async () => {
 useDisplayPreferenceRefresh(onSearchClicked, () => hasSearched.value)
 
 watch(mode, async () => {
+  if (restoringHistory.value) return
   if (!hasModeSpecificFilters()) {
     questResults.value = []
     readableResults.value = []
@@ -280,6 +283,24 @@ const clearAllFilters = () => {
   updatedVersionFilter.value = ''
   onSearchClicked()
 }
+
+const { restoringHistory } = useSearchHistoryReplay({
+  searchType: 'name',
+  ready: () => searchReady,
+  restore: (replay) => {
+    const { filters } = replay
+    if (replay.language !== null) selectedInputLanguage.value = replay.language
+    keyword.value = replay.keyword
+    mode.value = filters.readableCategory ? 'readable' : 'quest'
+    questSourceTypeFilter.value = filters.questSourceType || ''
+    readableCategoryFilter.value = filters.readableCategory || ''
+    speakerKeyword.value = filters.speakerKeyword || ''
+    createdVersionFilter.value = filters.createdVersion || ''
+    updatedVersionFilter.value = filters.updatedVersion || ''
+  },
+  search: onSearchClicked,
+})
+
 </script>
 
 <template>

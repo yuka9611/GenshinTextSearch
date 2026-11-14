@@ -44,15 +44,15 @@
         <div class="historyHeader" role="row">
           <span>搜索类型</span><span>关键词</span><span>筛选条件</span><span>结果数</span><span>时间</span><span>操作</span>
         </div>
-        <div v-for="entry in pagedHistory" :key="entry.id" class="historyRow" role="row">
+        <div v-for="entry in pagedHistory" :key="entry.id" class="historyRow" role="row" @click="reopen(entry)">
           <span class="historyType"><i class="fi" :class="typeIcon(entry.search_type)"></i>{{ typeLabel(entry.search_type) }}</span>
-          <strong class="historyKeyword">{{ entry.keyword || '仅条件筛选' }}</strong>
+          <button type="button" class="historyKeyword" @click.stop="reopen(entry)">{{ entry.keyword || '仅条件筛选' }}</button>
           <span class="historyFilters" :title="formatFilters(entry.filters)">{{ formatFilters(entry.filters) }}</span>
           <span>{{ entry.result_count ?? '—' }}</span>
           <span class="historyTime">{{ formatTime(entry.created_at) }}</span>
           <span class="historyActions">
-            <el-button size="small" @click="reopen(entry)">打开搜索</el-button>
-            <el-button size="small" text type="danger" aria-label="删除此记录" @click="remove(entry)">
+            <el-button size="small" @click.stop="reopen(entry)">打开搜索</el-button>
+            <el-button size="small" text type="danger" aria-label="删除此记录" @click.stop="remove(entry)">
               <i class="fi fi-rr-trash"></i>
             </el-button>
           </span>
@@ -75,6 +75,7 @@
 <script setup>
 import { computed, onActivated, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
+import { queueSearchHistoryReplay } from '@/utils/searchHistoryReplay'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { useAccount } from '@/composables/useAccount'
 import {
@@ -167,7 +168,7 @@ const formatTime = (value) => {
 
 const reopen = (entry) => {
   const meta = SEARCH_TYPE_META[entry.search_type]
-  if (!meta) return
+  if (!meta || !queueSearchHistoryReplay(entry)) return
   router.push(meta.path)
 }
 
@@ -219,11 +220,13 @@ const confirmClear = async () => {
 .historyTable { width: 100%; }
 .historyHeader, .historyRow { display: grid; grid-template-columns: 150px minmax(140px, 1fr) minmax(220px, 2fr) 80px 110px 148px; align-items: center; gap: 12px; padding: 12px 18px; }
 .historyHeader { color: var(--theme-text-muted); font-size: 12px; font-weight: 700; background: rgba(47, 105, 101, 0.035); border-bottom: 1px solid var(--theme-border); }
-.historyRow { min-height: 58px; border-bottom: 1px solid var(--theme-border); color: var(--theme-text); }
+.historyRow { min-height: 58px; border-bottom: 1px solid var(--theme-border); color: var(--theme-text); cursor: pointer; }
 .historyRow:hover { background: rgba(47, 105, 101, 0.035); }
 .historyType { display: flex; align-items: center; gap: 8px; }
 .historyType i { color: var(--theme-primary); }
-.historyKeyword { color: var(--theme-primary-strong); overflow-wrap: anywhere; }
+.historyKeyword { padding: 0; border: 0; background: none; font: inherit; font-weight: 700; text-align: left; cursor: pointer; color: var(--theme-primary-strong); overflow-wrap: anywhere; }
+.historyKeyword:hover { text-decoration: underline; }
+.historyKeyword:focus-visible { outline: 2px solid var(--theme-primary); outline-offset: 3px; }
 .historyFilters { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--theme-text-muted); font-size: 13px; }
 .historyTime { font-size: 13px; color: var(--theme-text-muted); }
 .historyActions { display: flex; align-items: center; gap: 2px; }

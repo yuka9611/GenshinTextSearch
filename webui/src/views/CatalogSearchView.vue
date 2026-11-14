@@ -1,11 +1,12 @@
 <script setup>
-import { ref, computed, onBeforeMount, watch } from 'vue'
+import { ref, computed, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import api from '@/api/keywordQuery'
 import useLanguage from '@/composables/useLanguage'
 import useVersion from '@/composables/useVersion'
 import useDisplayPreferenceRefresh from '@/composables/useDisplayPreferenceRefresh'
+import useSearchHistoryReplay from '@/composables/useSearchHistoryReplay'
 import SearchBar from '@/components/SearchBar.vue'
 import VersionFilter from '@/components/VersionFilter.vue'
 import ActiveFilterTags from '@/components/ActiveFilterTags.vue'
@@ -141,6 +142,7 @@ const doSearch = async (page = 1) => {
 }
 
 const handleSearch = () => {
+  if (restoringHistory.value) return
   currentPage.value = 1
   doSearch(1)
 }
@@ -172,11 +174,11 @@ const gotoEntity = (item) => {
   })
 }
 
-onBeforeMount(async () => {
+const searchReady = (async () => {
   await loadLanguages()
   await loadMeta()
   await loadVersionOptions()
-})
+})()
 
 const batchFilterUpdate = (callback) => {
   suppressAutoSearch.value = true
@@ -189,18 +191,18 @@ const batchFilterUpdate = (callback) => {
 }
 
 watch(selectedMainCategory, () => {
-  if (suppressAutoSearch.value) return
+  if (suppressAutoSearch.value || restoringHistory.value) return
   suppressAutoSearch.value = true
   selectedSubCategory.value = ''
   suppressAutoSearch.value = false
   handleSearch()
 })
 watch(selectedSubCategory, () => {
-  if (suppressAutoSearch.value) return
+  if (suppressAutoSearch.value || restoringHistory.value) return
   handleSearch()
 })
 watch(selectedInputLanguage, () => {
-  if (suppressAutoSearch.value) return
+  if (suppressAutoSearch.value || restoringHistory.value) return
   handleSearch()
 })
 
@@ -243,6 +245,22 @@ const clearAllFilters = () => {
     updatedVersionFilter.value = ''
   })
 }
+
+const { restoringHistory } = useSearchHistoryReplay({
+  searchType: 'catalog',
+  ready: () => searchReady,
+  restore: (replay) => {
+    const { filters } = replay
+    if (replay.language !== null) selectedInputLanguage.value = replay.language
+    keyword.value = replay.keyword
+    selectedMainCategory.value = filters.sourceTypeCode || ''
+    selectedSubCategory.value = filters.subCategory || ''
+    createdVersionFilter.value = filters.createdVersion || ''
+    updatedVersionFilter.value = filters.updatedVersion || ''
+  },
+  search: () => doSearch(1),
+})
+
 </script>
 
 <template>

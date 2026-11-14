@@ -14,8 +14,8 @@ const useSearch = () => {
   } = useVersion()
 
   // 初始化时加载语言列表和版本选项
-  loadLanguages().catch(console.error)
-  loadVersionOptions().catch(console.error)
+  const searchReady = Promise.all([loadLanguages(), loadVersionOptions()])
+  searchReady.catch(console.error)
 
   const sourceTypeOptions = Object.freeze([
     { value: '', label: '全部来源' },
@@ -65,7 +65,7 @@ const useSearch = () => {
   const createdVersionLast = ref('')
   const updatedVersionLast = ref('')
   const searchSummary = ref('')
-  const pageSize = ref(50)
+  const pageSize = ref(20)
   const currentPage = ref(1)
   const totalCount = ref(0)
   const isLoading = ref(false)
@@ -85,6 +85,7 @@ const useSearch = () => {
   const fetchPage = async (page, useLast = false) => {
     isLoading.value = true
     try {
+      await searchReady
       const params = useLast
         ? {
             keyword: keywordLast.value,
@@ -206,6 +207,7 @@ const useSearch = () => {
 
     // 方法
     loadVersionOptions,
+    searchReady,
     onQueryButtonClicked,
     goToPage
   }

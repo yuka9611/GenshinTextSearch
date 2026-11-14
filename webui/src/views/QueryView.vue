@@ -138,7 +138,7 @@
 </template>
 
 <script setup>
-import { onBeforeMount, computed, ref } from 'vue'
+import { computed, ref } from 'vue'
 import { Close } from '@element-plus/icons-vue'
 import TranslateDisplay from '@/components/ResultEntry.vue'
 import AudioPlayer from '@liripeng/vue-audio-player'
@@ -148,6 +148,7 @@ import ActiveFilterTags from '@/components/ActiveFilterTags.vue'
 import useSearch from '@/composables/useSearch'
 import useAudioPlayer from '@/composables/useAudioPlayer'
 import useDisplayPreferenceRefresh from '@/composables/useDisplayPreferenceRefresh'
+import useSearchHistoryReplay from '@/composables/useSearchHistoryReplay'
 
 
 
@@ -172,7 +173,7 @@ const {
   pageSize,
   totalCount,
   isLoading,
-  loadVersionOptions,
+  searchReady,
   onQueryButtonClicked,
   goToPage
 } = useSearch()
@@ -213,6 +214,7 @@ const activeFilters = computed(() => {
 })
 
 const handleSearch = async () => {
+  if (restoringHistory.value) return
   hasSearched.value = true
   await onQueryButtonClicked()
 }
@@ -245,9 +247,22 @@ const onPageSizeChange = () => {
   goToPage(1)
 }
 
-onBeforeMount(async () => {
-    await loadVersionOptions()
+const { restoringHistory } = useSearchHistoryReplay({
+  searchType: 'text',
+  ready: () => searchReady,
+  restore: (replay) => {
+    const { filters } = replay
+    if (replay.language !== null) selectedInputLanguage.value = replay.language
+    keyword.value = replay.keyword
+    speakerKeyword.value = filters.speaker || ''
+    voiceFilter.value = filters.voiceFilter || 'all'
+    sourceTypeFilter.value = filters.sourceType || ''
+    createdVersionFilter.value = filters.createdVersion || ''
+    updatedVersionFilter.value = filters.updatedVersion || ''
+  },
+  search: handleSearch,
 })
+
 </script>
 
 <style scoped>

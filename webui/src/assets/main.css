@@ -480,6 +480,16 @@ i.centerIcon{
     transition: border-color 0.18s ease, box-shadow 0.18s ease, transform 0.18s ease;
 }
 
+/* iOS zooms focused form fields below 16px. Keep pinch zoom available. */
+@media (max-width: 860px), (any-pointer: coarse) {
+    .el-input__inner,
+    .el-textarea__inner,
+    .el-select__wrapper,
+    .el-select__input {
+        font-size: 16px;
+    }
+}
+
 [data-theme="dark"] .el-input__wrapper,
 [data-theme="dark"] .el-textarea__inner,
 [data-theme="dark"] .el-select .el-input__wrapper,

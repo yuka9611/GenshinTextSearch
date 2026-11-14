@@ -1,5 +1,5 @@
 <script setup>
-import { onBeforeMount, ref, computed, reactive, watch } from 'vue'
+import { ref, computed, reactive, watch } from 'vue'
 import { Close } from '@element-plus/icons-vue'
 import global from '@/global/global'
 import api from '@/api/keywordQuery'
@@ -15,6 +15,7 @@ import useSearchCommon from '@/composables/useSearchCommon'
 import ActiveFilterTags from '@/components/ActiveFilterTags.vue'
 import formatText from '@/utils/formatText'
 import useDisplayPreferenceRefresh from '@/composables/useDisplayPreferenceRefresh'
+import useSearchHistoryReplay from '@/composables/useSearchHistoryReplay'
 
 const uiText = {
   pageTitle: '角色语音搜索',
@@ -114,10 +115,10 @@ const playlistLoading = reactive({
   percentage: 0
 })
 
-onBeforeMount(async () => {
+const searchReady = (async () => {
   await loadLanguages()
   await loadVersionOptions()
-})
+})()
 
 const availableVoiceLanguages = computed(() => global.voiceLanguages || {})
 
@@ -223,6 +224,7 @@ const resetVoiceState = () => {
 }
 
 const onSearchClicked = async () => {
+  if (restoringHistory.value) return
   const avatarKeyword = keyword.value.trim()
   const titleKeyword = textFilter.value.trim()
   const createdKeyword = createdVersionFilter.value.trim()
@@ -461,6 +463,22 @@ const clearAllFilters = () => {
   updatedVersionFilter.value = ''
   onSearchClicked()
 }
+
+const { restoringHistory } = useSearchHistoryReplay({
+  searchType: 'voice',
+  ready: () => searchReady,
+  restore: (replay) => {
+    const { filters } = replay
+    if (replay.language !== null) selectedInputLanguage.value = replay.language
+    keyword.value = ''
+    textFilter.value = replay.keyword
+    categoryFilter.value = 'all'
+    createdVersionFilter.value = filters.createdVersion || ''
+    updatedVersionFilter.value = filters.updatedVersion || ''
+  },
+  search: onSearchClicked,
+})
+
 </script>
 
 <template>

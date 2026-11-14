@@ -1,4 +1,3 @@
-import { ref } from 'vue'
 import { getDisplayPreferencesFingerprint } from '@/utils/displayPreferences'
 
 class RequestCache {
@@ -112,13 +111,17 @@ class RequestCache {
 
 // 创建全局缓存实例
 const requestCache = new RequestCache()
+let nextCacheNamespace = 0
 
 // 缓存装饰器，用于包装API请求函数
 export const withCache = (fn, cacheKeyFn) => {
+  // Anonymous functions may have the same name and arguments across endpoints.
+  const namespace = nextCacheNamespace++
+  const pending = new Map()
   return async (...args) => {
     // 生成缓存键
-    const baseKey = cacheKeyFn ? cacheKeyFn(...args) : fn.name + '_' + JSON.stringify(args)
-    const cacheKey = `${baseKey}_${getDisplayPreferencesFingerprint()}`
+    const baseKey = cacheKeyFn ? cacheKeyFn(...args) : JSON.stringify(args)
+    const cacheKey = `${namespace}_${baseKey}_${getDisplayPreferencesFingerprint()}`
     
     // 尝试从缓存获取
     const cachedData = requestCache.get(cacheKey, {})
@@ -126,13 +129,16 @@ export const withCache = (fn, cacheKeyFn) => {
       return cachedData
     }
     
-    // 执行请求
-    const data = await fn(...args)
-    
-    // 缓存结果
-    requestCache.set(cacheKey, {}, data)
-    
-    return data
+    if (!pending.has(cacheKey)) {
+      const request = Promise.resolve(fn(...args)).then((data) => {
+        requestCache.set(cacheKey, {}, data)
+        return data
+      }).finally(() => {
+        pending.delete(cacheKey)
+      })
+      pending.set(cacheKey, request)
+    }
+    return pending.get(cacheKey)
   }
 }
 

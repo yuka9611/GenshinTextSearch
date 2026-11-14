@@ -24,7 +24,7 @@ const toLanguageMap = (payload) => {
 }
 
 const useLanguage = () => {
-  const selectedInputLanguage = ref(String(global.config.defaultSearchLanguage ?? ''))
+  const selectedInputLanguage = ref(String(global.config.defaultSearchLanguage ?? '1'))
 
   const filteredLanguages = computed(() => {
     const filtered = {}
@@ -50,13 +50,18 @@ const useLanguage = () => {
     try {
       if (!loadLanguagesPromise) {
         loadLanguagesPromise = (async () => {
-          const textLanguages = (await basicInfoApi.getImportedTextLanguages()).json
+          const [textResponse, voiceResponse, configResponse] = await Promise.all([
+            basicInfoApi.getImportedTextLanguages(),
+            basicInfoApi.getImportedVoiceLanguages(),
+            basicInfoApi.getConfig(),
+          ])
+          const textLanguages = textResponse.json
           global.languages = toLanguageMap(textLanguages)
 
-          const voiceLanguages = (await basicInfoApi.getImportedVoiceLanguages()).json
+          const voiceLanguages = voiceResponse.json
           global.voiceLanguages = toLanguageMap(voiceLanguages)
 
-          const config = (await basicInfoApi.getConfig()).json
+          const config = configResponse.json
           await initializeAccount()
           const preferences = await loadUserPreferences(config).catch((error) => {
             console.warn('failed to load user preferences:', error?.message || error)

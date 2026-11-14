@@ -1,5 +1,5 @@
 <script setup>
-import { computed, onBeforeMount, ref, watch } from 'vue'
+import { computed, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import api from '@/api/keywordQuery'
 import SearchBar from '@/components/SearchBar.vue'
@@ -7,6 +7,7 @@ import ActiveFilterTags from '@/components/ActiveFilterTags.vue'
 import useLanguage from '@/composables/useLanguage'
 import useVersion from '@/composables/useVersion'
 import useDisplayPreferenceRefresh from '@/composables/useDisplayPreferenceRefresh'
+import useSearchHistoryReplay from '@/composables/useSearchHistoryReplay'
 
 const router = useRouter()
 
@@ -100,7 +101,7 @@ const clearDialogueState = () => {
 }
 
 watch([npcKeyword, npcCreatedVersionFilter, npcUpdatedVersionFilter], () => {
-  clearDialogueState()
+  if (!restoringHistory.value) clearDialogueState()
 })
 
 watch([dialogueCreatedVersionFilter, dialogueUpdatedVersionFilter], async () => {
@@ -109,10 +110,10 @@ watch([dialogueCreatedVersionFilter, dialogueUpdatedVersionFilter], async () => 
   await loadDialogueGroups(1)
 })
 
-onBeforeMount(async () => {
+const searchReady = (async () => {
   await loadLanguages()
   await loadVersionOptions()
-})
+})()
 
 const onNpcSearchClicked = async () => {
   const hasKeyword = npcKeyword.value.trim() !== ''
@@ -281,6 +282,23 @@ const clearAllDialogueFilters = () => {
   dialogueCreatedVersionFilter.value = ''
   dialogueUpdatedVersionFilter.value = ''
 }
+
+const { restoringHistory } = useSearchHistoryReplay({
+  searchType: 'npc_dialogue',
+  ready: () => searchReady,
+  restore: (replay) => {
+    const { filters } = replay
+    if (replay.language !== null) selectedInputLanguage.value = replay.language
+    npcKeyword.value = replay.keyword
+    npcCreatedVersionFilter.value = filters.npcCreatedVersion || ''
+    npcUpdatedVersionFilter.value = filters.npcUpdatedVersion || ''
+    dialogueCreatedVersionFilter.value = ''
+    dialogueUpdatedVersionFilter.value = ''
+    clearDialogueState()
+  },
+  search: onNpcSearchClicked,
+})
+
 </script>
 
 <template>
