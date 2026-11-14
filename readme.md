@@ -180,6 +180,8 @@ Qdrant 发布与 AstrBot 部署由各自项目负责。
 
 ## 开发说明
 
+Cloudflare Pages 自动发布、仓库变量配置和回滚方法见[云端前端发布说明](.github/DEPLOYMENT.md)。
+
 ### 前端开发模式
 
 如果只做前端调试，可以单独启动 Vite 开发服务器，并让它请求本地 Flask：

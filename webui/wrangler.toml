@@ -1,0 +1,8 @@
+name = "genshin-text-search"
+pages_build_output_dir = "./dist"
+compatibility_date = "2026-07-21"
+
+[[env.production.services]]
+binding = "database"
+service = "genshin-text-search-api"
+environment = "production"
