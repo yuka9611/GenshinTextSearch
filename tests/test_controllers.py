@@ -1926,3 +1926,14 @@ class TestEntitySourceFiltering:
                 "text": {"translates": {"1": "文本-91002"}, "hash": 91002},
             }
         ]
+
+
+def test_build_keyword_preview_centers_on_first_matching_space_separated_term():
+    long_content = (
+        "开头有很多背景描述，用来确保摘要会向后定位到命中的第一个词。"
+        "接着这里出现了关键信息：深渊的秘密正在等待被揭开，随后还有更多后续说明，最终指向远方的星辰。"
+    )
+    preview = controllers._build_keyword_preview(long_content, "星辰 深渊", radius=8, fallback_limit=30)
+    assert preview is not None
+    assert "深渊" in preview
+    assert not preview.startswith("开头有很多")

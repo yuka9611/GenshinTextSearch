@@ -9,6 +9,7 @@ from functools import lru_cache
 from typing import TypedDict
 
 import databaseHelper
+import fts_tokenizer
 import languagePackReader
 import config
 import placeholderHandler
@@ -1519,9 +1520,22 @@ def _build_keyword_preview(
 
     keyword_text = _normalize_preview_text(keyword)
     if keyword_text:
-        start_idx = text.lower().find(keyword_text.lower())
+        text_lower = text.lower()
+        start_idx = text_lower.find(keyword_text.lower())
+        match_len = len(keyword_text)
+        if start_idx < 0:
+            best_idx = None
+            best_len = 0
+            for term in fts_tokenizer.split_search_terms(keyword_text):
+                term_idx = text_lower.find(term.lower())
+                if term_idx >= 0 and (best_idx is None or term_idx < best_idx):
+                    best_idx = term_idx
+                    best_len = len(term)
+            if best_idx is not None:
+                start_idx = best_idx
+                match_len = best_len
         if start_idx >= 0:
-            end_idx = start_idx + len(keyword_text)
+            end_idx = start_idx + match_len
             snippet_start = max(0, start_idx - radius)
             snippet_end = min(len(text), end_idx + radius)
             snippet = text[snippet_start:snippet_end].strip()

@@ -983,6 +983,7 @@ def ensure_version_schema():
     _ensure_unique_index("questTalk", "questTalk_questId_talkId_coopQuestId_uindex", ("questId", "talkId", "coopQuestId"))
     _ensure_unique_index("voice", "voice_dialogueId_voicePath_uindex", ("dialogueId", "voicePath"))
 
+    _ensure_index_for_table("readable", "CREATE INDEX IF NOT EXISTS readable_titleTextMapHash_index ON readable(titleTextMapHash)")
     _ensure_index_for_table("readable", "CREATE INDEX IF NOT EXISTS readable_lang_index ON readable(lang)")
     _ensure_index_for_table("readable", "CREATE INDEX IF NOT EXISTS readable_lang_fileName_index ON readable(lang, fileName)")
     _ensure_index_for_table("subtitle", "CREATE INDEX IF NOT EXISTS subtitle_lang_index ON subtitle(lang)")

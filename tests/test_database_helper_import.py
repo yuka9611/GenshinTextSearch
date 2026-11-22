@@ -5,6 +5,25 @@ import sys
 import textwrap
 
 
+def test_readable_source_title_lookup_has_an_index_without_changing_rows():
+    import databaseHelper
+
+    with sqlite3.connect(":memory:") as connection:
+        connection.execute("CREATE TABLE readable (titleTextMapHash INTEGER, fileName TEXT)")
+        connection.executemany(
+            "INSERT INTO readable VALUES (?, ?)", [(10, "Book1"), (20, "Book2"), (10, "Book3")],
+        )
+        before = connection.execute("SELECT * FROM readable ORDER BY rowid").fetchall()
+        databaseHelper._ensure_runtime_query_indexes(connection)
+        databaseHelper._ensure_runtime_query_indexes(connection)
+        plan = connection.execute(
+            "EXPLAIN QUERY PLAN SELECT DISTINCT titleTextMapHash FROM readable "
+            "WHERE titleTextMapHash IN (?, ?)", (10, 30),
+        ).fetchall()
+        assert any("SEARCH" in row[3] and "readable_titleTextMapHash_index" in row[3] for row in plan)
+        assert connection.execute("SELECT * FROM readable ORDER BY rowid").fetchall() == before
+
+
 def test_database_helper_import_keeps_dbbuild_versioning_importable():
     repo_root = os.path.normpath(os.path.join(os.path.dirname(__file__), os.pardir))
     script = textwrap.dedent(
@@ -86,6 +105,10 @@ def test_version_filter_values_preserve_created_updated_split(monkeypatch):
             npcId INTEGER,
             created_version_id INTEGER
         );
+        CREATE TABLE text_source_entity (
+            created_version_id INTEGER
+        );
+        CREATE INDEX text_source_entity_created_index ON text_source_entity(created_version_id);
         """
     )
     connection.executemany(
@@ -95,6 +118,8 @@ def test_version_filter_values_preserve_created_updated_split(monkeypatch):
             (2, "4.1", "4.1", 100401),
             (3, "4.2", "4.2", 100402),
             (4, "", None, None),
+            (5, "4.3", "4.3", 100403),
+            (6, "4.4", "4.4", 100404),
         ],
     )
     connection.executemany(
@@ -104,6 +129,8 @@ def test_version_filter_values_preserve_created_updated_split(monkeypatch):
             (101, 1, "duplicate created", 1, 2),
             (102, 1, "updated only", 3, 3),
             (103, 1, "blank ignored", 4, 4),
+            (104, 1, "null ignored", None, None),
+            (105, 1, "dangling ignored", 999, 999),
         ],
     )
     connection.execute("INSERT INTO quest(questId, created_version_id) VALUES (1, 1)")
@@ -111,16 +138,23 @@ def test_version_filter_values_preserve_created_updated_split(monkeypatch):
     connection.execute("INSERT INTO subtitle(subtitleId, created_version_id, updated_version_id) VALUES (1, 2, 3)")
     connection.execute("INSERT INTO readable(readableId, created_version_id, updated_version_id) VALUES (1, 1, 2)")
     connection.execute("INSERT INTO npc(npcId, created_version_id) VALUES (1, 2)")
+    connection.execute("INSERT INTO text_source_entity(created_version_id) VALUES (6)")
 
     monkeypatch.setattr(databaseHelper, "conn", connection)
     for cache in databaseHelper._CACHE.values():
         if isinstance(cache, dict):
             cache.clear()
 
+    statements = []
+    connection.set_trace_callback(statements.append)
     filters = databaseHelper.getVersionFilterValues()
 
-    assert sorted(filters["created"]) == ["4.0", "4.1", "4.2"]
+    assert sorted(filters["created"]) == ["4.0", "4.1", "4.2", "4.4"]
     assert sorted(filters["updated"]) == ["4.1", "4.2"]
+    # Large indexed sources use point probes; legacy unindexed tables keep
+    # their one-pass DISTINCT fallback. Unused catalog versions stay absent.
+    assert any("EXISTS (SELECT 1 FROM textMap t" in sql for sql in statements)
+    assert any("SELECT DISTINCT t.created_version_id FROM subtitle t" in sql for sql in statements)
 
 
 def test_current_version_falls_back_to_app_meta_without_dbbuild(monkeypatch):

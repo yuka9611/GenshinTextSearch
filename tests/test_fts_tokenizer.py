@@ -6,6 +6,7 @@ import pytest
 from fts_tokenizer import (
     normalize_segmenter_name,
     normalize_search_keyword,
+    split_search_terms,
     _compact_spaces,
     _unique_tokens,
     _segment_with_char_bigram,
@@ -228,3 +229,24 @@ class TestBuildFtsQueryTerms:
 
     def test_none_keyword(self):
         assert build_fts_query_terms(cast(str, None), lang_code=1, tokenizer_name="unicode61") == []
+
+
+# ---------------------------------------------------------------------------
+# split_search_terms
+# ---------------------------------------------------------------------------
+
+class TestSplitSearchTerms:
+    def test_empty_and_none(self):
+        assert split_search_terms("") == []
+        assert split_search_terms("   \u3000\t  ") == []
+        assert split_search_terms(None) == []
+
+    def test_splits_ascii_and_fullwidth_spaces(self):
+        assert split_search_terms("天空  琴\t温迪") == ["天空", "琴", "温迪"]
+        assert split_search_terms("大型\u3000遺跡") == ["大型", "遺跡"]
+
+    def test_strips_outer_quotes_and_deduplicates(self):
+        assert split_search_terms('「Ad  abyssosque  Ad」') == ["Ad", "abyssosque"]
+
+    def test_preserves_like_wildcards_inside_terms(self):
+        assert split_search_terms("abc   %_def") == ["abc", "%_def"]

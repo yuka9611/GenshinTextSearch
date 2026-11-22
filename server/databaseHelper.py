@@ -9,10 +9,10 @@ from pathlib import Path
 import config
 import fts_tokenizer
 from quest_text_filters import build_quest_text_not_excluded_sql, is_excluded_quest_text
+from utils.database_connection import ThreadLocalConnection
 
 
 _READABLE_LANG_SUFFIX_RE = re.compile(r"_(CHS|CHT|DE|EN|ES|FR|ID|IT|JP|KR|PT|RU|TH|TR|VI)$", re.IGNORECASE)
-_REGISTERED_SQL_CONNECTION_IDS: set[int] = set()
 
 
 def _coerce_optional_int(value: object) -> int | None:
@@ -112,7 +112,7 @@ def _apply_connection_pragmas(connection: sqlite3.Connection) -> None:
     # Favor read-heavy query latency for local desktop usage.
     pragmas = (
         "PRAGMA temp_store=MEMORY",  # Store temporary tables in memory.
-        "PRAGMA cache_size=-262144",  # Reserve about 256 MiB of page cache.
+        "PRAGMA cache_size=-65536",  # Four request threads share a roughly 256 MiB page-cache budget.
         "PRAGMA mmap_size=2147483648",  # Allow up to 2 GiB of memory-mapped I/O.
         "PRAGMA synchronous=NORMAL",  # Balance durability with write latency.
         "PRAGMA journal_mode=WAL",  # Keep WAL enabled for safer concurrent reads.
@@ -129,6 +129,8 @@ def _apply_connection_pragmas(connection: sqlite3.Connection) -> None:
 
 def _ensure_runtime_query_indexes(connection: sqlite3.Connection) -> None:
     index_sqls = (
+        "CREATE INDEX IF NOT EXISTS readable_titleTextMapHash_index "
+        "ON readable(titleTextMapHash)",
         "CREATE INDEX IF NOT EXISTS dialogue_talkerType_talkerId_talkId_coopQuestId_dialogueId_index "
         "ON dialogue(talkerType, talkerId, talkId, coopQuestId, dialogueId)",
         "CREATE INDEX IF NOT EXISTS dialogue_talkId_coopQuestId_dialogueId_index "
@@ -156,14 +158,12 @@ def _normalize_readable_file_name(file_name: str | None) -> str:
 
 
 def _ensure_runtime_sql_functions(connection: sqlite3.Connection) -> None:
-    conn_id = id(connection)
-    if conn_id in _REGISTERED_SQL_CONNECTION_IDS:
-        return
+    # Register per connection. Object IDs can be reused after a connection
+    # closes, so an ID-based process cache can skip a new connection by mistake.
     try:
         connection.create_function("gts_normalize_readable_file_name", 1, _normalize_readable_file_name)
     except Exception:
         return
-    _REGISTERED_SQL_CONNECTION_IDS.add(conn_id)
 
 
 def _configure_connection(connection: sqlite3.Connection) -> None:
@@ -194,8 +194,8 @@ def get_connection() -> sqlite3.Connection:
     return connection
 
 
-# 全局数据库连接
-conn = get_connection()
+# Keep the existing access API while giving each request thread its own connection.
+conn = ThreadLocalConnection(get_connection)
 
 # 缓存字典
 _CACHE: dict[str, dict] = {
@@ -204,6 +204,7 @@ _CACHE: dict[str, dict] = {
     "fts": {  # FTS相关缓存
         "available": None,
         "tokenizer": None,
+        "detail": None,
         "langs": None
     },
     "version": {},  # 版本相关缓存
@@ -544,6 +545,8 @@ def _has_textmap_fts() -> bool:
         if m:
             token_spec = _normalize_fts_tokenizer(m.group(1))
             _CACHE["fts"]["tokenizer"] = token_spec.split()[0] if token_spec else "trigram"
+        detail = re.search(r"\bdetail\s*=\s*['\"]?(none|column|full)\b", str(row[0]), re.IGNORECASE)
+        _CACHE["fts"]["detail"] = detail.group(1).lower() if detail else "full"
     return _CACHE["fts"]["available"]
 
 
@@ -556,6 +559,12 @@ def _get_textmap_fts_tokenizer() -> str:
     token_spec = _resolve_fts_settings()[0]
     _CACHE["fts"]["tokenizer"] = token_spec.split()[0] if token_spec else "trigram"
     return _CACHE["fts"]["tokenizer"]
+
+
+def _get_textmap_fts_detail() -> str:
+    if _CACHE["fts"].get("detail") is None:
+        _has_textmap_fts()
+    return _CACHE["fts"].get("detail") or "full"
 
 
 def _get_textmap_fts_langs() -> set[int]:
@@ -621,23 +630,143 @@ def _build_textmap_fts_match(keyword: str, lang_code: int) -> str | None:
     text = fts_tokenizer.normalize_search_keyword(raw_text) or raw_text
     if not text:
         return None
+    literal_text = text
 
     tokenizer = _get_textmap_fts_tokenizer()
+    stopwords, min_len, max_len = _resolve_fts_query_filters()
+    segmenter, user_dict = _resolve_fts_chinese_segmenter_settings()
+
+    # When using word tokenizers (e.g. unicode61), keep non-Chinese
+    # languages on LIKE path to preserve substring-match behavior.
+    if tokenizer != "trigram" and lang_code not in CHINESE_LANG_CODES:
+        return None
+
+    terms = fts_tokenizer.split_search_terms(raw_text)
+    if not terms:
+        return None
+
+    if len(terms) > 1:
+        if tokenizer == "trigram":
+            detail = _get_textmap_fts_detail()
+            fts_tokens: list[str] = []
+            seen_tokens: set[str] = set()
+
+            def _add_trigram_token(token: str) -> None:
+                if token in seen_tokens:
+                    return
+                seen_tokens.add(token)
+                escaped_token = token.replace('"', '""')
+                fts_tokens.append(f'"{escaped_token}"')
+
+            for term in terms:
+                term_len = len(term)
+                if term_len < 3 or term_len < min_len or term_len > max_len:
+                    continue
+                if term.lower() in stopwords:
+                    continue
+                if term_len == 3 or detail == "full":
+                    _add_trigram_token(term)
+                else:
+                    for index in range(term_len - 2):
+                        _add_trigram_token(term[index:index + 3])
+
+            if not fts_tokens:
+                return None
+            return " AND ".join(fts_tokens)
+
+        def _build_non_trigram_term_clause(term_text: str) -> str | None:
+            def _filter_parts(parts: list[str]) -> list[str]:
+                dedup_parts = []
+                seen = set()
+                for part in parts:
+                    if part in seen:
+                        continue
+                    seen.add(part)
+                    dedup_parts.append(part)
+
+                filtered_parts = []
+                for part in dedup_parts:
+                    plen = len(part)
+                    if plen < min_len or plen > max_len:
+                        continue
+                    if part.lower() in stopwords:
+                        continue
+                    filtered_parts.append(part)
+                return filtered_parts
+
+            def _build_and_clause(parts: list[str]) -> str | None:
+                filtered_parts = _filter_parts(parts)
+                if not filtered_parts:
+                    return None
+                return " AND ".join([f"\"{seg.replace('\"', '\"\"')}\"" for seg in filtered_parts])
+
+            term_clauses: list[str] = []
+            primary_parts = fts_tokenizer.build_fts_query_terms(
+                term_text,
+                lang_code,
+                tokenizer,
+                segmenter_mode=segmenter,
+                user_dict_path=user_dict,
+            )
+            primary_clause = _build_and_clause(primary_parts or [term_text])
+            if primary_clause:
+                term_clauses.append(primary_clause)
+
+            if lang_code in CHINESE_LANG_CODES and segmenter != "char_bigram":
+                bigram_parts = fts_tokenizer.build_fts_query_terms(
+                    term_text,
+                    lang_code,
+                    tokenizer,
+                    segmenter_mode="char_bigram",
+                    user_dict_path=user_dict,
+                )
+                bigram_clause = _build_and_clause(bigram_parts)
+                if bigram_clause:
+                    term_clauses.append(bigram_clause)
+
+            term_len = len(term_text)
+            if min_len <= term_len <= max_len and term_text.lower() not in stopwords:
+                term_clauses.append(f"\"{term_text.replace('\"', '\"\"')}\"*")
+
+            dedup_term_clauses: list[str] = []
+            seen_term_clauses: set[str] = set()
+            for clause in term_clauses:
+                if clause in seen_term_clauses:
+                    continue
+                seen_term_clauses.add(clause)
+                dedup_term_clauses.append(clause)
+
+            if not dedup_term_clauses:
+                return None
+            if len(dedup_term_clauses) == 1:
+                return dedup_term_clauses[0]
+            return " OR ".join([f"({clause})" for clause in dedup_term_clauses])
+
+        multi_clauses: list[str] = []
+        seen_multi: set[str] = set()
+        for term in terms:
+            # 1-char terms may not exist as standalone tokens in bigram/word indexes.
+            if len(term) < 2:
+                continue
+            clause = _build_non_trigram_term_clause(term)
+            if not clause or clause in seen_multi:
+                continue
+            seen_multi.add(clause)
+            multi_clauses.append(clause)
+
+        if not multi_clauses:
+            return None
+        if len(multi_clauses) == 1:
+            return multi_clauses[0]
+        return " AND ".join([f"({clause})" for clause in multi_clauses])
+
     if lang_code in CHINESE_LANG_CODES:
         text = "".join(text.split())
     else:
         text = re.sub(r"\s+", " ", text)
 
-    stopwords, min_len, max_len = _resolve_fts_query_filters()
-    segmenter, user_dict = _resolve_fts_chinese_segmenter_settings()
-
     if tokenizer == "trigram" and len(text) < 3:
         # trigram tokenizer has poor recall on very short terms
-        return None
-
-    # When using word tokenizers (e.g. unicode61), keep non-Chinese
-    # languages on LIKE path to preserve substring-match behavior.
-    if tokenizer != "trigram" and lang_code not in CHINESE_LANG_CODES:
         return None
 
     if tokenizer == "trigram":
@@ -646,6 +775,17 @@ def _build_textmap_fts_match(keyword: str, lang_code: int) -> str | None:
             return None
         if text.lower() in stopwords:
             return None
+        if len(text) > 3 and _get_textmap_fts_detail() != "full":
+            # Reduced-detail trigram indexes cannot execute multi-token phrases.
+            # Chinese LIKE also accepts ordered, noncontiguous characters. Keep
+            # that fallback's full recall rather than filtering it with trigrams.
+            if lang_code in CHINESE_LANG_CODES:
+                return None
+            # Other languages use literal substring LIKE, so every overlapping
+            # trigram is a necessary candidate condition. LIKE verifies order
+            # and adjacency after this index lookup.
+            trigrams = dict.fromkeys(literal_text[index:index + 3] for index in range(len(literal_text) - 2))
+            return " AND ".join('"' + part.replace('"', '""') + '"' for part in trigrams)
         escaped = text.replace('"', '""')
         return f"\"{escaped}\""
 
@@ -795,6 +935,30 @@ def _build_like_patterns(keyword: str, lang_code: int) -> tuple[str, str]:
     return exact, fuzzy
 
 
+def _build_keyword_like_clause(
+    field_expr: str,
+    keyword: str,
+    lang_code: int,
+) -> tuple[str, list[str]]:
+    """
+    构建关键词 LIKE 查询子句：
+    - 多词（空白分隔）要求同一文本包含全部词项（不限顺序）
+    - 单词保持原有 exact/fuzzy 模式
+    """
+    terms = fts_tokenizer.split_search_terms(keyword)
+    if len(terms) > 1:
+        clauses = [f"{field_expr} LIKE ? ESCAPE '\\'" for _ in terms]
+        params = [f"%{_escape_like(term)}%" for term in terms]
+        return "(" + " AND ".join(clauses) + ")", params
+    exact, fuzzy = _build_like_patterns(keyword, lang_code)
+    if fuzzy == exact:
+        return f"({field_expr} LIKE ? ESCAPE '\\')", [exact]
+    return (
+        f"({field_expr} LIKE ? ESCAPE '\\' OR {field_expr} LIKE ? ESCAPE '\\')",
+        [exact, fuzzy],
+    )
+
+
 def _normalize_match_keyword(keyword: str | None, lang_code: int) -> str:
     raw_text = str(keyword or "").strip()
     text = fts_tokenizer.normalize_search_keyword(raw_text) or raw_text
@@ -850,30 +1014,38 @@ def _build_textmap_query(
     updated_version: str | None,
     hash_value: int | None = None,
     limit: int | None = None,
-    offset: int | None = None
+    offset: int | None = None,
+    like_sql: str | None = None,
+    like_params: list[str] | None = None,
 ) -> tuple[str, list]:
     """
     构建文本映射查询
     """
     params: list = []
     version_select = _version_select_expr("tm", "textMap")
+    if like_sql is None:
+        like_sql = "(tm.content like ? escape '\\' or tm.content like ? escape '\\')"
+        resolved_like_params: list[str] = [exact, fuzzy]
+    else:
+        resolved_like_params = list(like_params or [])
 
     if use_fts and fts_match:
-        # 使用FTS查询
+        # Check language on textMap below. Accessing the unindexed FTS lang
+        # column would fetch each external content row a second time.
         sql = (
             f"select tm.hash, tm.content, {version_select} from textMap tm "
-            f"where tm.id in (select rowid from {_TEXTMAP_FTS_TABLE} where {_TEXTMAP_FTS_TABLE} match ? and lang=?) "
+            f"where tm.id in (select rowid from {_TEXTMAP_FTS_TABLE} where {_TEXTMAP_FTS_TABLE} match ?) "
             "and tm.lang=? "
-            "and (tm.content like ? escape '\\' or tm.content like ? escape '\\') "
+            f"and {like_sql} "
         )
-        params = [fts_match, langCode, langCode, exact, fuzzy]
+        params = [fts_match, langCode, *resolved_like_params]
     else:
         # 使用LIKE查询
         sql = (
             f"select tm.hash, tm.content, {version_select} from textMap tm "
-            "where tm.lang=? and (tm.content like ? escape '\\' or tm.content like ? escape '\\') "
+            f"where tm.lang=? and {like_sql} "
         )
-        params = [langCode, exact, fuzzy]
+        params = [langCode, *resolved_like_params]
 
     # 添加版本过滤
     sql = _append_version_filter_clause(
@@ -932,29 +1104,36 @@ def _build_textmap_count_query(
     voice_expr: str | None,
     voice_filter: str | None,
     created_version: str | None,
-    updated_version: str | None
+    updated_version: str | None,
+    like_sql: str | None = None,
+    like_params: list[str] | None = None,
 ) -> tuple[str, list]:
     """
     构建文本映射计数查询
     """
     params: list = []
+    if like_sql is None:
+        like_sql = "(tm.content like ? escape '\\' or tm.content like ? escape '\\')"
+        resolved_like_params: list[str] = [exact, fuzzy]
+    else:
+        resolved_like_params = list(like_params or [])
 
     if use_fts and fts_match:
         # 使用FTS查询
         sql = (
             f"select count(*) from textMap tm "
-            f"where tm.id in (select rowid from {_TEXTMAP_FTS_TABLE} where {_TEXTMAP_FTS_TABLE} match ? and lang=?) "
+            f"where tm.id in (select rowid from {_TEXTMAP_FTS_TABLE} where {_TEXTMAP_FTS_TABLE} match ?) "
             "and tm.lang=? "
-            "and (tm.content like ? escape '\\' or tm.content like ? escape '\\') "
+            f"and {like_sql} "
         )
-        params = [fts_match, langCode, langCode, exact, fuzzy]
+        params = [fts_match, langCode, *resolved_like_params]
     else:
         # 使用LIKE查询
         sql = (
             "select count(*) from textMap tm "
-            "where tm.lang=? and (tm.content like ? escape '\\' or tm.content like ? escape '\\') "
+            f"where tm.lang=? and {like_sql} "
         )
-        params = [langCode, exact, fuzzy]
+        params = [langCode, *resolved_like_params]
 
     # 添加版本过滤
     sql = _append_version_filter_clause(
@@ -1827,11 +2006,22 @@ def _select_avatar_scoped_voice_items_by_filters(
     _ensure_fetter_voice_data()
     with closing(conn.cursor()) as cursor:
         keyword_text = (keyword or "").strip()
-        exact = fuzzy = None
+        exact = None
+        title_like_sql = content_like_sql = ""
+        title_like_params: list[str] = []
+        content_like_params: list[str] = []
         if keyword_text:
-            escaped = _escape_like(keyword_text)
-            exact = f"%{escaped}%"
-            fuzzy = exact
+            exact = _build_like_patterns(keyword_text, langCode)[0]
+            title_like_sql, title_like_params = _build_keyword_like_clause(
+                "titleText.content",
+                keyword_text,
+                langCode,
+            )
+            content_like_sql, content_like_params = _build_keyword_like_clause(
+                "contentText.content",
+                keyword_text,
+                langCode,
+            )
 
         sql = (
             "select fetters.avatarId, fetters.voiceTitleTextMapHash, "
@@ -1847,13 +2037,9 @@ def _select_avatar_scoped_voice_items_by_filters(
         params: list[object] = [langCode, langCode]
 
         if keyword_text:
-            sql += (
-                "and ("
-                "(titleText.content like ? escape '\\' or titleText.content like ? escape '\\') "
-                "or (contentText.content like ? escape '\\' or contentText.content like ? escape '\\')"
-                ") "
-            )
-            params.extend([exact, fuzzy, exact, fuzzy])
+            sql += f"and ({title_like_sql} or {content_like_sql}) "
+            params.extend(title_like_params)
+            params.extend(content_like_params)
 
         sql = _append_textmap_exists_version_filter(
             sql,
@@ -1868,11 +2054,16 @@ def _select_avatar_scoped_voice_items_by_filters(
             sql += (
                 "order by case "
                 "when titleText.content like ? escape '\\' then 0 "
-                "when contentText.content like ? escape '\\' then 1 "
-                "else 2 end, "
+                f"when {title_like_sql} then 1 "
+                "when contentText.content like ? escape '\\' then 2 "
+                f"when {content_like_sql} then 3 "
+                "else 4 end, "
                 "length(coalesce(titleText.content, contentText.content, '')), fetters.fetterId, fv.voicePath "
             )
-            params.extend([exact, exact])
+            params.append(exact)
+            params.extend(title_like_params)
+            params.append(exact)
+            params.extend(content_like_params)
         else:
             sql += "order by fetters.fetterId, fv.voicePath "
 
@@ -2232,17 +2423,17 @@ def _append_textmap_exists_version_filter(
 
 def selectTextMapFromKeyword(keyWord: str, langCode: int, limit: int | None = None):
     with closing(conn.cursor()) as cursor:
-        exact, fuzzy = _build_like_patterns(keyWord, langCode)
+        like_sql, like_params = _build_keyword_like_clause("tm.content", keyWord, langCode)
         fts_match = _build_textmap_fts_match(keyWord, langCode)
         match_sort_sql, match_sort_params = _build_match_sort_case("tm.content", keyWord, langCode)
         normalized_length_sql = f"length({_build_normalized_match_expr('tm.content', langCode)})"
 
         sql_like = (
             "select tm.hash, tm.content from textMap tm "
-            "where tm.lang=? and (tm.content like ? escape '\\' or tm.content like ? escape '\\') "
+            f"where tm.lang=? and {like_sql} "
             f"order by {match_sort_sql}, {normalized_length_sql}"
         )
-        params_like = [langCode, exact, fuzzy] + match_sort_params
+        params_like = [langCode, *like_params, *match_sort_params]
         if limit is not None:
             sql_like += " limit ?"
             params_like.append(limit)
@@ -2250,12 +2441,12 @@ def selectTextMapFromKeyword(keyWord: str, langCode: int, limit: int | None = No
         if _is_textmap_fts_lang_enabled(langCode) and fts_match is not None:
             sql_fts = (
                 f"select tm.hash, tm.content from textMap tm "
-                f"where tm.id in (select rowid from {_TEXTMAP_FTS_TABLE} where {_TEXTMAP_FTS_TABLE} match ? and lang=?) "
+                f"where tm.id in (select rowid from {_TEXTMAP_FTS_TABLE} where {_TEXTMAP_FTS_TABLE} match ?) "
                 "and tm.lang=? "
-                "and (tm.content like ? escape '\\' or tm.content like ? escape '\\') "
+                f"and {like_sql} "
                 f"order by {match_sort_sql}, {normalized_length_sql}"
             )
-            params_fts = [fts_match, langCode, langCode, exact, fuzzy] + match_sort_params
+            params_fts = [fts_match, langCode, *like_params, *match_sort_params]
             if limit is not None:
                 sql_fts += " limit ?"
                 params_fts.append(limit)
@@ -2291,6 +2482,7 @@ def selectTextMapFromKeywordPaged(
     _ensure_fetter_voice_data()
     with closing(conn.cursor()) as cursor:
         exact, fuzzy = _build_like_patterns(keyWord, langCode)
+        like_sql, like_params = _build_keyword_like_clause("tm.content", keyWord, langCode)
         fts_match = _build_textmap_fts_match(keyWord, langCode)
         hash_value = hash_value if hash_value is not None else -1
         voice_expr = _voice_exists_expr("tm.hash")
@@ -2309,7 +2501,9 @@ def selectTextMapFromKeywordPaged(
             updated_version=updated_version,
             hash_value=hash_value,
             limit=limit,
-            offset=offset
+            offset=offset,
+            like_sql=like_sql,
+            like_params=like_params,
         )
 
         # 如果启用了FTS且有匹配表达式，构建FTS查询
@@ -2327,7 +2521,9 @@ def selectTextMapFromKeywordPaged(
                 updated_version=updated_version,
                 hash_value=hash_value,
                 limit=limit,
-                offset=offset
+                offset=offset,
+                like_sql=like_sql,
+                like_params=like_params,
             )
             _execute_with_fallback(cursor, sql_fts, params_fts, sql_like, params_like)
         else:
@@ -2354,6 +2550,7 @@ def countTextMapFromKeyword(
     """
     with closing(conn.cursor()) as cursor:
         exact, fuzzy = _build_like_patterns(keyWord, langCode)
+        like_sql, like_params = _build_keyword_like_clause("tm.content", keyWord, langCode)
         fts_match = _build_textmap_fts_match(keyWord, langCode)
 
         # 构建LIKE查询
@@ -2366,7 +2563,9 @@ def countTextMapFromKeyword(
             voice_expr=None,
             voice_filter=None,
             created_version=created_version,
-            updated_version=updated_version
+            updated_version=updated_version,
+            like_sql=like_sql,
+            like_params=like_params,
         )
 
         if _is_textmap_fts_lang_enabled(langCode) and fts_match is not None:
@@ -2380,7 +2579,9 @@ def countTextMapFromKeyword(
                 voice_expr=None,
                 voice_filter=None,
                 created_version=created_version,
-                updated_version=updated_version
+                updated_version=updated_version,
+                like_sql=like_sql,
+                like_params=like_params,
             )
             _execute_with_fallback(cursor, sql_fts, params_fts, sql_like, params_like)
         else:
@@ -2485,7 +2686,7 @@ def selectTextMapFromKeywordBySourceType(
 
     _ensure_fetter_voice_data()
     with closing(conn.cursor()) as cursor:
-        exact, fuzzy = _build_like_patterns(keyWord, langCode)
+        like_sql, like_params = _build_keyword_like_clause("tm.content", keyWord, langCode)
         fts_match = _build_textmap_fts_match(keyWord, langCode)
         version_select = _version_select_expr("tm", "textMap")
 
@@ -2493,9 +2694,9 @@ def selectTextMapFromKeywordBySourceType(
         sql_like = (
             f"SELECT DISTINCT tm.hash, tm.content, {version_select} FROM textMap tm "
             f"{join_clause}"
-            "WHERE tm.lang=? AND (tm.content LIKE ? ESCAPE '\\' OR tm.content LIKE ? ESCAPE '\\') "
+            f"WHERE tm.lang=? AND {like_sql} "
         )
-        params_like = [*join_params, langCode, exact, fuzzy]
+        params_like = [*join_params, langCode, *like_params]
         sql_like = _append_version_filter_clause(sql_like, params_like, "tm", created_version, updated_version, "textMap")
         match_sort_sql, match_sort_params = _build_match_sort_case("tm.content", keyWord, langCode)
         sql_like += f"ORDER BY {match_sort_sql}, length(tm.content) "
@@ -2508,11 +2709,11 @@ def selectTextMapFromKeywordBySourceType(
             sql_fts = (
                 f"SELECT DISTINCT tm.hash, tm.content, {version_select} FROM textMap tm "
                 f"{join_clause}"
-                f"WHERE tm.id IN (SELECT rowid FROM {_TEXTMAP_FTS_TABLE} WHERE {_TEXTMAP_FTS_TABLE} MATCH ? AND lang=?) "
+                f"WHERE tm.id IN (SELECT rowid FROM {_TEXTMAP_FTS_TABLE} WHERE {_TEXTMAP_FTS_TABLE} MATCH ?) "
                 "AND tm.lang=? "
-                "AND (tm.content LIKE ? ESCAPE '\\' OR tm.content LIKE ? ESCAPE '\\') "
+                f"AND {like_sql} "
             )
-            params_fts = [*join_params, fts_match, langCode, langCode, exact, fuzzy]
+            params_fts = [*join_params, fts_match, langCode, *like_params]
             sql_fts = _append_version_filter_clause(sql_fts, params_fts, "tm", created_version, updated_version, "textMap")
             sql_fts += f"ORDER BY {match_sort_sql}, length(tm.content) "
             params_fts.extend(match_sort_params)
@@ -2538,26 +2739,26 @@ def countTextMapFromKeywordBySourceType(
         return 0
 
     with closing(conn.cursor()) as cursor:
-        exact, fuzzy = _build_like_patterns(keyWord, langCode)
+        like_sql, like_params = _build_keyword_like_clause("tm.content", keyWord, langCode)
         fts_match = _build_textmap_fts_match(keyWord, langCode)
 
         sql_like = (
             f"SELECT COUNT(DISTINCT tm.hash) FROM textMap tm "
             f"{join_clause}"
-            "WHERE tm.lang=? AND (tm.content LIKE ? ESCAPE '\\' OR tm.content LIKE ? ESCAPE '\\') "
+            f"WHERE tm.lang=? AND {like_sql} "
         )
-        params_like = [*join_params, langCode, exact, fuzzy]
+        params_like = [*join_params, langCode, *like_params]
         sql_like = _append_version_filter_clause(sql_like, params_like, "tm", created_version, updated_version, "textMap")
 
         if _is_textmap_fts_lang_enabled(langCode) and fts_match is not None:
             sql_fts = (
                 f"SELECT COUNT(DISTINCT tm.hash) FROM textMap tm "
                 f"{join_clause}"
-                f"WHERE tm.id IN (SELECT rowid FROM {_TEXTMAP_FTS_TABLE} WHERE {_TEXTMAP_FTS_TABLE} MATCH ? AND lang=?) "
+                f"WHERE tm.id IN (SELECT rowid FROM {_TEXTMAP_FTS_TABLE} WHERE {_TEXTMAP_FTS_TABLE} MATCH ?) "
                 "AND tm.lang=? "
-                "AND (tm.content LIKE ? ESCAPE '\\' OR tm.content LIKE ? ESCAPE '\\') "
+                f"AND {like_sql} "
             )
-            params_fts = [*join_params, fts_match, langCode, langCode, exact, fuzzy]
+            params_fts = [*join_params, fts_match, langCode, *like_params]
             sql_fts = _append_version_filter_clause(sql_fts, params_fts, "tm", created_version, updated_version, "textMap")
             _execute_with_fallback(cursor, sql_fts, params_fts, sql_like, params_like)
         else:
@@ -2589,6 +2790,7 @@ def countTextMapFromKeywordVoice(
     _ensure_fetter_voice_data()
     with closing(conn.cursor()) as cursor:
         exact, fuzzy = _build_like_patterns(keyWord, langCode)
+        like_sql, like_params = _build_keyword_like_clause("tm.content", keyWord, langCode)
         fts_match = _build_textmap_fts_match(keyWord, langCode)
         voice_expr = _voice_exists_expr("tm.hash")
 
@@ -2602,7 +2804,9 @@ def countTextMapFromKeywordVoice(
             voice_expr=voice_expr,
             voice_filter=voice_filter,
             created_version=created_version,
-            updated_version=updated_version
+            updated_version=updated_version,
+            like_sql=like_sql,
+            like_params=like_params,
         )
 
         if _is_textmap_fts_lang_enabled(langCode) and fts_match is not None:
@@ -2616,7 +2820,9 @@ def countTextMapFromKeywordVoice(
                 voice_expr=voice_expr,
                 voice_filter=voice_filter,
                 created_version=created_version,
-                updated_version=updated_version
+                updated_version=updated_version,
+                like_sql=like_sql,
+                like_params=like_params,
             )
             _execute_with_fallback(cursor, sql_fts, params_fts, sql_like, params_like)
         else:
@@ -2627,13 +2833,13 @@ def countTextMapFromKeywordVoice(
 
 def isTextMapHashInKeyword(textHash: int, keyword: str, langCode: int) -> bool:
     with closing(conn.cursor()) as cursor:
-        exact, fuzzy = _build_like_patterns(keyword, langCode)
+        like_sql, like_params = _build_keyword_like_clause("content", keyword, langCode)
         sql = (
             "select 1 from textMap "
-            "where hash=? and lang=? and (content like ? escape '\\' or content like ? escape '\\') "
+            f"where hash=? and lang=? and {like_sql} "
             "limit 1"
         )
-        cursor.execute(sql, (textHash, langCode, exact, fuzzy))
+        cursor.execute(sql, (textHash, langCode, *like_params))
         return cursor.fetchone() is not None
 
 
@@ -2788,6 +2994,34 @@ def getVersionFilterValues() -> dict[str, list[str]]:
             if text:
                 values[target].add(text)
 
+    def select_versions(cursor, table_name: str, column_name: str):
+        # Probe each of the small version dimension's IDs through an existing
+        # index instead of scanning millions of repeated IDs with DISTINCT.
+        # Older databases without that index retain their original scan plan.
+        has_index = False
+        for index in cursor.execute(f'PRAGMA index_list("{table_name}")').fetchall():
+            if index[4]:  # A partial index may not cover this predicate.
+                continue
+            index_name = str(index[1]).replace('"', '""')
+            columns = cursor.execute(f'PRAGMA index_info("{index_name}")').fetchall()
+            if columns and columns[0][2] == column_name:
+                has_index = True
+                break
+        if has_index:
+            predicate = (
+                f"EXISTS (SELECT 1 FROM {table_name} t "
+                f"WHERE t.{column_name} = vd.id)"
+            )
+        else:
+            predicate = (
+                f"vd.id IN (SELECT DISTINCT t.{column_name} FROM {table_name} t "
+                f"WHERE t.{column_name} IS NOT NULL)"
+            )
+        return cursor.execute(
+            f"SELECT vd.raw_version FROM {_VERSION_DIM_TABLE} vd "
+            f"WHERE {predicate} AND COALESCE(vd.raw_version, '') <> ''"
+        ).fetchall()
+
     with closing(conn.cursor()) as cursor:
         if not _has_version_dim():
             return {"created": [], "updated": []}
@@ -2796,48 +3030,15 @@ def getVersionFilterValues() -> dict[str, list[str]]:
             if not _table_exists(table_name) or not _table_has_column(table_name, "created_version_id"):
                 continue
 
-            rows = cursor.execute(
-                f"""
-                SELECT vd.raw_version
-                FROM {_VERSION_DIM_TABLE} vd
-                WHERE vd.id IN (
-                    SELECT DISTINCT t.created_version_id
-                    FROM {table_name} t
-                    WHERE t.created_version_id IS NOT NULL
-                )
-                  AND COALESCE(vd.raw_version, '') <> ''
-                """
-            ).fetchall()
+            rows = select_versions(cursor, table_name, "created_version_id")
             add_rows("created", rows)
 
             if table_name == "quest":
                 if _table_exists("quest_version") and _table_has_column("quest_version", "updated_version_id"):
-                    rows = cursor.execute(
-                        f"""
-                        SELECT vd.raw_version
-                        FROM {_VERSION_DIM_TABLE} vd
-                        WHERE vd.id IN (
-                            SELECT DISTINCT qv.updated_version_id
-                            FROM quest_version qv
-                            WHERE qv.updated_version_id IS NOT NULL
-                        )
-                          AND COALESCE(vd.raw_version, '') <> ''
-                        """
-                    ).fetchall()
+                    rows = select_versions(cursor, "quest_version", "updated_version_id")
                     add_rows("updated", rows)
             elif table_name != "npc" and _table_has_column(table_name, "updated_version_id"):
-                rows = cursor.execute(
-                    f"""
-                    SELECT vd.raw_version
-                    FROM {_VERSION_DIM_TABLE} vd
-                    WHERE vd.id IN (
-                        SELECT DISTINCT t.updated_version_id
-                        FROM {table_name} t
-                        WHERE t.updated_version_id IS NOT NULL
-                    )
-                      AND COALESCE(vd.raw_version, '') <> ''
-                    """
-                ).fetchall()
+                rows = select_versions(cursor, table_name, "updated_version_id")
                 add_rows("updated", rows)
 
     return {
@@ -3097,9 +3298,9 @@ def _build_catalog_entity_base_query(
     sql += "WHERE 1=1 "
 
     if keyword:
-        exact, fuzzy = _build_like_patterns(keyword, lang_code)
-        sql += "AND (tm_title.content LIKE ? ESCAPE '\\' OR tm_title.content LIKE ? ESCAPE '\\') "
-        params.extend([exact, fuzzy])
+        like_sql, like_params = _build_keyword_like_clause("tm_title.content", keyword, lang_code)
+        sql += f"AND {like_sql} "
+        params.extend(like_params)
 
     source_type_codes = _expand_qianxing_source_type_codes(source_type_code)
     if source_type_codes:
@@ -3614,25 +3815,23 @@ def selectVoiceFromKeywordPaged(keyWord: str, page: int, size: int, langCode: in
     分页搜索语音
     """
     with closing(conn.cursor()) as cursor:
+        like_sql, like_params = _build_keyword_like_clause("tm.content", keyWord, langCode)
         # 构建查询
-        sql = """
+        sql = f"""
         SELECT DISTINCT v.voicePath, d.textHash, tm.content
         FROM voice v
         JOIN dialogue d ON v.dialogueId = d.dialogueId
         JOIN textMap tm ON tm.hash = d.textHash
-        WHERE tm.lang = ? AND (tm.content LIKE ? ESCAPE '\\' OR tm.content LIKE ? ESCAPE '\\')
+        WHERE tm.lang = ? AND {like_sql}
         ORDER BY tm.content
         LIMIT ? OFFSET ?
         """
-
-        # 构建LIKE模式
-        exact, fuzzy = _build_like_patterns(keyWord, langCode)
 
         # 计算偏移量
         offset = (page - 1) * size
 
         # 执行查询
-        cursor.execute(sql, (langCode, exact, fuzzy, size, offset))
+        cursor.execute(sql, (langCode, *like_params, size, offset))
 
         # 处理结果
         results = []
@@ -4018,7 +4217,7 @@ def selectReadableFromKeyword(
     category: str | None = None,
 ):
     with closing(conn.cursor()) as cursor:
-        exact, fuzzy = _build_like_patterns(keyword, langCode)
+        like_sql, like_params = _build_keyword_like_clause("content", keyword, langCode)
         match_sort_sql, match_sort_params = _build_match_sort_case("content", keyword, langCode)
         normalized_length_sql = f"length({_build_normalized_match_expr('content', langCode)})"
         readable_langs = _expand_readable_langs([langStr])
@@ -4030,13 +4229,9 @@ def selectReadableFromKeyword(
         sql = (
             f"select fileName, content, titleTextMapHash, readableId, {version_select} from readable "
             f"{readable_meta_join}"
-            f"where lang in ({lang_placeholders}) and (content like ? escape '\\' or content like ? escape '\\') "
+            f"where lang in ({lang_placeholders}) and {like_sql} "
         )
-        params = []
-        for lang in readable_langs:
-            params.append(lang)
-        params.append(exact)
-        params.append(fuzzy)
+        params = list(readable_langs) + list(like_params)
         sql = _append_version_filter_clause(
             sql + " ",
             params,
@@ -4066,16 +4261,16 @@ def countReadableFromKeyword(
     updated_version: str | None = None,
 ) -> int:
     with closing(conn.cursor()) as cursor:
-        exact, fuzzy = _build_like_patterns(keyword, langCode)
+        like_sql, like_params = _build_keyword_like_clause("content", keyword, langCode)
         readable_langs = _expand_readable_langs([langStr])
         if not readable_langs:
             return 0
         lang_placeholders = ",".join(["?"] * len(readable_langs))
         sql = (
             "select count(*) from readable "
-            f"where lang in ({lang_placeholders}) and (content like ? escape '\\' or content like ? escape '\\')"
+            f"where lang in ({lang_placeholders}) and {like_sql}"
         )
-        params = readable_langs + [exact, fuzzy]
+        params = readable_langs + like_params
         sql = _append_version_filter_clause(
             sql + " ",
             params,
@@ -4272,7 +4467,7 @@ def selectQuestByTitleKeyword(
     source_type: str | None = None,
 ):
     with closing(conn.cursor()) as cursor:
-        exact, fuzzy = _build_like_patterns(keyword, langCode)
+        like_sql, like_params = _build_keyword_like_clause("textMap.content", keyword, langCode)
         version_select = _version_select_expr("quest", "quest", langCode)
         source_type_select = "quest.source_type" if _table_has_column("quest", "source_type") else "NULL"
         match_sort_sql, match_sort_params = _build_match_sort_case("textMap.content", keyword, langCode)
@@ -4280,9 +4475,9 @@ def selectQuestByTitleKeyword(
         sql = (
             f"select quest.questId, textMap.content, {source_type_select} as source_type, {version_select} from quest "
             "join textMap on quest.titleTextMapHash=textMap.hash "
-            "where textMap.lang=? and (textMap.content like ? escape '\\' or textMap.content like ? escape '\\') "
+            f"where textMap.lang=? and {like_sql} "
         )
-        params = [langCode, exact, fuzzy]
+        params = [langCode, *like_params]
         sql = _append_version_filter_clause(
             sql,
             params,
@@ -4346,7 +4541,8 @@ def selectQuestByContentKeyword(
     source_type: str | None = None,
 ):
     with closing(conn.cursor()) as cursor:
-        exact, fuzzy = _build_like_patterns(keyword, langCode)
+        desc_like_sql, desc_like_params = _build_keyword_like_clause("descText.content", keyword, langCode)
+        dialogue_like_sql, dialogue_like_params = _build_keyword_like_clause("dialogueText.content", keyword, langCode)
         version_select = _version_select_expr("quest", "quest", langCode)
         source_type_select = "quest.source_type" if _table_has_column("quest", "source_type") else "NULL"
         desc_filter_sql, desc_filter_params = _quest_text_not_excluded_clause("descText.content")
@@ -4358,7 +4554,7 @@ def selectQuestByContentKeyword(
                 "from quest q "
                 "join textMap descText on q.descTextMapHash=descText.hash "
                 "where descText.lang=? "
-                "and (descText.content like ? escape '\\' or descText.content like ? escape '\\') "
+                f"and {desc_like_sql} "
                 f"and {desc_filter_sql} "
             )
         match_sql_parts.append(
@@ -4367,7 +4563,7 @@ def selectQuestByContentKeyword(
             + _quest_talk_dialogue_join_sql("qt", "d", "tdl")
             + "join textMap dialogueText on dialogueText.hash=d.textHash "
             + "where dialogueText.lang=? "
-            + "and (dialogueText.content like ? escape '\\' or dialogueText.content like ? escape '\\') "
+            + f"and {dialogue_like_sql} "
             + f"and {dialogue_filter_sql} "
         )
         match_sql = " union all ".join(match_sql_parts)
@@ -4389,8 +4585,8 @@ def selectQuestByContentKeyword(
         )
         params: list = []
         if _table_has_column("quest", "descTextMapHash"):
-            params.extend([langCode, exact, fuzzy, *desc_filter_params])
-        params.extend([langCode, exact, fuzzy, *dialogue_filter_params, langCode])
+            params.extend([langCode, *desc_like_params, *desc_filter_params])
+        params.extend([langCode, *dialogue_like_params, *dialogue_filter_params, langCode])
         sql = _append_version_filter_clause(
             sql,
             params,
@@ -4414,7 +4610,7 @@ def selectQuestByNpcSpeakerKeyword(
     source_type: str | None = None,
 ):
     with closing(conn.cursor()) as cursor:
-        exact, fuzzy = _build_like_patterns(keyword, langCode)
+        like_sql, like_params = _build_keyword_like_clause("npcName.content", keyword, langCode)
         version_select = _version_select_expr("quest", "quest", langCode)
         source_type_select = "quest.source_type" if _table_has_column("quest", "source_type") else "NULL"
         sql = (
@@ -4427,9 +4623,9 @@ def selectQuestByNpcSpeakerKeyword(
             + "join npc on d.talkerType = 'TALK_ROLE_NPC' and d.talkerId = npc.npcId "
             + "join textMap npcName on npc.textHash = npcName.hash and npcName.lang = ? "
             + "left join textMap titleText on quest.titleTextMapHash = titleText.hash and titleText.lang = ? "
-            + "where (npcName.content like ? escape '\\' or npcName.content like ? escape '\\') "
+            + f"where {like_sql} "
         )
-        params: list[object] = [langCode, langCode, exact, fuzzy]
+        params: list[object] = [langCode, langCode, *like_params]
         sql = _append_version_filter_clause(
             sql,
             params,
@@ -4504,9 +4700,9 @@ def selectNpcDialogueSearchEntries(
         )
         params: list[object] = [langCode]
         if keyword_text:
-            exact, fuzzy = _build_like_patterns(keyword_text, langCode)
-            sql += "and (npcName.content like ? escape '\\' or npcName.content like ? escape '\\') "
-            params.extend([exact, fuzzy])
+            like_sql, like_params = _build_keyword_like_clause("npcName.content", keyword_text, langCode)
+            sql += f"and {like_sql} "
+            params.extend(like_params)
         sql += (
             "), visible_npc as ("
             "select distinct base.npcId, base.npcName, base.created_version, "
@@ -5015,17 +5211,17 @@ def selectNpcNonTaskDialogueGroupSummariesForNpcIds(
 
 def selectAvatarByNameKeyword(keyword: str, langCode: int):
     with closing(conn.cursor()) as cursor:
-        exact, fuzzy = _build_like_patterns(keyword, langCode)
+        like_sql, like_params = _build_keyword_like_clause("textMap.content", keyword, langCode)
         match_sort_sql, match_sort_params = _build_match_sort_case("textMap.content", keyword, langCode)
         normalized_length_sql = f"length({_build_normalized_match_expr('textMap.content', langCode)})"
         sql = (
             "select avatar.avatarId, textMap.content "
             "from avatar join textMap on avatar.nameTextMapHash=textMap.hash "
-            "where textMap.lang=? and (textMap.content like ? escape '\\' or textMap.content like ? escape '\\') "
+            f"where textMap.lang=? and {like_sql} "
             f"order by {match_sort_sql}, {normalized_length_sql} "
             "limit 200"
         )
-        cursor.execute(sql, (langCode, exact, fuzzy, *match_sort_params))
+        cursor.execute(sql, (langCode, *like_params, *match_sort_params))
         return cursor.fetchall()
 
 
@@ -5091,11 +5287,28 @@ def selectAvatarStoryItemsByFilters(
 ):
     with closing(conn.cursor()) as cursor:
         keyword_text = (keyword or "").strip()
-        exact = fuzzy = None
+        exact = None
+        title_like_sql = locked_like_sql = context_like_sql = ""
+        title_like_params: list[str] = []
+        locked_like_params: list[str] = []
+        context_like_params: list[str] = []
         if keyword_text:
-            escaped = _escape_like(keyword_text)
-            exact = f"%{escaped}%"
-            fuzzy = exact
+            exact = _build_like_patterns(keyword_text, langCode)[0]
+            title_like_sql, title_like_params = _build_keyword_like_clause(
+                "titleText.content",
+                keyword_text,
+                langCode,
+            )
+            locked_like_sql, locked_like_params = _build_keyword_like_clause(
+                "lockedText.content",
+                keyword_text,
+                langCode,
+            )
+            context_like_sql, context_like_params = _build_keyword_like_clause(
+                "contextText.content",
+                keyword_text,
+                langCode,
+            )
 
         sql = (
             "select entries.avatarId, entries.fetterId, entries.titleHash, "
@@ -5112,19 +5325,10 @@ def selectAvatarStoryItemsByFilters(
         params.append(langCode)
 
         if keyword_text:
-            sql += (
-                "and ("
-                "(titleText.content like ? escape '\\' or titleText.content like ? escape '\\') "
-                "or (lockedText.content like ? escape '\\' or lockedText.content like ? escape '\\') "
-                "or (contextText.content like ? escape '\\' or contextText.content like ? escape '\\')"
-                ") "
-            )
-            params.append(exact)
-            params.append(fuzzy)
-            params.append(exact)
-            params.append(fuzzy)
-            params.append(exact)
-            params.append(fuzzy)
+            sql += f"and ({title_like_sql} or {locked_like_sql} or {context_like_sql}) "
+            params.extend(title_like_params)
+            params.extend(locked_like_params)
+            params.extend(context_like_params)
 
         sql = _append_textmap_exists_version_filter(
             sql,
@@ -5139,15 +5343,21 @@ def selectAvatarStoryItemsByFilters(
             sql += (
                 "order by case "
                 "when titleText.content like ? escape '\\' then 0 "
-                "when lockedText.content like ? escape '\\' then 1 "
-                "when contextText.content like ? escape '\\' then 2 "
-                "else 3 end, "
+                f"when {title_like_sql} then 1 "
+                "when lockedText.content like ? escape '\\' then 2 "
+                f"when {locked_like_sql} then 3 "
+                "when contextText.content like ? escape '\\' then 4 "
+                f"when {context_like_sql} then 5 "
+                "else 6 end, "
                 "length(coalesce(titleText.content, lockedText.content, contextText.content, '')), "
                 "entries.fetterId "
             )
             params.append(exact)
+            params.extend(title_like_params)
             params.append(exact)
+            params.extend(locked_like_params)
             params.append(exact)
+            params.extend(context_like_params)
         else:
             sql += "order by entries.fetterId "
 
@@ -5167,7 +5377,9 @@ def selectQuestByChapterKeyword(
     source_type: str | None = None,
 ):
     with closing(conn.cursor()) as cursor:
-        exact, fuzzy = _build_like_patterns(keyword, langCode)
+        exact = _build_like_patterns(keyword, langCode)[0]
+        title_like_sql, title_like_params = _build_keyword_like_clause("chapterTitle.content", keyword, langCode)
+        num_like_sql, num_like_params = _build_keyword_like_clause("chapterNum.content", keyword, langCode)
         version_select = _version_select_expr("quest", "quest", langCode)
         source_type_select = "quest.source_type" if _table_has_column("quest", "source_type") else "NULL"
         sql = (
@@ -5182,19 +5394,14 @@ def selectQuestByChapterKeyword(
             "and chapterTitle.lang=? "
             "left join textMap as chapterNum on chapter.chapterNumTextMapHash=chapterNum.hash "
             "and chapterNum.lang=? "
-            "where ("
-            "chapterTitle.content like ? escape '\\' or chapterNum.content like ? escape '\\' "
-            "or chapterTitle.content like ? escape '\\' or chapterNum.content like ? escape '\\'"
-            ") "
+            f"where ({title_like_sql} or {num_like_sql}) "
         )
         params = [
             langCode,
             langCode,
             langCode,
-            exact,
-            exact,
-            fuzzy,
-            fuzzy,
+            *title_like_params,
+            *num_like_params,
         ]
         sql = _append_version_filter_clause(
             sql,
@@ -5383,7 +5590,7 @@ def selectReadableByTitleKeyword(
     offset: int | None = None,
 ):
     with closing(conn.cursor()) as cursor:
-        exact, fuzzy = _build_like_patterns(keyword, langCode)
+        like_sql, like_params = _build_keyword_like_clause("textMap.content", keyword, langCode)
         match_sort_sql, match_sort_params = _build_match_sort_case("textMap.content", keyword, langCode)
         normalized_length_sql = f"length({_build_normalized_match_expr('textMap.content', langCode)})"
         readable_langs = _expand_readable_langs([langStr])
@@ -5398,8 +5605,8 @@ def selectReadableByTitleKeyword(
                f"from readable {readable_meta_join}"
                "join textMap on readable.titleTextMapHash=textMap.hash "
                f"where readable.lang in ({readable_lang_placeholders}) and textMap.lang=? "
-               "and (textMap.content like ? escape '\\' or textMap.content like ? escape '\\') ")
-        params = readable_langs + [langCode, exact, fuzzy]
+               f"and {like_sql} ")
+        params = readable_langs + [langCode, *like_params]
         sql = _append_version_filter_clause(
             sql,
             params,
@@ -5570,15 +5777,15 @@ def selectSubtitleFromKeyword(
     updated_version: str | None = None,
 ):
     with closing(conn.cursor()) as cursor:
-        exact, fuzzy = _build_like_patterns(keyword, langCode)
+        like_sql, like_params = _build_keyword_like_clause("content", keyword, langCode)
         version_select = _version_select_expr("subtitle", "subtitle")
         match_sort_sql, match_sort_params = _build_match_sort_case("content", keyword, langCode)
         normalized_length_sql = f"length({_build_normalized_match_expr('content', langCode)})"
         sql = (
             f"select fileName, content, startTime, endTime, subtitleId, {version_select} from subtitle "
-            "where lang=? and (content like ? escape '\\' or content like ? escape '\\') "
+            f"where lang=? and {like_sql} "
         )
-        params = [langCode, exact, fuzzy]
+        params = [langCode, *like_params]
         sql = _append_version_filter_clause(
             sql + " ",
             params,
@@ -5606,12 +5813,12 @@ def countSubtitleFromKeyword(
     updated_version: str | None = None,
 ) -> int:
     with closing(conn.cursor()) as cursor:
-        exact, fuzzy = _build_like_patterns(keyword, langCode)
+        like_sql, like_params = _build_keyword_like_clause("content", keyword, langCode)
         sql = (
             "select count(*) from subtitle "
-            "where lang=? and (content like ? escape '\\' or content like ? escape '\\')"
+            f"where lang=? and {like_sql}"
         )
-        params = [langCode, exact, fuzzy]
+        params = [langCode, *like_params]
         sql = _append_version_filter_clause(
             sql + " ",
             params,
@@ -5674,7 +5881,7 @@ def selectDialogueByTalkerKeyword(
     updated_version: str | None = None,
 ):
     with closing(conn.cursor()) as cursor:
-        exact, fuzzy = _build_like_patterns(keyword, langCode)
+        like_sql, like_params = _build_keyword_like_clause("npcName.content", keyword, langCode)
         speaker_sort_sql, speaker_sort_params = _build_match_sort_case("npcName.content", keyword, langCode)
         speaker_length_sql = f"length({_build_normalized_match_expr('npcName.content', langCode)})"
         sql = (
@@ -5683,9 +5890,9 @@ def selectDialogueByTalkerKeyword(
             "join npc on dialogue.talkerType = 'TALK_ROLE_NPC' and dialogue.talkerId = npc.npcId "
             "join textMap as npcName on npc.textHash = npcName.hash and npcName.lang=? "
             "join textMap as dialogueText on dialogue.textHash = dialogueText.hash and dialogueText.lang=? "
-            "where (npcName.content like ? escape '\\' or npcName.content like ? escape '\\') "
+            f"where {like_sql} "
         )
-        params = [langCode, langCode, exact, fuzzy]
+        params = [langCode, langCode, *like_params]
         sql = _append_version_filter_clause(
             sql + " ",
             params,
@@ -5710,16 +5917,16 @@ def countDialogueByTalkerKeyword(
     updated_version: str | None = None,
 ) -> int:
     with closing(conn.cursor()) as cursor:
-        exact, fuzzy = _build_like_patterns(keyword, langCode)
+        like_sql, like_params = _build_keyword_like_clause("npcName.content", keyword, langCode)
         sql = (
             "select count(*) "
             "from dialogue "
             "join npc on dialogue.talkerType = 'TALK_ROLE_NPC' and dialogue.talkerId = npc.npcId "
             "join textMap as npcName on npc.textHash = npcName.hash and npcName.lang=? "
             "join textMap as dialogueText on dialogue.textHash = dialogueText.hash and dialogueText.lang=? "
-            "where (npcName.content like ? escape '\\' or npcName.content like ? escape '\\') "
+            f"where {like_sql} "
         )
-        params = [langCode, langCode, exact, fuzzy]
+        params = [langCode, langCode, *like_params]
         sql = _append_version_filter_clause(
             sql,
             params,
@@ -5742,8 +5949,8 @@ def selectDialogueByTalkerAndKeyword(
     updated_version: str | None = None,
 ):
     with closing(conn.cursor()) as cursor:
-        speaker_exact, speaker_fuzzy = _build_like_patterns(speaker_keyword, langCode)
-        keyword_exact, keyword_fuzzy = _build_like_patterns(keyword, langCode)
+        speaker_like_sql, speaker_like_params = _build_keyword_like_clause("npcName.content", speaker_keyword, langCode)
+        keyword_like_sql, keyword_like_params = _build_keyword_like_clause("dialogueText.content", keyword, langCode)
         dialogue_sort_sql, dialogue_sort_params = _build_match_sort_case("dialogueText.content", keyword, langCode)
         speaker_sort_sql, speaker_sort_params = _build_match_sort_case("npcName.content", speaker_keyword, langCode)
         dialogue_length_sql = f"length({_build_normalized_match_expr('dialogueText.content', langCode)})"
@@ -5754,16 +5961,14 @@ def selectDialogueByTalkerAndKeyword(
             "and dialogueText.lang = ? "
             "join npc on dialogue.talkerType = 'TALK_ROLE_NPC' and dialogue.talkerId = npc.npcId "
             "join textMap as npcName on npc.textHash = npcName.hash and npcName.lang = ? "
-            "where (dialogueText.content like ? escape '\\' or dialogueText.content like ? escape '\\') "
-            "and (npcName.content like ? escape '\\' or npcName.content like ? escape '\\') "
+            f"where {keyword_like_sql} "
+            f"and {speaker_like_sql} "
         )
         params = [
             langCode,
             langCode,
-            keyword_exact,
-            keyword_fuzzy,
-            speaker_exact,
-            speaker_fuzzy,
+            *keyword_like_params,
+            *speaker_like_params,
         ]
         sql = _append_version_filter_clause(
             sql + " ",
@@ -5795,7 +6000,7 @@ def selectDialogueByTalkerTypeAndKeyword(
     updated_version: str | None = None,
 ):
     with closing(conn.cursor()) as cursor:
-        exact, fuzzy = _build_like_patterns(keyword, langCode)
+        like_sql, like_params = _build_keyword_like_clause("dialogueText.content", keyword, langCode)
         dialogue_sort_sql, dialogue_sort_params = _build_match_sort_case("dialogueText.content", keyword, langCode)
         dialogue_length_sql = f"length({_build_normalized_match_expr('dialogueText.content', langCode)})"
         sql = (
@@ -5804,9 +6009,9 @@ def selectDialogueByTalkerTypeAndKeyword(
             "join textMap as dialogueText on dialogue.textHash = dialogueText.hash "
             "and dialogueText.lang = ? "
             "where dialogue.talkerType = ? "
-            "and (dialogueText.content like ? escape '\\' or dialogueText.content like ? escape '\\') "
+            f"and {like_sql} "
         )
-        params = [langCode, talkerType, exact, fuzzy]
+        params = [langCode, talkerType, *like_params]
         sql = _append_version_filter_clause(
             sql + " ",
             params,
@@ -5835,7 +6040,7 @@ def selectFetterBySpeakerKeyword(
     updated_version: str | None = None,
 ):
     with closing(conn.cursor()) as cursor:
-        exact, fuzzy = _build_like_patterns(keyword, langCode)
+        like_sql, like_params = _build_keyword_like_clause("avatarName.content", keyword, langCode)
         speaker_sort_sql, speaker_sort_params = _build_match_sort_case("avatarName.content", keyword, langCode)
         speaker_length_sql = f"length({_build_normalized_match_expr('avatarName.content', langCode)})"
         sql = (
@@ -5846,9 +6051,9 @@ def selectFetterBySpeakerKeyword(
             "join avatar on fetters.avatarId = avatar.avatarId "
             "join textMap as avatarName on avatar.nameTextMapHash = avatarName.hash "
             "and avatarName.lang = ? "
-            "where (avatarName.content like ? escape '\\' or avatarName.content like ? escape '\\') "
+            f"where {like_sql} "
         )
-        params = [langCode, langCode, exact, fuzzy]
+        params = [langCode, langCode, *like_params]
         sql = _append_version_filter_clause(
             sql + " ",
             params,
@@ -5875,8 +6080,8 @@ def selectFetterBySpeakerAndKeyword(
     updated_version: str | None = None,
 ):
     with closing(conn.cursor()) as cursor:
-        speaker_exact, speaker_fuzzy = _build_like_patterns(speaker_keyword, langCode)
-        keyword_exact, keyword_fuzzy = _build_like_patterns(keyword, langCode)
+        speaker_like_sql, speaker_like_params = _build_keyword_like_clause("avatarName.content", speaker_keyword, langCode)
+        keyword_like_sql, keyword_like_params = _build_keyword_like_clause("voiceText.content", keyword, langCode)
         voice_sort_sql, voice_sort_params = _build_match_sort_case("voiceText.content", keyword, langCode)
         speaker_sort_sql, speaker_sort_params = _build_match_sort_case("avatarName.content", speaker_keyword, langCode)
         voice_length_sql = f"length({_build_normalized_match_expr('voiceText.content', langCode)})"
@@ -5888,16 +6093,14 @@ def selectFetterBySpeakerAndKeyword(
             "join avatar on fetters.avatarId = avatar.avatarId "
             "join textMap as avatarName on avatar.nameTextMapHash = avatarName.hash "
             "and avatarName.lang = ? "
-            "where (voiceText.content like ? escape '\\' or voiceText.content like ? escape '\\') "
-            "and (avatarName.content like ? escape '\\' or avatarName.content like ? escape '\\') "
+            f"where {keyword_like_sql} "
+            f"and {speaker_like_sql} "
         )
         params = [
             langCode,
             langCode,
-            keyword_exact,
-            keyword_fuzzy,
-            speaker_exact,
-            speaker_fuzzy,
+            *keyword_like_params,
+            *speaker_like_params,
         ]
         sql = _append_version_filter_clause(
             sql + " ",
@@ -5928,7 +6131,7 @@ def selectAvatarStoryBySpeakerKeyword(
     updated_version: str | None = None,
 ):
     with closing(conn.cursor()) as cursor:
-        exact, fuzzy = _build_like_patterns(keyword, langCode)
+        like_sql, like_params = _build_keyword_like_clause("avatarName.content", keyword, langCode)
         speaker_sort_sql, speaker_sort_params = _build_match_sort_case("avatarName.content", keyword, langCode)
         speaker_length_sql = f"length({_build_normalized_match_expr('avatarName.content', langCode)})"
         sql = (
@@ -5939,9 +6142,9 @@ def selectAvatarStoryBySpeakerKeyword(
             "join avatar on entries.avatarId = avatar.avatarId "
             "join textMap as avatarName on avatar.nameTextMapHash = avatarName.hash "
             "and avatarName.lang = ? "
-            "where (avatarName.content like ? escape '\\' or avatarName.content like ? escape '\\') "
+            f"where {like_sql} "
         )
-        params = [langCode, langCode, exact, fuzzy]
+        params = [langCode, langCode, *like_params]
         sql = _append_version_filter_clause(
             sql + " ",
             params,
@@ -5968,8 +6171,8 @@ def selectAvatarStoryBySpeakerAndKeyword(
     updated_version: str | None = None,
 ):
     with closing(conn.cursor()) as cursor:
-        speaker_exact, speaker_fuzzy = _build_like_patterns(speaker_keyword, langCode)
-        keyword_exact, keyword_fuzzy = _build_like_patterns(keyword, langCode)
+        speaker_like_sql, speaker_like_params = _build_keyword_like_clause("avatarName.content", speaker_keyword, langCode)
+        keyword_like_sql, keyword_like_params = _build_keyword_like_clause("storyText.content", keyword, langCode)
         story_sort_sql, story_sort_params = _build_match_sort_case("storyText.content", keyword, langCode)
         speaker_sort_sql, speaker_sort_params = _build_match_sort_case("avatarName.content", speaker_keyword, langCode)
         story_length_sql = f"length({_build_normalized_match_expr('storyText.content', langCode)})"
@@ -5981,16 +6184,14 @@ def selectAvatarStoryBySpeakerAndKeyword(
             "join avatar on entries.avatarId = avatar.avatarId "
             "join textMap as avatarName on avatar.nameTextMapHash = avatarName.hash "
             "and avatarName.lang = ? "
-            "where (storyText.content like ? escape '\\' or storyText.content like ? escape '\\') "
-            "and (avatarName.content like ? escape '\\' or avatarName.content like ? escape '\\') "
+            f"where {keyword_like_sql} "
+            f"and {speaker_like_sql} "
         )
         params = [
             langCode,
             langCode,
-            keyword_exact,
-            keyword_fuzzy,
-            speaker_exact,
-            speaker_fuzzy,
+            *keyword_like_params,
+            *speaker_like_params,
         ]
         sql = _append_version_filter_clause(
             sql + " ",
@@ -6050,8 +6251,8 @@ def countDialogueByTalkerAndKeyword(
     updated_version: str | None = None,
 ) -> int:
     with closing(conn.cursor()) as cursor:
-        speaker_exact, speaker_fuzzy = _build_like_patterns(speaker_keyword, langCode)
-        keyword_exact, keyword_fuzzy = _build_like_patterns(keyword, langCode)
+        speaker_like_sql, speaker_like_params = _build_keyword_like_clause("npcName.content", speaker_keyword, langCode)
+        keyword_like_sql, keyword_like_params = _build_keyword_like_clause("dialogueText.content", keyword, langCode)
         sql = (
             "select count(*) "
             "from dialogue "
@@ -6059,16 +6260,14 @@ def countDialogueByTalkerAndKeyword(
             "and dialogueText.lang = ? "
             "join npc on dialogue.talkerType = 'TALK_ROLE_NPC' and dialogue.talkerId = npc.npcId "
             "join textMap as npcName on npc.textHash = npcName.hash and npcName.lang = ? "
-            "where (dialogueText.content like ? escape '\\' or dialogueText.content like ? escape '\\') "
-            "and (npcName.content like ? escape '\\' or npcName.content like ? escape '\\')"
+            f"where {keyword_like_sql} "
+            f"and {speaker_like_sql}"
         )
         params = [
             langCode,
             langCode,
-            keyword_exact,
-            keyword_fuzzy,
-            speaker_exact,
-            speaker_fuzzy,
+            *keyword_like_params,
+            *speaker_like_params,
         ]
         sql = _append_version_filter_clause(
             sql + " ",
@@ -6091,16 +6290,16 @@ def countDialogueByTalkerTypeAndKeyword(
     updated_version: str | None = None,
 ) -> int:
     with closing(conn.cursor()) as cursor:
-        exact, fuzzy = _build_like_patterns(keyword, langCode)
+        like_sql, like_params = _build_keyword_like_clause("dialogueText.content", keyword, langCode)
         sql = (
             "select count(*) "
             "from dialogue "
             "join textMap as dialogueText on dialogue.textHash = dialogueText.hash "
             "and dialogueText.lang = ? "
             "where dialogue.talkerType = ? "
-            "and (dialogueText.content like ? escape '\\' or dialogueText.content like ? escape '\\')"
+            f"and {like_sql}"
         )
-        params = [langCode, talkerType, exact, fuzzy]
+        params = [langCode, talkerType, *like_params]
         sql = _append_version_filter_clause(
             sql + " ",
             params,
@@ -6121,7 +6320,7 @@ def countFetterBySpeakerKeyword(
     updated_version: str | None = None,
 ) -> int:
     with closing(conn.cursor()) as cursor:
-        exact, fuzzy = _build_like_patterns(keyword, langCode)
+        like_sql, like_params = _build_keyword_like_clause("avatarName.content", keyword, langCode)
         sql = (
             "select count(*) "
             "from fetters "
@@ -6130,9 +6329,9 @@ def countFetterBySpeakerKeyword(
             "join avatar on fetters.avatarId = avatar.avatarId "
             "join textMap as avatarName on avatar.nameTextMapHash = avatarName.hash "
             "and avatarName.lang = ? "
-            "where (avatarName.content like ? escape '\\' or avatarName.content like ? escape '\\')"
+            f"where {like_sql}"
         )
-        params = [langCode, langCode, exact, fuzzy]
+        params = [langCode, langCode, *like_params]
         sql = _append_version_filter_clause(
             sql + " ",
             params,
@@ -6154,8 +6353,8 @@ def countFetterBySpeakerAndKeyword(
     updated_version: str | None = None,
 ) -> int:
     with closing(conn.cursor()) as cursor:
-        speaker_exact, speaker_fuzzy = _build_like_patterns(speaker_keyword, langCode)
-        keyword_exact, keyword_fuzzy = _build_like_patterns(keyword, langCode)
+        speaker_like_sql, speaker_like_params = _build_keyword_like_clause("avatarName.content", speaker_keyword, langCode)
+        keyword_like_sql, keyword_like_params = _build_keyword_like_clause("voiceText.content", keyword, langCode)
         sql = (
             "select count(*) "
             "from fetters "
@@ -6164,16 +6363,14 @@ def countFetterBySpeakerAndKeyword(
             "join avatar on fetters.avatarId = avatar.avatarId "
             "join textMap as avatarName on avatar.nameTextMapHash = avatarName.hash "
             "and avatarName.lang = ? "
-            "where (voiceText.content like ? escape '\\' or voiceText.content like ? escape '\\') "
-            "and (avatarName.content like ? escape '\\' or avatarName.content like ? escape '\\')"
+            f"where {keyword_like_sql} "
+            f"and {speaker_like_sql}"
         )
         params = [
             langCode,
             langCode,
-            keyword_exact,
-            keyword_fuzzy,
-            speaker_exact,
-            speaker_fuzzy,
+            *keyword_like_params,
+            *speaker_like_params,
         ]
         sql = _append_version_filter_clause(
             sql + " ",
@@ -6195,7 +6392,7 @@ def countAvatarStoryBySpeakerKeyword(
     updated_version: str | None = None,
 ) -> int:
     with closing(conn.cursor()) as cursor:
-        exact, fuzzy = _build_like_patterns(keyword, langCode)
+        like_sql, like_params = _build_keyword_like_clause("avatarName.content", keyword, langCode)
         sql = (
             "select count(*) "
             f"from ({_avatar_story_entries_subquery()}) as entries "
@@ -6204,9 +6401,9 @@ def countAvatarStoryBySpeakerKeyword(
             "join avatar on entries.avatarId = avatar.avatarId "
             "join textMap as avatarName on avatar.nameTextMapHash = avatarName.hash "
             "and avatarName.lang = ? "
-            "where (avatarName.content like ? escape '\\' or avatarName.content like ? escape '\\')"
+            f"where {like_sql}"
         )
-        params = [langCode, langCode, exact, fuzzy]
+        params = [langCode, langCode, *like_params]
         sql = _append_version_filter_clause(
             sql + " ",
             params,
@@ -6228,8 +6425,8 @@ def countAvatarStoryBySpeakerAndKeyword(
     updated_version: str | None = None,
 ) -> int:
     with closing(conn.cursor()) as cursor:
-        speaker_exact, speaker_fuzzy = _build_like_patterns(speaker_keyword, langCode)
-        keyword_exact, keyword_fuzzy = _build_like_patterns(keyword, langCode)
+        speaker_like_sql, speaker_like_params = _build_keyword_like_clause("avatarName.content", speaker_keyword, langCode)
+        keyword_like_sql, keyword_like_params = _build_keyword_like_clause("storyText.content", keyword, langCode)
         sql = (
             "select count(*) "
             f"from ({_avatar_story_entries_subquery()}) as entries "
@@ -6238,16 +6435,14 @@ def countAvatarStoryBySpeakerAndKeyword(
             "join avatar on entries.avatarId = avatar.avatarId "
             "join textMap as avatarName on avatar.nameTextMapHash = avatarName.hash "
             "and avatarName.lang = ? "
-            "where (storyText.content like ? escape '\\' or storyText.content like ? escape '\\') "
-            "and (avatarName.content like ? escape '\\' or avatarName.content like ? escape '\\')"
+            f"where {keyword_like_sql} "
+            f"and {speaker_like_sql}"
         )
         params = [
             langCode,
             langCode,
-            keyword_exact,
-            keyword_fuzzy,
-            speaker_exact,
-            speaker_fuzzy,
+            *keyword_like_params,
+            *speaker_like_params,
         ]
         sql = _append_version_filter_clause(
             sql + " ",

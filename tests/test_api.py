@@ -458,7 +458,7 @@ class TestRequestDisplayPreferences:
             ([1, 4], 1, "both"),
         ]
 
-    def test_concurrent_requests_keep_preferences_isolated_and_serialize_database_access(
+    def test_concurrent_requests_keep_preferences_isolated_without_serializing_readers(
         self,
         monkeypatch,
         tmp_config,
@@ -472,6 +472,7 @@ class TestRequestDisplayPreferences:
         })
         state_lock = threading.Lock()
         start_barrier = threading.Barrier(2)
+        query_barrier = threading.Barrier(2)
         observed = []
         active = 0
         max_active = 0
@@ -482,7 +483,7 @@ class TestRequestDisplayPreferences:
                 active += 1
                 max_active = max(max_active, active)
             try:
-                time.sleep(0.05)
+                query_barrier.wait(timeout=3)
                 observed.append((
                     config.getResultLanguages(),
                     config.getSourceLanguage(),
@@ -513,7 +514,7 @@ class TestRequestDisplayPreferences:
             statuses = list(executor.map(request_with, preferences))
 
         assert statuses == [200, 200]
-        assert max_active == 1
+        assert max_active == 2
         assert sorted(observed, key=lambda item: item[0]) == [
             ([4], 4, False),
             ([9], 9, True),

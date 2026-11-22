@@ -77,6 +77,16 @@ def normalize_search_keyword(keyword: str | None) -> str:
             return text
 
 
+def split_search_terms(keyword: str | None) -> list[str]:
+    """Split a search keyword on Unicode whitespace after outer-quote normalization."""
+    raw_text = str(keyword or "").strip()
+    if not raw_text:
+        return []
+    text = normalize_search_keyword(raw_text) or raw_text
+    parts = [part for part in text.split() if part]
+    return _unique_tokens(parts)
+
+
 def _unique_tokens(tokens: list[str]) -> list[str]:
     result: list[str] = []
     seen: set[str] = set()
