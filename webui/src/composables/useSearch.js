@@ -13,9 +13,10 @@ const useSearch = () => {
     loadVersionOptions
   } = useVersion()
 
-  // 初始化时加载语言列表和版本选项
-  const searchReady = Promise.all([loadLanguages(), loadVersionOptions()])
+  // Queries need the selected language; version options can finish independently.
+  const searchReady = loadLanguages()
   searchReady.catch(console.error)
+  void loadVersionOptions().catch(console.error)
 
   const sourceTypeOptions = Object.freeze([
     { value: '', label: '全部来源' },
@@ -69,6 +70,8 @@ const useSearch = () => {
   const currentPage = ref(1)
   const totalCount = ref(0)
   const isLoading = ref(false)
+  let activeRequestId = 0
+  let activeController = null
 
   const totalPages = computed(() => Math.max(1, Math.ceil(totalCount.value / pageSize.value)))
 
@@ -83,9 +86,14 @@ const useSearch = () => {
   }
 
   const fetchPage = async (page, useLast = false) => {
+    const requestId = ++activeRequestId
+    activeController?.abort()
+    const controller = new AbortController()
+    activeController = controller
     isLoading.value = true
     try {
       await searchReady
+      if (requestId !== activeRequestId) return
       const params = useLast
         ? {
             keyword: keywordLast.value,
@@ -117,7 +125,9 @@ const useSearch = () => {
         params.createdVersion,
         params.updatedVersion,
         params.sourceType,
+        { signal: controller.signal },
       )).json
+      if (requestId !== activeRequestId) return
 
       const timeMs = typeof ans.time === 'number' ? ans.time.toFixed(2) : '0.00'
       const total = ans.total || 0
@@ -157,12 +167,16 @@ const useSearch = () => {
         searchSummary.value = `查询耗时: ${timeMs}ms，未找到结果`
       }
     } catch (error) {
+      if (requestId !== activeRequestId || controller.signal.aborted) return
       console.error('搜索失败:', error)
       searchSummary.value = '搜索失败，请重试'
       queryResult.value = []
       totalCount.value = 0
     } finally {
-      isLoading.value = false
+      if (requestId === activeRequestId) {
+        isLoading.value = false
+        activeController = null
+      }
     }
   }
 

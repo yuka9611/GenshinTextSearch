@@ -13,11 +13,11 @@ const getImportedVoiceLanguages = withCache(() => {
 
 const getAvailableVersions = () => {
   // Version aggregation can be heavy on large databases, but we need fresh data.
-  return request.get('/api/getAvailableVersions', { timeout: 30000 })
+  return request.get('/api/getAvailableVersions', { timeout: 30000, doNotShowLoadingScreen: true })
 }
 
 const getAvailableVersionFilters = () => {
-  return request.get('/api/getAvailableVersionFilters', { timeout: 30000 })
+  return request.get('/api/getAvailableVersionFilters', { timeout: 30000, doNotShowLoadingScreen: true })
 }
 
 const saveConfig = (resultLanguages, defaultSearchLanguage, sourceLanguage, isMale) => {

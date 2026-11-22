@@ -7,7 +7,7 @@
           :style="inputStyle"
           :placeholder="inputPlaceholder"
           class="input-with-select"
-          @keyup.enter.native="onSearch"
+          @keydown.enter="onSearchEnter($event, onSearch)"
           clearable
         >
           <template #prepend>
@@ -35,6 +35,7 @@
 </template>
 
 <script setup>
+import { onSearchEnter } from '@/utils/searchEnter'
 import { ref, watch, onMounted, computed } from 'vue'
 
 const HISTORY_KEY = 'genshin-search-history'

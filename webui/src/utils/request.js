@@ -25,6 +25,22 @@ const apiTimeout = Number.isFinite(configuredTimeout) && configuredTimeout > 0
     ? configuredTimeout
     : 30000
 
+const requestLabels = Object.freeze({
+    '/api/keywordQuery': '文本查询',
+    '/api/getAvailableVersionFilters': '版本筛选加载',
+    '/api/getAvailableVersions': '版本列表加载',
+    '/api/getImportedTextLanguages': '文本语言加载',
+    '/api/getImportedVoiceLanguages': '语音语言加载',
+    '/api/getSettings': '设置加载',
+    '/api/getTalkFromHash': '对话详情加载',
+    '/api/getDialogueGroup': '对话详情加载',
+    '/api/nameSearch': '名称查询',
+    '/api/npcDialogueSearch': 'NPC 对话查询',
+    '/api/avatarVoiceSearch': '角色语音查询',
+    '/api/avatarStorySearch': '角色故事查询',
+    '/api/catalogSearch': '图鉴查询',
+})
+
 const service = axios.create({
     headers: {},
     timeout: apiTimeout,
@@ -43,7 +59,9 @@ service.interceptors.request.use((config) => {
 })
 
 service.interceptors.response.use((response) => {
-    loadingScreen.endLoading()
+    if (!response.config?.doNotShowLoadingScreen) {
+        loadingScreen.endLoading()
+    }
 
     const sanitizedResponseData = sanitizePayload(response.data || {})
     response.data = sanitizedResponseData
@@ -88,7 +106,21 @@ service.interceptors.response.use((response) => {
     void recordSearchFromResponse(response.config, response.data)
     return response
 }, (error) => {
-    loadingScreen.endLoading()
+    if (!error.config?.doNotShowLoadingScreen) {
+        loadingScreen.endLoading()
+    }
+
+    if (axios.isCancel(error)) {
+        return Promise.reject(error)
+    }
+
+    if (error.code === 'ECONNABORTED' || error.code === 'ETIMEDOUT') {
+        const path = new URL(error.config?.url || '', 'http://gts.invalid').pathname
+        const label = requestLabels[path] || '请求'
+        const seconds = (error.config?.timeout || apiTimeout) / 1000
+        ElMessage.error(`${label}超时（${seconds} 秒），请重试`)
+        return Promise.reject({ network: true, error })
+    }
 
     if (error.code === "ERR_NETWORK") {
         error.network = true

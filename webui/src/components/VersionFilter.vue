@@ -8,6 +8,7 @@
         class="versionFilter"
         clearable
         filterable
+        @change="emit('search')"
       >
         <el-option v-for="version in createdOptions" :key="`created-${version}`" :label="version" :value="version" />
       </el-select>
@@ -20,6 +21,7 @@
         class="versionFilter"
         clearable
         filterable
+        @change="emit('search')"
       >
         <el-option v-for="version in updatedOptions" :key="`updated-${version}`" :label="version" :value="version" />
       </el-select>
@@ -28,7 +30,7 @@
 </template>
 
 <script setup>
-import { computed, ref, watch } from 'vue'
+import { computed } from 'vue'
 
 const props = defineProps({
   createdVersion: {
@@ -55,28 +57,17 @@ const props = defineProps({
 
 const emit = defineEmits(['update:createdVersion', 'update:updatedVersion', 'search'])
 
-const localCreatedVersion = ref(props.createdVersion)
-const localUpdatedVersion = ref(props.updatedVersion)
+const localCreatedVersion = computed({
+  get: () => props.createdVersion,
+  set: (value) => emit('update:createdVersion', value),
+})
+const localUpdatedVersion = computed({
+  get: () => props.updatedVersion,
+  set: (value) => emit('update:updatedVersion', value),
+})
 const createdOptions = computed(() => props.createdVersionOptions.length ? props.createdVersionOptions : props.versionOptions)
 const updatedOptions = computed(() => props.updatedVersionOptions.length ? props.updatedVersionOptions : props.versionOptions)
 
-watch(localCreatedVersion, (newValue) => {
-  emit('update:createdVersion', newValue)
-  emit('search')
-})
-
-watch(localUpdatedVersion, (newValue) => {
-  emit('update:updatedVersion', newValue)
-  emit('search')
-})
-
-watch(() => props.createdVersion, (newValue) => {
-  localCreatedVersion.value = newValue
-})
-
-watch(() => props.updatedVersion, (newValue) => {
-  localUpdatedVersion.value = newValue
-})
 </script>
 
 <style scoped>

@@ -21,7 +21,7 @@
                         v-model="speakerKeyword"
                         placeholder="角色名..."
                         class="speakerInput"
-                        @keyup.enter.native="handleSearch"
+                        @keydown.enter="onSearchEnter($event, handleSearch)"
                         clearable
                     />
                 </div>
@@ -138,6 +138,7 @@
 </template>
 
 <script setup>
+import { onSearchEnter } from '@/utils/searchEnter'
 import { computed, ref } from 'vue'
 import { Close } from '@element-plus/icons-vue'
 import TranslateDisplay from '@/components/ResultEntry.vue'

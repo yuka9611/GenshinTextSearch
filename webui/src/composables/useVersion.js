@@ -29,6 +29,8 @@ const useVersion = () => {
           ])
         } catch (error) {
           console.error('failed to load version options:', error)
+          const status = error?.error?.response?.status ?? error?.response?.status ?? error?.errorCode
+          if (![404, 405].includes(Number(status))) return
           try {
             const ans = await basicInfoApi.getAvailableVersions()
             versionOptions.value = ans.json || []
@@ -36,9 +38,6 @@ const useVersion = () => {
             updatedVersionOptions.value = versionOptions.value
           } catch (fallbackError) {
             console.error('failed to load fallback version options:', fallbackError)
-            versionOptions.value = []
-            createdVersionOptions.value = []
-            updatedVersionOptions.value = []
           }
         } finally {
           loadVersionOptionsPromise = null

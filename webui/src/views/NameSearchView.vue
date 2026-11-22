@@ -1,4 +1,5 @@
 <script setup>
+import { onSearchEnter } from '@/utils/searchEnter'
 import { ref, computed, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import api from '@/api/keywordQuery'
@@ -333,7 +334,7 @@ const { restoringHistory } = useSearchHistoryReplay({
             :placeholder="uiText.speakerKeyword"
             class="speakerInput"
             clearable
-            @keyup.enter.native="onSearchClicked"
+            @keydown.enter="onSearchEnter($event, onSearchClicked)"
           />
         </div>
         <div class="filterItem">

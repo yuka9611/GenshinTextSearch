@@ -1,4 +1,5 @@
 <script setup>
+import { onSearchEnter } from '@/utils/searchEnter'
 import { ref, computed, reactive, watch } from 'vue'
 import { Close } from '@element-plus/icons-vue'
 import global from '@/global/global'
@@ -16,6 +17,7 @@ import ActiveFilterTags from '@/components/ActiveFilterTags.vue'
 import formatText from '@/utils/formatText'
 import useDisplayPreferenceRefresh from '@/composables/useDisplayPreferenceRefresh'
 import useSearchHistoryReplay from '@/composables/useSearchHistoryReplay'
+import { matchesSearchTerms } from '@/utils/searchTerms'
 
 const uiText = {
   pageTitle: '角色语音搜索',
@@ -169,12 +171,12 @@ const filteredVoices = computed(() => {
     if (!text) return true
 
     const title = normalizeText(entry.voiceTitle || '')
-    if (title.includes(text)) return true
+    if (matchesSearchTerms(title, textFilter.value)) return true
 
     const translates = entry.translates || {}
     for (const key of Object.keys(translates)) {
       const content = normalizeText(translates[key] || '')
-      if (content.includes(text)) return true
+      if (matchesSearchTerms(content, textFilter.value)) return true
     }
     return false
   })
@@ -502,7 +504,7 @@ const { restoringHistory } = useSearchHistoryReplay({
       <div class="filterBar topFilterBar">
         <div class="filterItem filterItem--wide">
           <span class="filterLabel">{{ uiText.titlePlaceholder }}</span>
-          <el-input v-model="textFilter" :placeholder="uiText.titlePlaceholder" clearable @keyup.enter.native="onSearchClicked" />
+          <el-input v-model="textFilter" :placeholder="uiText.titlePlaceholder" clearable @keydown.enter="onSearchEnter($event, onSearchClicked)" />
         </div>
         <div class="filterItem">
           <span class="filterLabel">{{ uiText.createdVersion }}</span>

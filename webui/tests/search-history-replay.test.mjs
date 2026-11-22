@@ -153,7 +153,7 @@ test('leaving before initialization completes cancels a stale history search', a
   app.unmount()
 })
 
-test('real VersionFilter prop watchers cannot trigger extra searches during history restoration', async () => {
+test('real VersionFilter prop synchronization cannot trigger extra searches during history restoration', async () => {
   const source = readFileSync(new URL('../src/components/VersionFilter.vue', import.meta.url), 'utf8')
   const { descriptor } = parse(source)
   const compiled = compileScript(descriptor, { id: 'history-version-filter-regression' }).content
@@ -195,7 +195,7 @@ test('real VersionFilter prop watchers cannot trigger extra searches during hist
     const app = renderer.createApp({ render: () => h(KeepAlive, null, { default: () => h(Search) }) })
     app.mount(node('root'))
     await flush()
-    assert.equal(childSearchEmits, 2, `${searchType}: exercise both actual child prop-to-local watchers`)
+    assert.equal(childSearchEmits, 0, `${searchType}: restoring both version props does not emit a user search`)
     assert.deepEqual(requests, [{ created: '7.1', updated: '7.2' }], `${searchType}: query only once after restoring both filters`)
     app.unmount()
   }

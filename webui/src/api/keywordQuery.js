@@ -13,6 +13,7 @@ const queryByKeyword = (
     createdVersion = "",
     updatedVersion = "",
     sourceType = "",
+    requestOptions = {},
 ) => {
     return request.post("/api/keywordQuery", {
         keyword: keyword,
@@ -24,7 +25,7 @@ const queryByKeyword = (
         createdVersion: createdVersion,
         updatedVersion: updatedVersion,
         sourceType: sourceType,
-    });
+    }, requestOptions);
 };
 
 /**

@@ -1,6 +1,7 @@
 <script setup>
 import * as textStyleParser from '@/assets/textStyleParse'
-import {onBeforeMount, onMounted, ref, watch} from "vue";
+import { findHighlightRanges } from '@/utils/searchTerms'
+import {onMounted, ref, watch} from "vue";
 
 const props = defineProps(['text', 'keyword'])
 
@@ -10,33 +11,12 @@ const props = defineProps(['text', 'keyword'])
  */
 const textWrapper = ref(null)
 
-const loweredKeyword = ref("")
-
 const getLines = (translate) => {
     if (!translate) {
         return []
     }
     const normalized = translate.replace(/\\n/g, "\n")
     return normalized.split(/\r?\n/)
-}
-
-/**
- * @param str{String}
- * @param kw{String}
- */
-const getAllOccurrences = (str, kw) => {
-    let ans = []
-    if(!str) return ans
-
-    let i = 0;
-    while(i !== -1){
-        i = str.indexOf(kw, i);
-        if(i !== -1){
-            ans.push(i)
-            i += kw.length
-        }
-    }
-    return ans;
 }
 
 /**
@@ -119,20 +99,22 @@ const myDomElementIterate = (myDomElement, lineHtmlElements, containerStack, cur
 
                 // 高亮搜索关键字
                 if(props.keyword){
-                    let indices = getAllOccurrences(line.toLowerCase(), loweredKeyword.value);
-                    if (indices.length === 0){
+                    const ranges = findHighlightRanges(line, props.keyword)
+                    if (ranges.length === 0){
                         container.append(line)
                     }else{
                         let j = 0
-                        for(let sub of indices){
+                        for(const [start, end] of ranges){
                             if(j >= line.length)
                                 break
-                            container.append(line.substring(j, sub))
+                            if(start > j){
+                                container.append(line.substring(j, start))
+                            }
                             let keywordContainer = document.createElement('span')
-                            keywordContainer.append(line.substring(sub, sub + props.keyword.length))
+                            keywordContainer.append(line.substring(start, end))
                             keywordContainer.classList.add("keywordSpan")
                             container.append(keywordContainer)
-                            j = sub + props.keyword.length
+                            j = end
                         }
                         if(j < line.length){
                             container.append(line.substring(j))
@@ -157,7 +139,6 @@ const myDomElementIterate = (myDomElement, lineHtmlElements, containerStack, cur
 }
 
 const regenerateWrapperDom = (text) => {
-    loweredKeyword.value = props.keyword ? props.keyword.toLowerCase() : ""
     while(textWrapper.value.lastChild){
         textWrapper.value.removeChild(textWrapper.value.lastChild)
     }
