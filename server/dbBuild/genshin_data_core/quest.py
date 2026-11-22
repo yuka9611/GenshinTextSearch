@@ -167,6 +167,14 @@ class QuestParser:
         )
 
     @staticmethod
+    def get_step_section_desc_text_map_hash(step_obj: Any) -> Optional[int]:
+        # Quest BinOutput descTextMapHash and its obfuscated aliases are flow
+        # titles. The separate stepDescTextMapHash carries the section prose.
+        return extract_first_positive_int(
+            step_obj, "stepDescTextMapHash", "FKKAEBOAMCN", "KHPCFMHKOKE",
+        )
+
+    @staticmethod
     def get_step_sub_id(step_obj: Any) -> Optional[int]:
         return extract_first_positive_int(step_obj, "NFGFDHPPBIF", "MPKBGPAKIOA", "subId", "KKMJBEPGLGD", "LAFBPKMMBHD", "NDOFAOCKPGE", "KCGAKLCHDCC")
 
@@ -310,6 +318,7 @@ extract_quest_id = GTS_QUEST_PARSER.extract_quest_id
 extract_quest_talk_ids = GTS_QUEST_PARSER.extract_quest_talk_ids
 get_quest_subquests = GTS_QUEST_PARSER.get_quest_subquests
 get_step_desc_text_map_hash = GTS_QUEST_PARSER.get_step_desc_text_map_hash
+get_step_section_desc_text_map_hash = GTS_QUEST_PARSER.get_step_section_desc_text_map_hash
 get_step_sub_id = GTS_QUEST_PARSER.get_step_sub_id
 get_step_order = GTS_QUEST_PARSER.get_step_order
 get_step_talk_ids = GTS_QUEST_PARSER.get_step_talk_ids

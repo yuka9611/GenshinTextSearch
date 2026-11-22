@@ -18,6 +18,7 @@ from genshin_data_core.quest import (
     extract_quest_id,
     extract_quest_talk_ids,
     get_step_talk_ids,
+    get_step_section_desc_text_map_hash,
 )
 from genshin_data_core.sources import QuestSourceResolver, SOURCE_TYPE_HANGOUT, iter_subquest_talk_rows
 
@@ -119,6 +120,16 @@ def test_get_step_talk_ids_supports_finish_plot_and_skips_lua_notify():
     }
 
     assert get_step_talk_ids(step_obj) == [1000701, 1000702]
+
+
+def test_step_section_description_preserves_schema_aliases_and_ignores_flow_titles():
+    for key in ("stepDescTextMapHash", "FKKAEBOAMCN", "KHPCFMHKOKE"):
+        assert get_step_section_desc_text_map_hash({key: 1376410621}) == 1376410621
+    for key in ("descTextMapHash", "NBOJMAHCCGM", "JDFENJAFCPF", "BMEACBBPBGK", "OANENPOPCFO"):
+        assert get_step_section_desc_text_map_hash({key: 1063799476}) is None
+    assert get_step_section_desc_text_map_hash(
+        {"descTextMapHash": 1063799476, "stepDescTextMapHash": 1376410621}
+    ) == 1376410621
 
 
 def test_shared_quest_parser_supports_6_6_quest_brief_schema():
