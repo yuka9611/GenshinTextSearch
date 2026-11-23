@@ -8,6 +8,7 @@ from pathlib import Path
 
 import config
 import fts_tokenizer
+import short_literal_cache
 from quest_text_filters import build_quest_text_not_excluded_sql, is_excluded_quest_text
 from utils.database_connection import ThreadLocalConnection
 
@@ -890,7 +891,11 @@ def _execute_with_fallback(
             return False
 
         sql_lower = sql_main.lower()
-        if _TEXTMAP_FTS_TABLE.lower() not in sql_lower and " match " not in sql_lower:
+        if (
+            _TEXTMAP_FTS_TABLE.lower() not in sql_lower
+            and "genshin_short" not in sql_lower
+            and " match " not in sql_lower
+        ):
             return False
 
         message = str(exc).lower()
@@ -911,8 +916,37 @@ def _execute_with_fallback(
             raise
         if sql_fallback is None:
             raise
+        if "genshin_short" in sql_main.lower():
+            try:
+                short_literal_cache.detach_short_fts(cursor.connection)
+            except Exception:
+                pass
         fallback_params = params_fallback if params_fallback is not None else []
         cursor.execute(sql_fallback, fallback_params)
+
+
+def _resolve_textmap_fts_source(
+    keyword: str,
+    lang_code: int,
+    connection: sqlite3.Connection | None = None,
+) -> tuple[str, str] | None:
+    """Resolve primary textMap_fts or sidecar short_literal_fts candidate subquery and match expr."""
+    fts_match = _build_textmap_fts_match(keyword, lang_code)
+    if fts_match is not None and _is_textmap_fts_lang_enabled(lang_code):
+        return (
+            f"select rowid from {_TEXTMAP_FTS_TABLE} where {_TEXTMAP_FTS_TABLE} match ?",
+            fts_match,
+        )
+    if config.getEnableTextMapFts():
+        target_conn = _unwrap_sqlite_connection(
+            connection if connection is not None else conn
+        )
+        return short_literal_cache.resolve_short_fts_query(
+            target_conn,
+            keyword,
+            lang_code,
+        )
+    return None
 
 
 def _safe_execute(cursor: sqlite3.Cursor, sql: str, params: list = []) -> list:
@@ -928,24 +962,13 @@ def _safe_execute(cursor: sqlite3.Cursor, sql: str, params: list = []) -> list:
 
 def _build_like_patterns(keyword: str, lang_code: int) -> tuple[str, str]:
     """
-    构建LIKE查询模式
+    构建LIKE查询模式：单关键词统一采用连续子串匹配，非连续模糊检索仅在空格分隔多词时启用。
     """
     raw_keyword = str(keyword or "").strip()
     keyword = fts_tokenizer.normalize_search_keyword(raw_keyword) or raw_keyword
     escaped = _escape_like(keyword)
     exact = f"%{escaped}%"
-
-    if lang_code in CHINESE_LANG_CODES:
-        fuzzy_source = "".join(keyword.split())
-        if len(fuzzy_source) >= 4:
-            # 4字及以上中文单关键词统一为连续子串匹配，以配合 trigram FTS 检索
-            fuzzy = exact
-        else:
-            fuzzy_escaped_chars = [_escape_like(ch) for ch in fuzzy_source]
-            fuzzy = "%" + "%".join(fuzzy_escaped_chars) + "%" if fuzzy_escaped_chars else exact
-    else:
-        fuzzy = exact
-    return exact, fuzzy
+    return exact, exact
 
 
 def _build_keyword_like_clause(
@@ -1034,6 +1057,7 @@ def _build_textmap_query(
     extra_where_sql: str = "",
     extra_where_params: list | None = None,
     use_cached_voice: bool | None = None,
+    fts_subquery: str | None = None,
 ) -> tuple[str, list]:
     """
     构建文本映射查询
@@ -1044,17 +1068,25 @@ def _build_textmap_query(
     if include_total:
         select_fields += ", count(*) over() as _total_count"
     if like_sql is None:
-        like_sql = "(tm.content like ? escape '\\' or tm.content like ? escape '\\')"
-        resolved_like_params: list[str] = [exact, fuzzy]
+        if fuzzy == exact:
+            like_sql = "(tm.content like ? escape '\\')"
+            resolved_like_params: list[str] = [exact]
+        else:
+            like_sql = "(tm.content like ? escape '\\' or tm.content like ? escape '\\')"
+            resolved_like_params = [exact, fuzzy]
     else:
         resolved_like_params = list(like_params or [])
 
     if use_fts and fts_match:
         # Check language on textMap below. Accessing the unindexed FTS lang
         # column would fetch each external content row a second time.
+        subquery_sql = (
+            fts_subquery
+            or f"select rowid from {_TEXTMAP_FTS_TABLE} where {_TEXTMAP_FTS_TABLE} match ?"
+        )
         sql = (
             f"select {select_fields} from textMap tm "
-            f"where tm.id in (select rowid from {_TEXTMAP_FTS_TABLE} where {_TEXTMAP_FTS_TABLE} match ?) "
+            f"where tm.id in ({subquery_sql}) "
             "and tm.lang=? "
             f"and {like_sql} "
         )
@@ -1133,22 +1165,31 @@ def _build_textmap_count_query(
     updated_version: str | None,
     like_sql: str | None = None,
     like_params: list[str] | None = None,
+    fts_subquery: str | None = None,
 ) -> tuple[str, list]:
     """
     构建文本映射计数查询
     """
     params: list = []
     if like_sql is None:
-        like_sql = "(tm.content like ? escape '\\' or tm.content like ? escape '\\')"
-        resolved_like_params: list[str] = [exact, fuzzy]
+        if fuzzy == exact:
+            like_sql = "(tm.content like ? escape '\\')"
+            resolved_like_params: list[str] = [exact]
+        else:
+            like_sql = "(tm.content like ? escape '\\' or tm.content like ? escape '\\')"
+            resolved_like_params = [exact, fuzzy]
     else:
         resolved_like_params = list(like_params or [])
 
     if use_fts and fts_match:
         # 使用FTS查询
+        subquery_sql = (
+            fts_subquery
+            or f"select rowid from {_TEXTMAP_FTS_TABLE} where {_TEXTMAP_FTS_TABLE} match ?"
+        )
         sql = (
             f"select count(*) from textMap tm "
-            f"where tm.id in (select rowid from {_TEXTMAP_FTS_TABLE} where {_TEXTMAP_FTS_TABLE} match ?) "
+            f"where tm.id in ({subquery_sql}) "
             "and tm.lang=? "
             f"and {like_sql} "
         )
@@ -2056,6 +2097,10 @@ def warmup_runtime_caches() -> None:
         _ensure_fetter_voice_data()
         _get_voiced_text_hash_set()
     except Exception:
+        pass
+    try:
+        short_literal_cache.warmup_short_fts(_unwrap_sqlite_connection(conn))
+    except Exception:
         return
 
 
@@ -2595,7 +2640,7 @@ def _append_textmap_exists_version_filter(
 def selectTextMapFromKeyword(keyWord: str, langCode: int, limit: int | None = None):
     with closing(conn.cursor()) as cursor:
         like_sql, like_params = _build_keyword_like_clause("tm.content", keyWord, langCode)
-        fts_match = _build_textmap_fts_match(keyWord, langCode)
+        fts_source = _resolve_textmap_fts_source(keyWord, langCode, connection=cursor.connection)
         match_sort_sql, match_sort_params = _build_match_sort_case("tm.content", keyWord, langCode)
         normalized_length_sql = f"length({_build_normalized_match_expr('tm.content', langCode)})"
 
@@ -2609,10 +2654,11 @@ def selectTextMapFromKeyword(keyWord: str, langCode: int, limit: int | None = No
             sql_like += " limit ?"
             params_like.append(limit)
 
-        if _is_textmap_fts_lang_enabled(langCode) and fts_match is not None:
+        if fts_source is not None:
+            fts_subquery, fts_match = fts_source
             sql_fts = (
                 f"select tm.hash, tm.content from textMap tm "
-                f"where tm.id in (select rowid from {_TEXTMAP_FTS_TABLE} where {_TEXTMAP_FTS_TABLE} match ?) "
+                f"where tm.id in ({fts_subquery}) "
                 "and tm.lang=? "
                 f"and {like_sql} "
                 f"order by {match_sort_sql}, {normalized_length_sql}"
@@ -2687,7 +2733,8 @@ def selectTextMapFromKeywordPaged(
     with closing(conn.cursor()) as cursor:
         exact, fuzzy = _build_like_patterns(keyWord, langCode)
         like_sql, like_params = _build_keyword_like_clause("tm.content", keyWord, langCode)
-        fts_match = _build_textmap_fts_match(keyWord, langCode)
+        fts_source = _resolve_textmap_fts_source(keyWord, langCode, connection=cursor.connection)
+        fts_subquery, fts_match = fts_source if fts_source is not None else (None, None)
         hash_value = hash_value if hash_value is not None else -1
         voice_expr = _voice_exists_expr("tm.hash", use_cached_voice=use_cached_voice)
 
@@ -2712,7 +2759,7 @@ def selectTextMapFromKeywordPaged(
         )
 
         # 如果启用了FTS且有匹配表达式，构建FTS查询
-        if _is_textmap_fts_lang_enabled(langCode) and fts_match is not None:
+        if fts_subquery is not None and fts_match is not None:
             sql_fts, params_fts = _build_textmap_query(
                 use_fts=True,
                 keyword=keyWord,
@@ -2730,6 +2777,7 @@ def selectTextMapFromKeywordPaged(
                 like_sql=like_sql,
                 like_params=like_params,
                 use_cached_voice=use_cached_voice,
+                fts_subquery=fts_subquery,
             )
             _execute_with_fallback(cursor, sql_fts, params_fts, sql_like, params_like)
         else:
@@ -2753,7 +2801,8 @@ def selectTextMapFromKeywordPagedWithCount(
     with closing(conn.cursor()) as cursor:
         exact, fuzzy = _build_like_patterns(keyWord, langCode)
         like_sql, like_params = _build_keyword_like_clause("tm.content", keyWord, langCode)
-        fts_match = _build_textmap_fts_match(keyWord, langCode)
+        fts_source = _resolve_textmap_fts_source(keyWord, langCode, connection=cursor.connection)
+        fts_subquery, fts_match = fts_source if fts_source is not None else (None, None)
         hash_value = hash_value if hash_value is not None else -1
         voice_expr = _voice_exists_expr("tm.hash", use_cached_voice=use_cached_voice)
 
@@ -2777,7 +2826,7 @@ def selectTextMapFromKeywordPagedWithCount(
             use_cached_voice=use_cached_voice,
         )
 
-        if _is_textmap_fts_lang_enabled(langCode) and fts_match is not None:
+        if fts_subquery is not None and fts_match is not None:
             sql_fts, params_fts = _build_textmap_query(
                 use_fts=True,
                 keyword=keyWord,
@@ -2796,6 +2845,7 @@ def selectTextMapFromKeywordPagedWithCount(
                 like_params=like_params,
                 include_total=True,
                 use_cached_voice=use_cached_voice,
+                fts_subquery=fts_subquery,
             )
             _execute_with_fallback(cursor, sql_fts, params_fts, sql_like, params_like)
         else:
@@ -2831,7 +2881,8 @@ def selectUnknownTextMapFromKeywordPagedWithCount(
     with closing(conn.cursor()) as cursor:
         exact, fuzzy = _build_like_patterns(keyWord, langCode)
         like_sql, like_params = _build_keyword_like_clause("tm.content", keyWord, langCode)
-        fts_match = _build_textmap_fts_match(keyWord, langCode)
+        fts_source = _resolve_textmap_fts_source(keyWord, langCode, connection=cursor.connection)
+        fts_subquery, fts_match = fts_source if fts_source is not None else (None, None)
         resolved_hash = hash_value if hash_value is not None else -1
         voice_expr = _voice_exists_expr("tm.hash", use_cached_voice=use_cached_voice)
 
@@ -2856,7 +2907,7 @@ def selectUnknownTextMapFromKeywordPagedWithCount(
             use_cached_voice=use_cached_voice,
         )
 
-        if _is_textmap_fts_lang_enabled(langCode) and fts_match is not None:
+        if fts_subquery is not None and fts_match is not None:
             sql_fts, params_fts = _build_textmap_query(
                 use_fts=True,
                 keyword=keyWord,
@@ -2876,6 +2927,7 @@ def selectUnknownTextMapFromKeywordPagedWithCount(
                 include_total=True,
                 extra_where_sql=extra_where_sql,
                 use_cached_voice=use_cached_voice,
+                fts_subquery=fts_subquery,
             )
             _execute_with_fallback(cursor, sql_fts, params_fts, sql_like, params_like)
         else:
@@ -2889,6 +2941,8 @@ def selectUnknownTextMapFromKeywordPagedWithCount(
         return [], 0
 
     with closing(conn.cursor()) as cursor:
+        fts_source = _resolve_textmap_fts_source(keyWord, langCode, connection=cursor.connection)
+        fts_subquery, fts_match = fts_source if fts_source is not None else (None, None)
         count_voice_filter = voice_filter if voice_filter in ("with", "without") else None
         sql_count_like, count_params_like = _build_textmap_count_query(
             use_fts=False,
@@ -2906,7 +2960,7 @@ def selectUnknownTextMapFromKeywordPagedWithCount(
         if extra_where_sql:
             sql_count_like += f" {extra_where_sql}"
 
-        if _is_textmap_fts_lang_enabled(langCode) and fts_match is not None:
+        if fts_subquery is not None and fts_match is not None:
             sql_count_fts, count_params_fts = _build_textmap_count_query(
                 use_fts=True,
                 langCode=langCode,
@@ -2919,6 +2973,7 @@ def selectUnknownTextMapFromKeywordPagedWithCount(
                 updated_version=updated_version,
                 like_sql=like_sql,
                 like_params=like_params,
+                fts_subquery=fts_subquery,
             )
             if extra_where_sql:
                 sql_count_fts += f" {extra_where_sql}"
@@ -2951,7 +3006,8 @@ def countTextMapFromKeyword(
     with closing(conn.cursor()) as cursor:
         exact, fuzzy = _build_like_patterns(keyWord, langCode)
         like_sql, like_params = _build_keyword_like_clause("tm.content", keyWord, langCode)
-        fts_match = _build_textmap_fts_match(keyWord, langCode)
+        fts_source = _resolve_textmap_fts_source(keyWord, langCode, connection=cursor.connection)
+        fts_subquery, fts_match = fts_source if fts_source is not None else (None, None)
 
         # 构建LIKE查询
         sql_like, params_like = _build_textmap_count_query(
@@ -2968,7 +3024,7 @@ def countTextMapFromKeyword(
             like_params=like_params,
         )
 
-        if _is_textmap_fts_lang_enabled(langCode) and fts_match is not None:
+        if fts_subquery is not None and fts_match is not None:
             # 构建FTS查询
             sql_fts, params_fts = _build_textmap_count_query(
                 use_fts=True,
@@ -2982,6 +3038,7 @@ def countTextMapFromKeyword(
                 updated_version=updated_version,
                 like_sql=like_sql,
                 like_params=like_params,
+                fts_subquery=fts_subquery,
             )
             _execute_with_fallback(cursor, sql_fts, params_fts, sql_like, params_like)
         else:
@@ -3164,7 +3221,7 @@ def selectTextMapFromKeywordBySourceType(
     _ensure_fetter_voice_data()
     with closing(conn.cursor()) as cursor:
         like_sql, like_params = _build_keyword_like_clause("tm.content", keyWord, langCode)
-        fts_match = _build_textmap_fts_match(keyWord, langCode)
+        fts_source = _resolve_textmap_fts_source(keyWord, langCode, connection=cursor.connection)
         version_select = _version_select_expr("tm", "textMap")
 
         built_like = _build_source_type_like_query(
@@ -3179,11 +3236,12 @@ def selectTextMapFromKeywordBySourceType(
         params_like.extend([*match_sort_params, limit, offset])
 
         # FTS 查询
-        if _is_textmap_fts_lang_enabled(langCode) and fts_match is not None:
+        if fts_source is not None:
+            fts_subquery, fts_match = fts_source
             sql_fts = (
                 f"SELECT DISTINCT tm.hash, tm.content, {version_select} FROM textMap tm "
                 f"{join_clause}"
-                f"WHERE tm.id IN (SELECT rowid FROM {_TEXTMAP_FTS_TABLE} WHERE {_TEXTMAP_FTS_TABLE} MATCH ?) "
+                f"WHERE tm.id IN ({fts_subquery}) "
                 "AND tm.lang=? "
                 f"AND {like_sql} "
             )
@@ -3215,7 +3273,7 @@ def selectTextMapFromKeywordBySourceTypeWithCount(
     _ensure_fetter_voice_data()
     with closing(conn.cursor()) as cursor:
         like_sql, like_params = _build_keyword_like_clause("tm.content", keyWord, langCode)
-        fts_match = _build_textmap_fts_match(keyWord, langCode)
+        fts_source = _resolve_textmap_fts_source(keyWord, langCode, connection=cursor.connection)
         version_select = _version_select_expr("tm", "textMap")
         outer_sort_sql, outer_sort_params = _build_match_sort_case("content", keyWord, langCode)
 
@@ -3233,11 +3291,12 @@ def selectTextMapFromKeywordBySourceTypeWithCount(
         )
         params_like = [*inner_like_params, *outer_sort_params, limit, offset]
 
-        if _is_textmap_fts_lang_enabled(langCode) and fts_match is not None:
+        if fts_source is not None:
+            fts_subquery, fts_match = fts_source
             inner_fts_sql = (
                 f"SELECT DISTINCT tm.hash AS hash, tm.content AS content, {version_select} FROM textMap tm "
                 f"{join_clause}"
-                f"WHERE tm.id IN (SELECT rowid FROM {_TEXTMAP_FTS_TABLE} WHERE {_TEXTMAP_FTS_TABLE} MATCH ?) "
+                f"WHERE tm.id IN ({fts_subquery}) "
                 "AND tm.lang=? "
                 f"AND {like_sql} "
             )
@@ -3281,7 +3340,7 @@ def countTextMapFromKeywordBySourceType(
 
     with closing(conn.cursor()) as cursor:
         like_sql, like_params = _build_keyword_like_clause("tm.content", keyWord, langCode)
-        fts_match = _build_textmap_fts_match(keyWord, langCode)
+        fts_source = _resolve_textmap_fts_source(keyWord, langCode, connection=cursor.connection)
 
         sql_like = (
             f"SELECT COUNT(DISTINCT tm.hash) FROM textMap tm "
@@ -3291,11 +3350,12 @@ def countTextMapFromKeywordBySourceType(
         params_like = [*join_params, langCode, *like_params]
         sql_like = _append_version_filter_clause(sql_like, params_like, "tm", created_version, updated_version, "textMap")
 
-        if _is_textmap_fts_lang_enabled(langCode) and fts_match is not None:
+        if fts_source is not None:
+            fts_subquery, fts_match = fts_source
             sql_fts = (
                 f"SELECT COUNT(DISTINCT tm.hash) FROM textMap tm "
                 f"{join_clause}"
-                f"WHERE tm.id IN (SELECT rowid FROM {_TEXTMAP_FTS_TABLE} WHERE {_TEXTMAP_FTS_TABLE} MATCH ?) "
+                f"WHERE tm.id IN ({fts_subquery}) "
                 "AND tm.lang=? "
                 f"AND {like_sql} "
             )
@@ -3324,7 +3384,8 @@ def countTextMapFromKeywordVoice(
     with closing(conn.cursor()) as cursor:
         exact, fuzzy = _build_like_patterns(keyWord, langCode)
         like_sql, like_params = _build_keyword_like_clause("tm.content", keyWord, langCode)
-        fts_match = _build_textmap_fts_match(keyWord, langCode)
+        fts_source = _resolve_textmap_fts_source(keyWord, langCode, connection=cursor.connection)
+        fts_subquery, fts_match = fts_source if fts_source is not None else (None, None)
         voice_expr = _voice_exists_expr("tm.hash", use_cached_voice=use_cached_voice)
 
         # 构建LIKE查询
@@ -3342,7 +3403,7 @@ def countTextMapFromKeywordVoice(
             like_params=like_params,
         )
 
-        if _is_textmap_fts_lang_enabled(langCode) and fts_match is not None:
+        if fts_subquery is not None and fts_match is not None:
             # 构建FTS查询
             sql_fts, params_fts = _build_textmap_count_query(
                 use_fts=True,
@@ -3356,6 +3417,7 @@ def countTextMapFromKeywordVoice(
                 updated_version=updated_version,
                 like_sql=like_sql,
                 like_params=like_params,
+                fts_subquery=fts_subquery,
             )
             _execute_with_fallback(cursor, sql_fts, params_fts, sql_like, params_like)
         else:
@@ -3882,6 +3944,7 @@ def _build_catalog_entity_base_query(
     updated_version: str | None = None,
     use_fts: bool = False,
     fts_match: str | None = None,
+    fts_subquery: str | None = None,
 ) -> tuple[str, list]:
     has_text_version = _has_version_dim() and _has_version_id_columns("textMap")
     has_entity_version = _has_version_dim() and _table_has_column("text_source_entity", "created_version_id")
@@ -3893,11 +3956,15 @@ def _build_catalog_entity_base_query(
 
     if keyword and use_fts and fts_match:
         like_sql, like_params = _build_keyword_like_clause("tm_title.content", keyword, lang_code)
+        subquery_sql = (
+            fts_subquery
+            or f"SELECT rowid FROM {_TEXTMAP_FTS_TABLE} WHERE {_TEXTMAP_FTS_TABLE} MATCH ?"
+        )
         sql = (
             "WITH filtered_titles AS MATERIALIZED ("
             "SELECT tm_title.hash AS title_hash, tm_title.content AS title_text "
             "FROM textMap tm_title "
-            f"WHERE tm_title.id IN (SELECT rowid FROM {_TEXTMAP_FTS_TABLE} WHERE {_TEXTMAP_FTS_TABLE} MATCH ?) "
+            f"WHERE tm_title.id IN ({subquery_sql}) "
             "AND tm_title.lang = ? "
             f"AND {like_sql}"
             "), "
@@ -4055,6 +4122,7 @@ def _assemble_catalog_select_query(
     include_total: bool,
     use_fts: bool,
     fts_match: str | None,
+    fts_subquery: str | None = None,
 ) -> tuple[str, list]:
     base_sql, params = _build_catalog_entity_base_query(
         keyword,
@@ -4065,6 +4133,7 @@ def _assemble_catalog_select_query(
         updated_version=updated_version,
         use_fts=use_fts,
         fts_match=fts_match,
+        fts_subquery=fts_subquery,
     )
     total_col = ", COUNT(*) OVER() AS _total_count" if include_total else ""
     if has_version:
@@ -4146,11 +4215,12 @@ def selectCatalogEntities(
         use_fts=False,
         fts_match=None,
     )
-    fts_match = _build_textmap_fts_match(keyword, lang_code) if keyword else None
 
     with closing(conn.cursor()) as cursor:
+        fts_source = _resolve_textmap_fts_source(keyword, lang_code, connection=cursor.connection) if keyword else None
         try:
-            if keyword and _is_textmap_fts_lang_enabled(lang_code) and fts_match is not None:
+            if fts_source is not None:
+                fts_subquery, fts_match = fts_source
                 sql_fts, params_fts = _assemble_catalog_select_query(
                     keyword,
                     lang_code,
@@ -4166,6 +4236,7 @@ def selectCatalogEntities(
                     include_total=False,
                     use_fts=True,
                     fts_match=fts_match,
+                    fts_subquery=fts_subquery,
                 )
                 _execute_with_fallback(cursor, sql_fts, params_fts, sql_like, params_like)
             else:
@@ -4211,11 +4282,12 @@ def selectCatalogEntitiesWithCount(
         use_fts=False,
         fts_match=None,
     )
-    fts_match = _build_textmap_fts_match(keyword, lang_code) if keyword else None
 
     with closing(conn.cursor()) as cursor:
+        fts_source = _resolve_textmap_fts_source(keyword, lang_code, connection=cursor.connection) if keyword else None
         try:
-            if keyword and _is_textmap_fts_lang_enabled(lang_code) and fts_match is not None:
+            if fts_source is not None:
+                fts_subquery, fts_match = fts_source
                 sql_fts, params_fts = _assemble_catalog_select_query(
                     keyword,
                     lang_code,
@@ -4231,6 +4303,7 @@ def selectCatalogEntitiesWithCount(
                     include_total=True,
                     use_fts=True,
                     fts_match=fts_match,
+                    fts_subquery=fts_subquery,
                 )
                 _execute_with_fallback(cursor, sql_fts, params_fts, sql_like, params_like)
             else:
@@ -4272,7 +4345,11 @@ def countCatalogEntities(
     if not has_version and (created or updated):
         return 0
 
-    def _build_count_sql(use_fts: bool, fts_match: str | None) -> tuple[str, list]:
+    def _build_count_sql(
+        use_fts: bool,
+        fts_match: str | None,
+        fts_subquery: str | None = None,
+    ) -> tuple[str, list]:
         sql, params = _build_catalog_entity_base_query(
             keyword,
             lang_code,
@@ -4282,6 +4359,7 @@ def countCatalogEntities(
             updated_version=updated_version,
             use_fts=use_fts,
             fts_match=fts_match,
+            fts_subquery=fts_subquery,
         )
         if has_version:
             sql += (
@@ -4301,12 +4379,17 @@ def countCatalogEntities(
         return sql, params
 
     sql_like, params_like = _build_count_sql(use_fts=False, fts_match=None)
-    fts_match = _build_textmap_fts_match(keyword, lang_code) if keyword else None
 
     with closing(conn.cursor()) as cursor:
+        fts_source = _resolve_textmap_fts_source(keyword, lang_code, connection=cursor.connection) if keyword else None
         try:
-            if keyword and _is_textmap_fts_lang_enabled(lang_code) and fts_match is not None:
-                sql_fts, params_fts = _build_count_sql(use_fts=True, fts_match=fts_match)
+            if fts_source is not None:
+                fts_subquery, fts_match = fts_source
+                sql_fts, params_fts = _build_count_sql(
+                    use_fts=True,
+                    fts_match=fts_match,
+                    fts_subquery=fts_subquery,
+                )
                 _execute_with_fallback(cursor, sql_fts, params_fts, sql_like, params_like)
             else:
                 cursor.execute(sql_like, params_like)
@@ -5429,7 +5512,6 @@ def selectQuestByContentKeyword(
     source_type_select = "quest.source_type" if _table_has_column("quest", "source_type") else "NULL"
     has_tdc = _has_talk_dialogue_content_rows()
     has_tdl = _has_talk_dialogue_link_table()
-    fts_match = _build_textmap_fts_match(keyword, langCode)
 
     def _dialogue_join_from_tm(tm_alias: str) -> str:
         if has_tdc:
@@ -5450,17 +5532,25 @@ def selectQuestByContentKeyword(
             + ") "
         )
 
-    def _build_query(use_fts: bool) -> tuple[str, list]:
+    def _build_query(
+        use_fts: bool,
+        fts_match: str | None = None,
+        fts_subquery: str | None = None,
+    ) -> tuple[str, list]:
         tm_like_sql, tm_like_params = _build_keyword_like_clause("tm.content", keyword, langCode)
         desc_filter_sql, desc_filter_params = _quest_text_not_excluded_clause("descText.content")
         dialogue_filter_sql, dialogue_filter_params = _quest_text_not_excluded_clause("matched_tm.content")
         params: list = []
 
         if use_fts and fts_match:
+            subquery_sql = (
+                fts_subquery
+                or f"select rowid from {_TEXTMAP_FTS_TABLE} where {_TEXTMAP_FTS_TABLE} match ?"
+            )
             matched_tm_cte = (
                 "with matched_tm as materialized ("
                 "select tm.hash, tm.content from textMap tm "
-                f"where tm.id in (select rowid from {_TEXTMAP_FTS_TABLE} where {_TEXTMAP_FTS_TABLE} match ?) "
+                f"where tm.id in ({subquery_sql}) "
                 f"and tm.lang = ? and {tm_like_sql}"
                 "), "
             )
@@ -5526,8 +5616,14 @@ def selectQuestByContentKeyword(
 
     sql_like, params_like = _build_query(use_fts=False)
     with closing(conn.cursor()) as cursor:
-        if _is_textmap_fts_lang_enabled(langCode) and fts_match is not None:
-            sql_fts, params_fts = _build_query(use_fts=True)
+        fts_source = _resolve_textmap_fts_source(keyword, langCode, connection=cursor.connection)
+        if fts_source is not None:
+            fts_subquery, fts_match = fts_source
+            sql_fts, params_fts = _build_query(
+                use_fts=True,
+                fts_match=fts_match,
+                fts_subquery=fts_subquery,
+            )
             _execute_with_fallback(cursor, sql_fts, params_fts, sql_like, params_like)
         else:
             cursor.execute(sql_like, params_like)
@@ -6911,6 +7007,7 @@ def _build_dialogue_by_talker_and_keyword_sql(
     *,
     use_fts: bool,
     fts_match: str | None,
+    fts_subquery: str | None = None,
     limit: int | None = None,
     include_total: bool = False,
     is_count: bool = False,
@@ -6927,11 +7024,15 @@ def _build_dialogue_by_talker_and_keyword_sql(
         ")"
     )
     if use_fts and fts_match:
+        subquery_sql = (
+            fts_subquery
+            or f"select rowid from {_TEXTMAP_FTS_TABLE} where {_TEXTMAP_FTS_TABLE} match ?"
+        )
         tm_sql = (
             ", matched_text as materialized ("
             "select tm.hash as hash, tm.content as content "
             "from textMap tm "
-            f"where tm.id in (select rowid from {_TEXTMAP_FTS_TABLE} where {_TEXTMAP_FTS_TABLE} match ?) "
+            f"where tm.id in ({subquery_sql}) "
             "and tm.lang = ? "
             f"and {keyword_like_sql} "
         )
@@ -7078,7 +7179,6 @@ def selectDialogueByTalkerAndKeywordWithCount(
     updated_version: str | None = None,
     include_total: bool = True,
 ) -> tuple[list[tuple], int]:
-    fts_match = _build_textmap_fts_match(keyword, langCode)
     sql_like, params_like = _build_dialogue_by_talker_and_keyword_sql(
         speaker_keyword,
         keyword,
@@ -7091,7 +7191,9 @@ def selectDialogueByTalkerAndKeywordWithCount(
         include_total=include_total,
     )
     with closing(conn.cursor()) as cursor:
-        if _is_textmap_fts_lang_enabled(langCode) and fts_match is not None:
+        fts_source = _resolve_textmap_fts_source(keyword, langCode, connection=cursor.connection)
+        if fts_source is not None:
+            fts_subquery, fts_match = fts_source
             sql_fts, params_fts = _build_dialogue_by_talker_and_keyword_sql(
                 speaker_keyword,
                 keyword,
@@ -7100,6 +7202,7 @@ def selectDialogueByTalkerAndKeywordWithCount(
                 updated_version,
                 use_fts=True,
                 fts_match=fts_match,
+                fts_subquery=fts_subquery,
                 limit=limit,
                 include_total=include_total,
             )
@@ -7152,13 +7255,14 @@ def selectDialogueByTalkerTypeAndKeyword(
             sql_like += " limit ?"
             params_like.append(limit)
 
-        fts_match = _build_textmap_fts_match(keyword, langCode)
-        if _is_textmap_fts_lang_enabled(langCode) and fts_match is not None:
+        fts_source = _resolve_textmap_fts_source(keyword, langCode, connection=cursor.connection)
+        if fts_source is not None:
+            fts_subquery, fts_match = fts_source
             sql_fts = (
                 "with matched_text as materialized ("
                 "select dialogueText.hash as hash, dialogueText.content as content "
                 "from textMap as dialogueText "
-                f"where dialogueText.id in (select rowid from {_TEXTMAP_FTS_TABLE} where {_TEXTMAP_FTS_TABLE} match ?) "
+                f"where dialogueText.id in ({fts_subquery}) "
                 "and dialogueText.lang = ? "
                 f"and {like_sql} "
             )
@@ -7391,7 +7495,6 @@ def countDialogueByTalkerAndKeyword(
     created_version: str | None = None,
     updated_version: str | None = None,
 ) -> int:
-    fts_match = _build_textmap_fts_match(keyword, langCode)
     sql_like, params_like = _build_dialogue_by_talker_and_keyword_sql(
         speaker_keyword,
         keyword,
@@ -7403,7 +7506,9 @@ def countDialogueByTalkerAndKeyword(
         is_count=True,
     )
     with closing(conn.cursor()) as cursor:
-        if _is_textmap_fts_lang_enabled(langCode) and fts_match is not None:
+        fts_source = _resolve_textmap_fts_source(keyword, langCode, connection=cursor.connection)
+        if fts_source is not None:
+            fts_subquery, fts_match = fts_source
             sql_fts, params_fts = _build_dialogue_by_talker_and_keyword_sql(
                 speaker_keyword,
                 keyword,
@@ -7412,6 +7517,7 @@ def countDialogueByTalkerAndKeyword(
                 updated_version,
                 use_fts=True,
                 fts_match=fts_match,
+                fts_subquery=fts_subquery,
                 is_count=True,
             )
             _execute_with_fallback(cursor, sql_fts, params_fts, sql_like, params_like)
@@ -7447,13 +7553,14 @@ def countDialogueByTalkerTypeAndKeyword(
             updated_version,
             "textMap",
         )
-        fts_match = _build_textmap_fts_match(keyword, langCode)
-        if _is_textmap_fts_lang_enabled(langCode) and fts_match is not None:
+        fts_source = _resolve_textmap_fts_source(keyword, langCode, connection=cursor.connection)
+        if fts_source is not None:
+            fts_subquery, fts_match = fts_source
             sql_fts = (
                 "with matched_text as materialized ("
                 "select dialogueText.hash as hash "
                 "from textMap as dialogueText "
-                f"where dialogueText.id in (select rowid from {_TEXTMAP_FTS_TABLE} where {_TEXTMAP_FTS_TABLE} match ?) "
+                f"where dialogueText.id in ({fts_subquery}) "
                 "and dialogueText.lang = ? "
                 f"and {like_sql} "
             )

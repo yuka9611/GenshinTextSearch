@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 import sqlite3
 
 import pytest
@@ -97,6 +98,7 @@ def _create_full_schema(connection: sqlite3.Connection) -> None:
             voicePath TEXT NOT NULL
         );
         CREATE INDEX fetterVoice_avatarId_voiceFile_index ON fetterVoice(avatarId, voiceFile);
+        CREATE UNIQUE INDEX fetterVoice_avatarId_voiceFile_voicePath_uindex ON fetterVoice(avatarId, voiceFile, voicePath);
 
         CREATE TABLE fetterStory(
             fetterId INTEGER,
@@ -166,7 +168,8 @@ def _create_full_schema(connection: sqlite3.Connection) -> None:
             content TEXT,
             lang INTEGER,
             created_version_id INTEGER,
-            updated_version_id INTEGER
+            updated_version_id INTEGER,
+            UNIQUE (lang, hash)
         );
         CREATE INDEX textMap_hash_index ON textMap(hash);
         CREATE INDEX textMap_lang_index ON textMap(lang);
@@ -580,9 +583,9 @@ def test_search_name_entries_and_search_catalog_batch_and_single_pass_parity(mon
 def test_wsgi_warmup_respects_disable_env_and_runs_safely(monkeypatch):
     import controllers.common as common
     import databaseHelper
-    import wsgi
 
     monkeypatch.setenv("GTS_DISABLE_WARMUP", "1")
+    import wsgi
     called = []
     monkeypatch.setattr(databaseHelper, "warmup_runtime_caches", lambda: called.append("db"))
     monkeypatch.setattr(common, "getAvailableVersionFilters", lambda: called.append("ver"))
@@ -592,3 +595,207 @@ def test_wsgi_warmup_respects_disable_env_and_runs_safely(monkeypatch):
 
     wsgi._warmup_runtime()
     assert called == ["db", "ver"]
+
+
+def test_short_literal_fts_accelerates_two_char_and_multi_term_with_like_parity(tmp_path, monkeypatch):
+    from dbBuild.build_short_literal_fts import build as build_short_fts
+    import short_literal_cache
+
+    short_literal_cache._clear_meta_cache()
+    db_file = tmp_path / "data.db"
+    setup_conn = sqlite3.connect(db_file)
+    _create_full_schema(setup_conn)
+    _seed_sample_data(setup_conn)
+    setup_conn.executemany(
+        "INSERT INTO textMap(hash, content, lang, created_version_id, updated_version_id) VALUES (?, ?, ?, ?, ?)",
+        [
+            (6001, "天边的空岛之上有琴声", 1, 1, 1),
+            (6002, "星辰闪烁在深渊上方", 1, 1, 1),
+            (6003, "cat and hat", 4, 1, 1),
+            (6004, "旅人の詩", 9, 1, 1),
+            (6005, "旅行", 2, 1, 1),
+        ],
+    )
+    setup_conn.execute("INSERT INTO textMap_fts(textMap_fts) VALUES ('rebuild')")
+    setup_conn.commit()
+    setup_conn.close()
+
+    sidecar_file = tmp_path / "short_literal_fts.db"
+    stats = build_short_fts(db_file, sidecar_file)
+    assert stats["rows"] > 0
+
+    conn = sqlite3.connect(db_file)
+    try:
+        helper, common = _bind_helper_to_connection(monkeypatch, conn)
+        assert short_literal_cache.warmup_short_fts(conn) is True
+
+        def capture_plans_and_run(fn):
+            trace_log: list[str] = []
+            conn.set_trace_callback(trace_log.append)
+            try:
+                res = fn()
+            finally:
+                conn.set_trace_callback(None)
+            selects = [
+                s for s in trace_log
+                if s.lstrip().upper().startswith(("WITH ", "SELECT "))
+                and "sqlite_master" not in s.lower()
+                and "pragma_" not in s.lower()
+                and "cache_meta" not in s.lower()
+            ]
+            plans = "\n".join(
+                str(row[3]).lower()
+                for sql_stmt in selects
+                for row in conn.execute("EXPLAIN QUERY PLAN " + sql_stmt).fetchall()
+            )
+            return res, plans
+
+        # 2-char CHS, EN, JP, space multi-term, unknown, catalog, quest content, speaker+keyword
+        queries = [
+            ("chs2", lambda: helper.selectTextMapFromKeywordPagedWithCount("旅行", 1, 20, 0)),
+            ("en2", lambda: helper.selectTextMapFromKeywordPagedWithCount("at", 4, 20, 0)),
+            ("jp2", lambda: helper.selectTextMapFromKeywordPagedWithCount("旅人", 9, 20, 0)),
+            ("space2", lambda: helper.selectTextMapFromKeywordPagedWithCount("星辰 深渊", 1, 20, 0)),
+            ("unknown2", lambda: helper.selectUnknownTextMapFromKeywordPagedWithCount("旅行", 1, 20, 0)),
+            ("catalog2", lambda: helper.selectCatalogEntitiesWithCount("风神", 1, limit=20)),
+            ("quest2", lambda: helper.selectQuestByContentKeyword("风起", 1)),
+            ("speaker2", lambda: helper.selectDialogueByTalkerAndKeywordWithCount("凯瑟琳", "旅行", 1, limit=20)),
+        ]
+
+        fast_results = {}
+        for label, fn in queries:
+            res, plans = capture_plans_and_run(fn)
+            assert "short_fts" in plans, f"{label} did not use genshin_short.short_fts:\n{plans}"
+            assert not re.search(r"textmap_lang_index\s*\(\s*lang=\?\s*\)", plans), (
+                f"{label} scanned all rows of textMap_lang_index:\n{plans}"
+            )
+            fast_results[label] = res
+
+        # Verify contiguous single-term rule vs space-enabled fuzzy matching.
+        assert helper.selectTextMapFromKeywordPagedWithCount("天琴", 1, 20, 0) == ([], 0)
+        assert helper.selectTextMapFromKeywordPagedWithCount("星辰深渊", 1, 20, 0) == ([], 0)
+        sky_rows, sky_total = helper.selectTextMapFromKeywordPagedWithCount("天 琴", 1, 20, 0)
+        assert sky_total == 1 and sky_rows[0][0] == 6001
+
+        # Compare every result against LIKE-only mode.
+        monkeypatch.setattr(helper.config, "getEnableTextMapFts", lambda: False)
+        for label, fn in queries:
+            assert fn() == fast_results[label], f"Parity mismatch for {label}"
+
+        # Non-indexed language (CHT=2) falls back to LIKE safely even with sidecar attached.
+        monkeypatch.setattr(helper.config, "getEnableTextMapFts", lambda: True)
+        cht_rows, cht_total = helper.selectTextMapFromKeywordPagedWithCount("旅行", 2, 20, 0)
+        assert cht_total == 1 and [r[0] for r in cht_rows] == [6005]
+    finally:
+        short_literal_cache._clear_meta_cache()
+        conn.close()
+
+
+def test_short_literal_fts_legacy_meta_and_safe_fallbacks(tmp_path, monkeypatch):
+    from dbBuild.build_short_literal_fts import build as build_short_fts
+    import short_literal_cache
+
+    short_literal_cache._clear_meta_cache()
+    db_file = tmp_path / "data.db"
+    setup_conn = sqlite3.connect(db_file)
+    _create_full_schema(setup_conn)
+    _seed_sample_data(setup_conn)
+    setup_conn.execute("INSERT INTO textMap(hash, content, lang) VALUES (6010, '旅行', 2)")
+    setup_conn.commit()
+    setup_conn.close()
+
+    custom_sidecar = tmp_path / "alt" / "custom_short.db"
+    build_short_fts(db_file, custom_sidecar)
+    # Remove the optional `languages` metadata key to mimic older Bot-built sidecars.
+    meta_conn = sqlite3.connect(custom_sidecar)
+    meta_conn.execute("DELETE FROM cache_meta WHERE k='languages'")
+    meta_conn.commit()
+    meta_conn.close()
+
+    monkeypatch.setenv("GTS_SHORT_FTS_PATH", str(custom_sidecar))
+    conn = sqlite3.connect(db_file)
+    try:
+        helper, _common = _bind_helper_to_connection(monkeypatch, conn)
+
+        # Default languages {1, 4, 9} works without `languages` key in cache_meta.
+        assert short_literal_cache.resolve_short_fts_query(conn, "旅行", 1) is not None
+        assert short_literal_cache.resolve_short_fts_query(conn, "旅行", 2) is None
+
+        # Non-empty WAL triggers fallback & detach.
+        wal_file = tmp_path / "data.db-wal"
+        wal_file.write_bytes(b"1234")
+        assert short_literal_cache.resolve_short_fts_query(conn, "旅行", 1) is None
+        assert "genshin_short" not in {r[1] for r in conn.execute("PRAGMA database_list")}
+        wal_file.unlink()
+
+        # Re-attaches cleanly after WAL clears, then invalidates if mutated via total_changes > 0.
+        assert short_literal_cache.resolve_short_fts_query(conn, "旅行", 1) is not None
+        conn.execute("INSERT INTO textMap(hash, content, lang) VALUES (6011, '新旅行', 1)")
+        assert conn.total_changes > 0
+        assert short_literal_cache.resolve_short_fts_query(conn, "旅行", 1) is None
+        assert "genshin_short" not in {r[1] for r in conn.execute("PRAGMA database_list")}
+    finally:
+        conn.close()
+
+    # Corrupted sidecar with valid cache_meta falls back cleanly in _execute_with_fallback.
+    short_literal_cache._clear_meta_cache()
+    bad_conn = sqlite3.connect(custom_sidecar)
+    bad_conn.execute("DROP TABLE short_fts")
+    bad_conn.execute("CREATE TABLE short_fts(grams TEXT)")
+    bad_conn.commit()
+    bad_conn.close()
+
+    conn2 = sqlite3.connect(db_file)
+    try:
+        helper, _common = _bind_helper_to_connection(monkeypatch, conn2)
+        assert short_literal_cache.resolve_short_fts_query(conn2, "旅行", 1) is None
+
+        # Verify _execute_with_fallback detaches genshin_short when an attached FTS query fails.
+        conn2.execute(
+            "ATTACH DATABASE ? AS genshin_short",
+            (custom_sidecar.as_uri() + "?mode=ro&immutable=1",),
+        )
+        with conn2:
+            pass
+        cur = conn2.cursor()
+        helper._execute_with_fallback(
+            cur,
+            "SELECT rowid FROM genshin_short.short_fts WHERE short_fts MATCH ?",
+            ['"e69785e8a18c"'],
+            "SELECT COUNT(*) FROM textMap WHERE lang=?",
+            [1],
+        )
+        assert "genshin_short" not in {r[1] for r in conn2.execute("PRAGMA database_list")}
+        cur.close()
+
+        # Missing sidecar or :memory: DBs degrade cleanly to LIKE without errors.
+        custom_sidecar.unlink()
+        short_literal_cache._clear_meta_cache()
+        assert short_literal_cache.resolve_short_fts_query(conn2, "旅行", 1) is None
+        rows, total = helper.selectTextMapFromKeywordPagedWithCount("旅行", 1, 20, 0)
+        assert total == 7 and len(rows) == 7
+    finally:
+        short_literal_cache._clear_meta_cache()
+        conn2.close()
+
+    # Mismatched source metadata cleanly disables sidecar.
+    build_short_fts(db_file, custom_sidecar)
+    tamper = sqlite3.connect(custom_sidecar)
+    tamper.execute("UPDATE cache_meta SET v='999' WHERE k='source_size'")
+    tamper.commit()
+    tamper.close()
+
+    short_literal_cache._clear_meta_cache()
+    conn3 = sqlite3.connect(db_file)
+    try:
+        helper, _common = _bind_helper_to_connection(monkeypatch, conn3)
+        assert short_literal_cache.resolve_short_fts_query(conn3, "旅行", 1) is None
+        rows, total = helper.selectTextMapFromKeywordPagedWithCount("旅行", 1, 20, 0)
+        assert total == 7 and len(rows) == 7
+    finally:
+        short_literal_cache._clear_meta_cache()
+        conn3.close()
+
+    mem_conn = sqlite3.connect(":memory:")
+    assert short_literal_cache.resolve_short_fts_query(mem_conn, "旅行", 1) is None
+    mem_conn.close()

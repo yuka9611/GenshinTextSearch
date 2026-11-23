@@ -141,9 +141,11 @@ def test_long_chinese_search_uses_overlapping_trigrams_and_multi_term_noncontigu
     assert {row[0] for row in helper.selectTextMapFromKeyword("天空 琴", 1)} == {10, 40}
     assert helper.countTextMapFromKeyword("天空 琴", 1) == 2
 
-    # Short Chinese (<4 chars) continues to allow non-contiguous fuzzy matches without FTS.
+    # Single-term Chinese without spaces uses contiguous matching only; spaces enable fuzzy matching.
     assert helper._build_textmap_fts_match("天琴", 1) is None
-    assert {row[0] for row in helper.selectTextMapFromKeyword("天琴", 1)} == {10, 20, 40}
+    assert helper.selectTextMapFromKeyword("天琴", 1) == []
+    assert {row[0] for row in helper.selectTextMapFromKeyword("天 琴", 1)} == {10, 20, 30, 40}
+    assert helper.countTextMapFromKeyword("天 琴", 1) == 4
 
 
 @pytest.mark.parametrize("lang", [1, 2, 4, 9])
