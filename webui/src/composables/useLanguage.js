@@ -54,6 +54,7 @@ const useLanguage = () => {
             basicInfoApi.getImportedTextLanguages(),
             basicInfoApi.getImportedVoiceLanguages(),
             basicInfoApi.getConfig(),
+            initializeAccount(),
           ])
           const textLanguages = textResponse.json
           global.languages = toLanguageMap(textLanguages)
@@ -62,7 +63,6 @@ const useLanguage = () => {
           global.voiceLanguages = toLanguageMap(voiceLanguages)
 
           const config = configResponse.json
-          await initializeAccount()
           const preferences = await loadUserPreferences(config).catch((error) => {
             console.warn('failed to load user preferences:', error?.message || error)
             return null

@@ -1,0 +1,594 @@
+"""Regression tests for search optimization paths, caches, batching, and query plans."""
+
+from __future__ import annotations
+
+import sqlite3
+
+import pytest
+
+from textmap_fts_sql import build_textmap_fts_table_sql
+
+
+def _create_full_schema(connection: sqlite3.Connection) -> None:
+    connection.executescript(
+        """
+        CREATE TABLE avatar(avatarId INTEGER, nameTextMapHash INTEGER);
+        CREATE INDEX avatar_avatarId_index ON avatar(avatarId);
+
+        CREATE TABLE npc(npcId INTEGER, textHash INTEGER, created_version_id INTEGER);
+        CREATE INDEX npc_npcId_index ON npc(npcId);
+
+        CREATE TABLE manualTextMap(textMapId TEXT, textHash INTEGER);
+        CREATE UNIQUE INDEX manualTextMap_textMapId_uindex ON manualTextMap(textMapId);
+
+        CREATE TABLE chapter(chapterId INTEGER, chapterTitleTextMapHash INTEGER, chapterNumTextMapHash INTEGER);
+        CREATE INDEX chapter_chapterId_index ON chapter(chapterId);
+
+        CREATE TABLE langCode(
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            codeName TEXT UNIQUE,
+            displayName TEXT,
+            imported INT
+        );
+
+        CREATE TABLE quest(
+            questId INTEGER PRIMARY KEY,
+            titleTextMapHash INTEGER,
+            descTextMapHash INTEGER,
+            chapterId INTEGER,
+            source_type TEXT,
+            created_version_id INTEGER,
+            updated_version_id INTEGER
+        );
+        CREATE INDEX quest_questId_index ON quest(questId);
+
+        CREATE TABLE quest_version(
+            questId INTEGER,
+            lang INTEGER,
+            updated_version_id INTEGER,
+            PRIMARY KEY (questId, lang)
+        );
+
+        CREATE TABLE questTalk(questId INTEGER, talkId INTEGER, coopQuestId INTEGER);
+        CREATE UNIQUE INDEX questTalk_questId_talkId_coopQuestId_uindex ON questTalk(questId, talkId, coopQuestId);
+        CREATE INDEX questTalk_talkId_coopQuestId_index ON questTalk(talkId, coopQuestId);
+
+        CREATE TABLE quest_hash_map(questId INTEGER, hash INTEGER, source_type TEXT);
+        CREATE INDEX quest_hash_map_hash_index ON quest_hash_map(hash);
+        CREATE INDEX quest_hash_map_questId_index ON quest_hash_map(questId);
+
+        CREATE TABLE dialogue(
+            dialogueId INTEGER PRIMARY KEY,
+            talkerType TEXT,
+            talkerId INTEGER,
+            talkId INTEGER,
+            textHash INTEGER,
+            coopQuestId INTEGER,
+            created_version_id INTEGER,
+            updated_version_id INTEGER
+        );
+        CREATE INDEX dialogue_dialogueId_index ON dialogue(dialogueId);
+        CREATE INDEX dialogue_textHash_index ON dialogue(textHash);
+        CREATE INDEX dialogue_talkId_coopQuestId_dialogueId_index ON dialogue(talkId, coopQuestId, dialogueId);
+        CREATE INDEX dialogue_talkerType_talkerId_talkId_coopQuestId_dialogueId_index
+            ON dialogue(talkerType, talkerId, talkId, coopQuestId, dialogueId);
+
+        CREATE TABLE talk_dialogue_link(talkId INTEGER, coopQuestId INTEGER, dialogueId INTEGER);
+        CREATE INDEX talk_dialogue_link_dialogueId_index ON talk_dialogue_link(dialogueId);
+        CREATE INDEX talk_dialogue_link_talkId_coopQuestId_index ON talk_dialogue_link(talkId, coopQuestId);
+
+        CREATE TABLE voice(dialogueId INTEGER, voicePath TEXT);
+        CREATE INDEX voice_dialogueId_index ON voice(dialogueId);
+
+        CREATE TABLE fetters(
+            fetterId INTEGER,
+            avatarId INTEGER,
+            voiceTitleTextMapHash INTEGER,
+            voiceFileTextTextMapHash INTEGER,
+            voiceFile INTEGER
+        );
+        CREATE INDEX fetters_voiceFileTextTextMapHash_index ON fetters(voiceFileTextTextMapHash);
+        CREATE INDEX fetters_voiceFile_index ON fetters(voiceFile);
+
+        CREATE TABLE fetterVoice(
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            avatarId INTEGER NOT NULL,
+            voiceFile INTEGER NOT NULL,
+            voicePath TEXT NOT NULL
+        );
+        CREATE INDEX fetterVoice_avatarId_voiceFile_index ON fetterVoice(avatarId, voiceFile);
+
+        CREATE TABLE fetterStory(
+            fetterId INTEGER,
+            avatarId INTEGER,
+            storyTitleTextMapHash INTEGER,
+            storyTitle2TextMapHash INTEGER,
+            storyTitleLockedTextMapHash INTEGER,
+            storyContextTextMapHash INTEGER,
+            storyContext2TextMapHash INTEGER
+        );
+        CREATE INDEX fetterStory_avatarId_index ON fetterStory(avatarId);
+
+        CREATE TABLE text_source_entity(
+            entity_id INTEGER,
+            source_type_code INTEGER,
+            title_hash INTEGER,
+            text_hash INTEGER,
+            sub_category INTEGER
+        );
+        CREATE INDEX text_source_entity_text_hash_index ON text_source_entity(text_hash);
+        CREATE INDEX text_source_entity_source_type_code_index ON text_source_entity(source_type_code);
+
+        CREATE TABLE readable(
+            fileName TEXT,
+            lang TEXT,
+            content TEXT,
+            titleTextMapHash INTEGER,
+            readableId INTEGER,
+            created_version_id INTEGER,
+            updated_version_id INTEGER
+        );
+        CREATE INDEX readable_fileName_index ON readable(fileName);
+        CREATE INDEX readable_lang_index ON readable(lang);
+        CREATE INDEX readable_titleTextMapHash_index ON readable(titleTextMapHash);
+
+        CREATE TABLE readable_meta(
+            normalized_file_name TEXT PRIMARY KEY,
+            readable_id INTEGER,
+            title_text_map_hash INTEGER,
+            readable_category TEXT NOT NULL
+        );
+
+        CREATE TABLE subtitle(
+            fileName TEXT,
+            lang INTEGER,
+            startTime REAL,
+            endTime REAL,
+            content TEXT,
+            subtitleId INTEGER,
+            created_version_id INTEGER,
+            updated_version_id INTEGER
+        );
+        CREATE INDEX subtitle_lang_index ON subtitle(lang);
+        CREATE INDEX subtitle_fileName_index ON subtitle(fileName);
+        CREATE INDEX subtitle_subtitleId_index ON subtitle(subtitleId);
+
+        CREATE TABLE version_dim(
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            raw_version TEXT NOT NULL UNIQUE,
+            version_tag TEXT,
+            version_sort_key INTEGER
+        );
+
+        CREATE TABLE textMap(
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            hash INTEGER,
+            content TEXT,
+            lang INTEGER,
+            created_version_id INTEGER,
+            updated_version_id INTEGER
+        );
+        CREATE INDEX textMap_hash_index ON textMap(hash);
+        CREATE INDEX textMap_lang_index ON textMap(lang);
+        """
+    )
+    connection.execute(build_textmap_fts_table_sql("trigram", "none", 0))
+
+
+def _seed_sample_data(connection: sqlite3.Connection) -> None:
+    connection.executemany(
+        "INSERT INTO langCode(id, codeName, displayName, imported) VALUES (?, ?, ?, ?)",
+        [(1, "TextMapCHS.json", "简体中文", 1), (4, "TextMapEN.json", "English", 1)],
+    )
+    connection.executemany(
+        "INSERT INTO version_dim(id, raw_version, version_tag, version_sort_key) VALUES (?, ?, ?, ?)",
+        [(1, "1.0", "1.0", 100), (2, "4.0", "4.0", 400)],
+    )
+    connection.executemany(
+        "INSERT INTO textMap(hash, content, lang, created_version_id, updated_version_id) VALUES (?, ?, ?, ?, ?)",
+        [
+            # Exact / prefix / substring matches for '旅行' and 'Traveler' with varied voice & source statuses
+            (100, "旅行", 1, 1, 1),                # dialogue + voice
+            (101, "旅行者", 1, 1, 1),              # fetters + voice
+            (102, "旅行记录", 1, 1, 2),            # quest known source, no voice
+            (103, "关于旅行的故事", 1, 1, 1),      # unknown source, no voice
+            (104, "另一段旅行文本", 1, 2, 2),      # unknown source, no voice
+            (105, "旅行开始之前", 1, 1, 1),        # dialogue NPC (no voice)
+            (106, "旅行", 4, 1, 1),
+            (100, "Traveler line voiced", 4, 1, 1),
+            (101, "Traveler voice fetter", 4, 1, 1),
+            (103, "Traveler unknown note", 4, 1, 1),
+            # Names / speakers / quests / entities
+            (2001, "派蒙", 1, 1, 1),
+            (2001, "Paimon", 4, 1, 1),
+            (2002, "凯瑟琳", 1, 1, 1),
+            (2002, "Katheryne", 4, 1, 1),
+            (3001, "风神之翼", 1, 1, 1),
+            (3002, "天空之风的描述", 1, 1, 1),
+            (4001, "捕捉风的异乡人", 1, 1, 1),
+            (4002, "风起地的任务描述", 1, 1, 1),
+            (4003, "序章", 1, 1, 1),
+            (4004, "第一幕", 1, 1, 1),
+            (4005, "105", 1, 1, 1),
+            (5001, "这本书讲述了旅行的意义", 1, 1, 1),
+        ],
+    )
+    connection.execute("INSERT INTO npc(npcId, textHash) VALUES (1001, 2002)")
+    connection.execute("INSERT INTO avatar(avatarId, nameTextMapHash) VALUES (10000005, 2001)")
+    connection.executemany(
+        "INSERT INTO dialogue(dialogueId, talkerType, talkerId, talkId, textHash, coopQuestId) VALUES (?, ?, ?, ?, ?, ?)",
+        [
+            (10, "TALK_ROLE_NPC", 1001, 500, 100, 0),
+            (11, "TALK_ROLE_NPC", 1001, 0, 105, 0),
+            (12, "TALK_ROLE_NPC", 1001, 0, 2002, 0),
+        ],
+    )
+    connection.execute("INSERT INTO voice(dialogueId, voicePath) VALUES (10, 'VO_100.wem')")
+    connection.execute("INSERT INTO fetters(fetterId, avatarId, voiceTitleTextMapHash, voiceFileTextTextMapHash, voiceFile) VALUES (1, 10000005, 3001, 101, 9001)")
+    connection.execute("INSERT INTO fetterVoice(avatarId, voiceFile, voicePath) VALUES (10000005, 9001, 'VO_FETTER_101.wem')")
+    connection.execute("INSERT INTO chapter(chapterId, chapterTitleTextMapHash, chapterNumTextMapHash) VALUES (10, 4003, 4004)")
+    connection.execute("INSERT INTO quest(questId, titleTextMapHash, descTextMapHash, chapterId, source_type, created_version_id, updated_version_id) VALUES (700, 4001, 4002, 10, 'AQ', 1, 1)")
+    connection.execute("INSERT INTO questTalk(questId, talkId, coopQuestId) VALUES (700, 500, 0)")
+    connection.executemany("INSERT INTO quest_hash_map(questId, hash, source_type) VALUES (?, ?, ?)", [(700, 102, "dialog"), (700, 100, "dialog")])
+    connection.execute("INSERT INTO text_source_entity(entity_id, source_type_code, title_hash, text_hash, sub_category) VALUES (88, 1, 3001, 3002, 1)")
+    connection.execute("INSERT INTO readable(fileName, lang, content, titleTextMapHash, readableId, created_version_id, updated_version_id) VALUES ('Book_Travel_CHS', 'CHS', '旅行游记正文', 5001, 1, 1, 1)")
+    connection.execute("INSERT INTO subtitle(fileName, lang, startTime, endTime, content, subtitleId, created_version_id, updated_version_id) VALUES ('Scene_CHS', 1, 1.0, 2.0, '旅行者的字幕', 99, 1, 1)")
+    connection.execute("INSERT INTO textMap_fts(textMap_fts) VALUES ('rebuild')")
+    connection.commit()
+
+
+def _bind_helper_to_connection(monkeypatch, connection: sqlite3.Connection):
+    import controllers.common as common
+    import databaseHelper
+
+    databaseHelper._ensure_runtime_sql_functions(connection)
+    monkeypatch.setattr(databaseHelper, "conn", connection)
+    monkeypatch.setattr(
+        databaseHelper,
+        "_CACHE",
+        {"column": {}, "table": {}, "fts": {"available": None, "tokenizer": None, "detail": None, "langs": {1, 4, 9}}},
+    )
+    monkeypatch.setattr(databaseHelper, "_VOICED_HASH_CACHE", {"key": None, "hashes": None})
+    monkeypatch.setattr(databaseHelper.config, "getEnableTextMapFts", lambda: True)
+    monkeypatch.setattr(databaseHelper.config, "getFtsTokenizer", lambda: "trigram")
+    monkeypatch.setattr(databaseHelper.config, "getResultLanguages", lambda: [1, 4])
+    monkeypatch.setattr(databaseHelper.config, "getSourceLanguage", lambda: 1)
+    common.search_cache.clear()
+    for fn_name in (
+        "_count_dialogue_by_talker_keyword_cached",
+        "_count_dialogue_by_talker_type_cached",
+        "_count_dialogue_by_talker_and_keyword_cached",
+        "_count_dialogue_by_talker_type_and_keyword_cached",
+        "_count_fetter_by_speaker_and_keyword_cached",
+        "_count_fetter_by_speaker_keyword_cached",
+        "_count_story_by_speaker_keyword_cached",
+        "_count_story_by_speaker_and_keyword_cached",
+        "_count_textmap_from_keyword_cached",
+        "_count_textmap_from_keyword_voice_cached",
+        "_count_readable_from_keyword_cached",
+        "_count_subtitle_from_keyword_cached",
+    ):
+        fn = getattr(common, fn_name, None)
+        if fn is not None and hasattr(fn, "cache_clear"):
+            fn.cache_clear()
+    return databaseHelper, common
+
+
+def test_apply_connection_pragmas_does_not_run_pragma_optimize():
+    import databaseHelper
+
+    connection = sqlite3.connect(":memory:")
+    statements: list[str] = []
+    connection.set_trace_callback(statements.append)
+    databaseHelper._apply_connection_pragmas(connection)
+    assert not any("optimize" in sql.lower() for sql in statements)
+    connection.close()
+
+
+def test_voiced_hash_cache_file_db_fallback_on_mutation_and_memory_db(tmp_path, monkeypatch):
+    db_file = tmp_path / "voiced.db"
+    setup_conn = sqlite3.connect(db_file)
+    _create_full_schema(setup_conn)
+    _seed_sample_data(setup_conn)
+    setup_conn.close()
+
+    file_conn = sqlite3.connect(db_file)
+    helper, _common = _bind_helper_to_connection(monkeypatch, file_conn)
+
+    # Disk DB with total_changes == 0 activates cached voiced hash set + gts_has_voice().
+    assert helper._can_use_cached_voice_fn() is True
+    hashes = helper._get_voiced_text_hash_set(file_conn)
+    assert hashes is not None
+    assert {100, 101}.issubset(hashes)
+    assert helper.hasVoiceForTextHashDb(100) is True
+    assert helper.hasVoiceForTextHashDb(101) is True
+    assert helper.hasVoiceForTextHashDb(103) is False
+    assert file_conn.execute("SELECT gts_has_voice(100), gts_has_voice(103)").fetchone() == (1, 0)
+
+    # Warmup helper populates cache safely without failing.
+    monkeypatch.setattr(helper, "_VOICED_HASH_CACHE", {"key": None, "hashes": None})
+    helper.warmup_runtime_caches()
+    assert helper._VOICED_HASH_CACHE["hashes"] is not None
+
+    # Mutating the open connection (total_changes > 0) disables stale cache usage cleanly.
+    file_conn.execute("INSERT INTO voice(dialogueId, voicePath) VALUES (11, 'VO_105.wem')")
+    assert file_conn.total_changes > 0
+    assert helper._get_connection_db_cache_key(file_conn) is None
+    assert helper._can_use_cached_voice_fn() is False
+    assert helper.hasVoiceForTextHashDb(105) is True
+    file_conn.close()
+
+    # :memory: DBs do not use disk cache key and fall back accurately to SQL EXISTS.
+    mem_conn = sqlite3.connect(":memory:")
+    _create_full_schema(mem_conn)
+    _seed_sample_data(mem_conn)
+    _bind_helper_to_connection(monkeypatch, mem_conn)
+    assert helper._get_voiced_text_hash_set(mem_conn) is None
+    assert helper._can_use_cached_voice_fn() is False
+    assert helper.hasVoiceForTextHashDb(100) is True
+    assert helper.hasVoiceForTextHashDb(103) is False
+    with_rows, with_total = helper.selectTextMapFromKeywordPagedWithCount("旅行", 1, limit=20, offset=0, voice_filter="with")
+    without_rows, without_total = helper.selectTextMapFromKeywordPagedWithCount("旅行", 1, limit=20, offset=0, voice_filter="without")
+    assert {r[0] for r in with_rows} == {100, 101}
+    assert with_total == 2
+    assert {r[0] for r in without_rows} == {102, 103, 104, 105, 5001}
+    assert without_total == 5
+    mem_conn.close()
+
+
+@pytest.mark.parametrize("voice_filter", [None, "with", "without"])
+def test_unknown_textmap_sql_matches_legacy_filter(monkeypatch, voice_filter):
+    connection = sqlite3.connect(":memory:")
+    _create_full_schema(connection)
+    _seed_sample_data(connection)
+    helper, common = _bind_helper_to_connection(monkeypatch, connection)
+
+    legacy_entries, legacy_total = common._collect_unknown_textmap_candidates(
+        "旅行", 1, None, False, set(), [1, 4], 1, voice_filter, None, None
+    )
+    sql_rows, sql_total = helper.selectUnknownTextMapFromKeywordPagedWithCount(
+        "旅行", 1, limit=50, offset=0, hash_value=None, voice_filter=voice_filter
+    )
+
+    assert sql_total == legacy_total
+    assert [r[0] for r in sql_rows] == [entry["hash"] for entry in legacy_entries]
+
+    # Out-of-bounds offset still returns accurate total count.
+    oob_rows, oob_total = helper.selectUnknownTextMapFromKeywordPagedWithCount(
+        "旅行", 1, limit=50, offset=100, hash_value=None, voice_filter=voice_filter
+    )
+    assert oob_rows == []
+    assert oob_total == legacy_total
+    connection.close()
+
+
+@pytest.mark.parametrize("prefs", [None, {"resultLanguages": [4]}])
+def test_query_text_hash_info_batch_matches_single_row_output(monkeypatch, prefs):
+    import config
+
+    connection = sqlite3.connect(":memory:")
+    _create_full_schema(connection)
+    _seed_sample_data(connection)
+    _helper, common = _bind_helper_to_connection(monkeypatch, connection)
+
+    token = config.push_request_display_preferences(prefs) if prefs is not None else None
+    try:
+        hashes = [100, 101, 102, 106, 999999]
+        langs = config.getResultLanguagesForResponse(1)
+        source_lang = config.getSourceLanguage()
+
+        single = [common.queryTextHashInfo(h, langs, source_lang, queryOrigin=False) for h in hashes]
+        batched = common.queryTextHashInfoBatch(hashes, langs, source_lang, queryOrigin=False)
+        assert batched == single
+    finally:
+        if token is not None:
+            config.reset_request_display_preferences(token)
+        connection.close()
+
+
+@pytest.mark.parametrize("source_type", [None, "textmap", "unknown", "dialogue", "voice", "readable", "subtitle"])
+@pytest.mark.parametrize("voice_filter", ["all", "with", "without"])
+def test_ranked_paginate_before_hydrate_matches_legacy(tmp_path, monkeypatch, source_type, voice_filter):
+    db_file = tmp_path / "ranked.db"
+    connection = sqlite3.connect(db_file)
+    _create_full_schema(connection)
+    _seed_sample_data(connection)
+    helper, common = _bind_helper_to_connection(monkeypatch, connection)
+
+    # First run legacy path via monkeypatched identity anchor, then compare against fast path.
+    fast_p1, fast_total = common.getTranslateObj(
+        "旅行", 1, page=1, page_size=2, voice_filter=voice_filter, source_type=source_type
+    )
+    common.search_cache.clear()
+    fast_p2, fast_total_p2 = common.getTranslateObj(
+        "旅行", 1, page=2, page_size=2, voice_filter=voice_filter, source_type=source_type
+    )
+    assert fast_total == fast_total_p2
+
+    common.search_cache.clear()
+    monkeypatch.setattr(common, "_ranked_seams_patched", lambda: True)
+    legacy_p1, legacy_total = common.getTranslateObj(
+        "旅行", 1, page=1, page_size=2, voice_filter=voice_filter, source_type=source_type
+    )
+    common.search_cache.clear()
+    legacy_p2, legacy_total_p2 = common.getTranslateObj(
+        "旅行", 1, page=2, page_size=2, voice_filter=voice_filter, source_type=source_type
+    )
+
+    assert fast_total == legacy_total
+    assert fast_total_p2 == legacy_total_p2
+    assert fast_p1 == legacy_p1
+    assert fast_p2 == legacy_p2
+    connection.close()
+
+
+def test_ranked_fast_path_hydrates_only_sliced_page_and_respects_display_preferences(monkeypatch):
+    import config
+
+    connection = sqlite3.connect(":memory:")
+    _create_full_schema(connection)
+    _seed_sample_data(connection)
+    helper, common = _bind_helper_to_connection(monkeypatch, connection)
+
+    hydrated_calls: list[list[int]] = []
+    orig_batch = helper.selectTextMapFromTextHashesBatch
+
+    def spy_batch(text_hashes, langs=None):
+        hydrated_calls.append(list(text_hashes))
+        return orig_batch(text_hashes, langs)
+
+    monkeypatch.setattr(helper, "selectTextMapFromTextHashesBatch", spy_batch)
+
+    token = config.push_request_display_preferences({"resultLanguages": [4]})
+    try:
+        fast_p2, fast_total = common.getTranslateObj("旅行", 1, page=2, page_size=2, source_type="textmap")
+        assert len(hydrated_calls) >= 1
+        # Only page 2 hashes (at most 2) should be passed to batch translation hydration.
+        assert all(len(call_hashes) <= 2 for call_hashes in hydrated_calls)
+
+        common.search_cache.clear()
+        monkeypatch.setattr(common, "_ranked_seams_patched", lambda: True)
+        legacy_p2, legacy_total = common.getTranslateObj("旅行", 1, page=2, page_size=2, source_type="textmap")
+        assert fast_total == legacy_total
+        assert fast_p2 == legacy_p2
+    finally:
+        config.reset_request_display_preferences(token)
+        connection.close()
+
+
+def test_query_plans_resist_poisoned_sqlite_stat1_and_return_expected_rows(tmp_path, monkeypatch):
+    db_file = tmp_path / "poisoned_stat1.db"
+    setup_conn = sqlite3.connect(db_file)
+    _create_full_schema(setup_conn)
+    _seed_sample_data(setup_conn)
+    setup_conn.execute("ANALYZE")
+    setup_conn.execute(
+        "UPDATE sqlite_stat1 SET stat = '5000 2001' WHERE tbl = 'textMap' AND idx = 'textMap_lang_index'"
+    )
+    setup_conn.commit()
+    setup_conn.close()
+
+    conn = sqlite3.connect(db_file)
+    helper, common = _bind_helper_to_connection(monkeypatch, conn)
+
+    # Check EXPLAIN QUERY PLAN directly via trace capture for catalog / NPC / quest / speaker+keyword.
+    captured_sqls: list[tuple[str, str]] = []
+
+    def explain_queries(fn, label: str):
+        trace_log: list[str] = []
+        conn.set_trace_callback(trace_log.append)
+        try:
+            res = fn()
+        finally:
+            conn.set_trace_callback(None)
+        selects = [
+            s for s in trace_log
+            if s.lstrip().upper().startswith(("WITH ", "SELECT "))
+            and "sqlite_master" not in s.lower()
+            and "sqlite_temp_master" not in s.lower()
+            and "pragma_" not in s.lower()
+        ]
+        assert selects, f"No SELECT captured for {label}"
+        plans: list[str] = []
+        for sql_stmt in selects:
+            plan_rows = conn.execute("EXPLAIN QUERY PLAN " + sql_stmt).fetchall()
+            plans.append("\n".join(str(row[3]) for row in plan_rows))
+        captured_sqls.append((label, "\n".join(selects), "\n".join(plans)))
+        return res
+
+    catalog_rows, catalog_total = explain_queries(
+        lambda: helper.selectCatalogEntitiesWithCount("风神", 1, source_type_code=1, limit=20),
+        "catalog",
+    )
+    assert catalog_total == 1 and catalog_rows[0][0] == 88
+
+    npc_rows = explain_queries(lambda: helper.selectNpcDialogueSearchEntries("凯瑟琳", 1), "npc")
+    assert len(npc_rows) == 1
+
+    quest_content = explain_queries(lambda: helper.selectQuestByContentKeyword("风起地", 1), "quest_content")
+    assert [r[0] for r in quest_content] == [700]
+
+    quest_content_short = explain_queries(lambda: helper.selectQuestByContentKeyword("风起", 1), "quest_content_short")
+    assert [r[0] for r in quest_content_short] == [700]
+
+    dlg_rows, dlg_total = explain_queries(
+        lambda: helper.selectDialogueByTalkerAndKeywordWithCount("凯瑟琳", "旅行", 1, limit=20),
+        "speaker_keyword",
+    )
+    assert dlg_total == 2 and {r[0] for r in dlg_rows} == {100, 105}
+
+    # Verify structural plan choices and EXPLAIN QUERY PLAN output do not scan textMap by lang.
+    sql_map = {label: sql.lower() for label, sql, _plan in captured_sqls}
+    plan_map = {label: plan.lower() for label, _sql, plan in captured_sqls}
+    assert "as materialized" in sql_map["npc"]
+    assert "cross join" in sql_map["quest_content"] or " match " in sql_map["quest_content"]
+    assert "cross join" in sql_map["quest_content_short"]
+    assert "cross join" in sql_map["speaker_keyword"] or " match " in sql_map["speaker_keyword"]
+    assert "textmap_fts" in plan_map["quest_content"]
+    for label, plan_text in plan_map.items():
+        assert "textmap_lang_index" not in plan_text, f"{label} plan scanned textMap_lang_index:\n{plan_text}"
+    conn.close()
+
+
+def test_search_name_entries_and_search_catalog_batch_and_single_pass_parity(monkeypatch):
+    connection = sqlite3.connect(":memory:")
+    _create_full_schema(connection)
+    _seed_sample_data(connection)
+    helper, common = _bind_helper_to_connection(monkeypatch, connection)
+
+    batch_calls: list[list[int]] = []
+    orig_chapter_batch = helper.getQuestChapterNamesBatch
+
+    def spy_chapter_batch(quest_ids, lang_code):
+        batch_calls.append(list(quest_ids))
+        return orig_chapter_batch(quest_ids, lang_code)
+
+    monkeypatch.setattr(helper, "getQuestChapterNamesBatch", spy_chapter_batch)
+    batched_names = common.searchNameEntries("风起地", 1)
+    assert len(batch_calls) == 1
+    assert batched_names["quests"][0]["chapterName"] == "第一幕 · 序章"
+
+    # Compare with monkeypatched getQuestChapterName fallback path.
+    orig_get_chapter = helper.getQuestChapterName
+    monkeypatch.setattr(helper, "getQuestChapterName", lambda qid, lang: orig_get_chapter(qid, lang))
+    fallback_names = common.searchNameEntries("风起地", 1)
+    assert batched_names == fallback_names
+
+    # Verify searchCatalog uses single-pass WithCount and matches legacy pair.
+    with_count_calls = 0
+    orig_with_count = helper.selectCatalogEntitiesWithCount
+
+    def spy_catalog_with_count(*args, **kwargs):
+        nonlocal with_count_calls
+        with_count_calls += 1
+        return orig_with_count(*args, **kwargs)
+
+    monkeypatch.setattr(helper, "selectCatalogEntitiesWithCount", spy_catalog_with_count)
+    fast_cat = common.searchCatalog("风神", 1)
+    assert with_count_calls == 1
+    assert fast_cat["total"] == 1
+    assert fast_cat["contents"][0]["entityId"] == 88
+
+    orig_cat = helper.selectCatalogEntities
+    monkeypatch.setattr(helper, "selectCatalogEntities", lambda *a, **kw: orig_cat(*a, **kw))
+    legacy_cat = common.searchCatalog("风神", 1)
+    assert fast_cat["total"] == legacy_cat["total"]
+    assert fast_cat["contents"] == legacy_cat["contents"]
+    connection.close()
+
+
+def test_wsgi_warmup_respects_disable_env_and_runs_safely(monkeypatch):
+    import controllers.common as common
+    import databaseHelper
+    import wsgi
+
+    monkeypatch.setenv("GTS_DISABLE_WARMUP", "1")
+    called = []
+    monkeypatch.setattr(databaseHelper, "warmup_runtime_caches", lambda: called.append("db"))
+    monkeypatch.setattr(common, "getAvailableVersionFilters", lambda: called.append("ver"))
+
+    wsgi._start_warmup_thread()
+    assert called == []
+
+    wsgi._warmup_runtime()
+    assert called == ["db", "ver"]

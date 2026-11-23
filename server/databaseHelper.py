@@ -110,6 +110,8 @@ def _try_load_fts_extension(
 
 def _apply_connection_pragmas(connection: sqlite3.Connection) -> None:
     # Favor read-heavy query latency for local desktop usage.
+    # Avoid runtime `PRAGMA optimize`, which triggers analysis_limit-capped
+    # ANALYZE writes and skews sqlite_stat1 cardinalities on large tables.
     pragmas = (
         "PRAGMA temp_store=MEMORY",  # Store temporary tables in memory.
         "PRAGMA cache_size=-65536",  # Four request threads share a roughly 256 MiB page-cache budget.
@@ -117,7 +119,6 @@ def _apply_connection_pragmas(connection: sqlite3.Connection) -> None:
         "PRAGMA synchronous=NORMAL",  # Balance durability with write latency.
         "PRAGMA journal_mode=WAL",  # Keep WAL enabled for safer concurrent reads.
         "PRAGMA foreign_keys=ON",  # Enforce foreign keys when schemas use them.
-        "PRAGMA optimize",  # Let SQLite refresh planner statistics opportunistically.
     )
     with closing(connection.cursor()) as cursor:
         for pragma in pragmas:
@@ -162,6 +163,12 @@ def _ensure_runtime_sql_functions(connection: sqlite3.Connection) -> None:
     # closes, so an ID-based process cache can skip a new connection by mistake.
     try:
         connection.create_function("gts_normalize_readable_file_name", 1, _normalize_readable_file_name)
+        connection.create_function(
+            "gts_has_voice",
+            1,
+            lambda text_hash, _conn=connection: _eval_gts_has_voice(_conn, text_hash),
+            deterministic=True,
+        )
     except Exception:
         return
 
@@ -218,6 +225,8 @@ _CACHE: dict[str, dict] = {
 
 
 _RAW_CHARACTER_NAME_CACHE: dict[str, str | None] = {}
+_VOICED_HASH_CACHE_LOCK = threading.Lock()
+_VOICED_HASH_CACHE: dict[str, object] = {"key": None, "hashes": None}
 _FETTER_VOICE_TABLE = "fetterVoice"
 _FETTER_VOICE_SYNC_LOCK = threading.Lock()
 _FETTER_VOICE_SYNC_ATTEMPTED = False
@@ -529,50 +538,54 @@ def _has_textmap_fts() -> bool:
     """
     检查是否启用了文本映射的全文搜索
     """
+    fts_cache = _CACHE.setdefault("fts", {})
     if not config.getEnableTextMapFts():
-        _CACHE["fts"]["available"] = False
+        fts_cache["available"] = False
         return False
-    if _CACHE["fts"]["available"] is not None:
-        return _CACHE["fts"]["available"]
+    if fts_cache.get("available") is not None:
+        return bool(fts_cache["available"])
     with closing(conn.cursor()) as cursor:
         row = cursor.execute(
             "SELECT sql FROM sqlite_master WHERE type='table' AND name=? LIMIT 1",
             (_TEXTMAP_FTS_TABLE,),
         ).fetchone()
-    _CACHE["fts"]["available"] = row is not None
+    fts_cache["available"] = row is not None
     if row and row[0]:
         m = re.search(r"tokenize='([^']+)'", str(row[0]))
         if m:
             token_spec = _normalize_fts_tokenizer(m.group(1))
-            _CACHE["fts"]["tokenizer"] = token_spec.split()[0] if token_spec else "trigram"
+            fts_cache["tokenizer"] = token_spec.split()[0] if token_spec else "trigram"
         detail = re.search(r"\bdetail\s*=\s*['\"]?(none|column|full)\b", str(row[0]), re.IGNORECASE)
-        _CACHE["fts"]["detail"] = detail.group(1).lower() if detail else "full"
-    return _CACHE["fts"]["available"]
+        fts_cache["detail"] = detail.group(1).lower() if detail else "full"
+    return bool(fts_cache["available"])
 
 
 def _get_textmap_fts_tokenizer() -> str:
     """
     获取文本映射的全文搜索分词器
     """
-    if _CACHE["fts"]["tokenizer"]:
-        return _CACHE["fts"]["tokenizer"]
+    fts_cache = _CACHE.setdefault("fts", {})
+    if fts_cache.get("tokenizer"):
+        return fts_cache["tokenizer"]
     token_spec = _resolve_fts_settings()[0]
-    _CACHE["fts"]["tokenizer"] = token_spec.split()[0] if token_spec else "trigram"
-    return _CACHE["fts"]["tokenizer"]
+    fts_cache["tokenizer"] = token_spec.split()[0] if token_spec else "trigram"
+    return fts_cache["tokenizer"]
 
 
 def _get_textmap_fts_detail() -> str:
-    if _CACHE["fts"].get("detail") is None:
+    fts_cache = _CACHE.setdefault("fts", {})
+    if fts_cache.get("detail") is None:
         _has_textmap_fts()
-    return _CACHE["fts"].get("detail") or "full"
+    return fts_cache.get("detail") or "full"
 
 
 def _get_textmap_fts_langs() -> set[int]:
     """
     获取启用了全文搜索的语言代码
     """
-    if _CACHE["fts"]["langs"] is not None:
-        return _CACHE["fts"]["langs"]
+    fts_cache = _CACHE.setdefault("fts", {})
+    if fts_cache.get("langs") is not None:
+        return fts_cache["langs"]
 
     langs: set[int] = set()
     with closing(conn.cursor()) as cursor:
@@ -593,8 +606,8 @@ def _get_textmap_fts_langs() -> set[int]:
                 continue
     if not langs:
         langs = set(config.getFtsLangAllowList())
-    _CACHE["fts"]["langs"] = langs
-    return _CACHE["fts"]["langs"]
+    fts_cache["langs"] = langs
+    return fts_cache["langs"]
 
 
 def _is_textmap_fts_lang_enabled(lang_code: int) -> bool:
@@ -777,14 +790,10 @@ def _build_textmap_fts_match(keyword: str, lang_code: int) -> str | None:
             return None
         if len(text) > 3 and _get_textmap_fts_detail() != "full":
             # Reduced-detail trigram indexes cannot execute multi-token phrases.
-            # Chinese LIKE also accepts ordered, noncontiguous characters. Keep
-            # that fallback's full recall rather than filtering it with trigrams.
-            if lang_code in CHINESE_LANG_CODES:
-                return None
-            # Other languages use literal substring LIKE, so every overlapping
-            # trigram is a necessary candidate condition. LIKE verifies order
-            # and adjacency after this index lookup.
-            trigrams = dict.fromkeys(literal_text[index:index + 3] for index in range(len(literal_text) - 2))
+            # Every overlapping 3-gram of a contiguous substring is a necessary
+            # candidate condition; LIKE verifies order and adjacency afterward.
+            source_text = text if lang_code in CHINESE_LANG_CODES else literal_text
+            trigrams = dict.fromkeys(source_text[index:index + 3] for index in range(len(source_text) - 2))
             return " AND ".join('"' + part.replace('"', '""') + '"' for part in trigrams)
         escaped = text.replace('"', '""')
         return f"\"{escaped}\""
@@ -928,8 +937,12 @@ def _build_like_patterns(keyword: str, lang_code: int) -> tuple[str, str]:
 
     if lang_code in CHINESE_LANG_CODES:
         fuzzy_source = "".join(keyword.split())
-        fuzzy_escaped_chars = [_escape_like(ch) for ch in fuzzy_source]
-        fuzzy = "%" + "%".join(fuzzy_escaped_chars) + "%" if fuzzy_escaped_chars else exact
+        if len(fuzzy_source) >= 4:
+            # 4字及以上中文单关键词统一为连续子串匹配，以配合 trigram FTS 检索
+            fuzzy = exact
+        else:
+            fuzzy_escaped_chars = [_escape_like(ch) for ch in fuzzy_source]
+            fuzzy = "%" + "%".join(fuzzy_escaped_chars) + "%" if fuzzy_escaped_chars else exact
     else:
         fuzzy = exact
     return exact, fuzzy
@@ -1017,12 +1030,19 @@ def _build_textmap_query(
     offset: int | None = None,
     like_sql: str | None = None,
     like_params: list[str] | None = None,
+    include_total: bool = False,
+    extra_where_sql: str = "",
+    extra_where_params: list | None = None,
+    use_cached_voice: bool | None = None,
 ) -> tuple[str, list]:
     """
     构建文本映射查询
     """
     params: list = []
     version_select = _version_select_expr("tm", "textMap")
+    select_fields = f"tm.hash, tm.content, {version_select}"
+    if include_total:
+        select_fields += ", count(*) over() as _total_count"
     if like_sql is None:
         like_sql = "(tm.content like ? escape '\\' or tm.content like ? escape '\\')"
         resolved_like_params: list[str] = [exact, fuzzy]
@@ -1033,7 +1053,7 @@ def _build_textmap_query(
         # Check language on textMap below. Accessing the unindexed FTS lang
         # column would fetch each external content row a second time.
         sql = (
-            f"select tm.hash, tm.content, {version_select} from textMap tm "
+            f"select {select_fields} from textMap tm "
             f"where tm.id in (select rowid from {_TEXTMAP_FTS_TABLE} where {_TEXTMAP_FTS_TABLE} match ?) "
             "and tm.lang=? "
             f"and {like_sql} "
@@ -1042,7 +1062,7 @@ def _build_textmap_query(
     else:
         # 使用LIKE查询
         sql = (
-            f"select tm.hash, tm.content, {version_select} from textMap tm "
+            f"select {select_fields} from textMap tm "
             f"where tm.lang=? and {like_sql} "
         )
         params = [langCode, *resolved_like_params]
@@ -1064,7 +1084,13 @@ def _build_textmap_query(
         elif voice_filter == "without":
             sql += f"and not ({voice_expr}) "
 
+    if extra_where_sql:
+        sql += extra_where_sql + " "
+        if extra_where_params:
+            params.extend(extra_where_params)
+
     match_sort_sql, match_sort_params = _build_match_sort_case("tm.content", keyword, langCode)
+    voice_order_sql = _voice_order_expr("tm.hash", use_cached_voice=use_cached_voice)
 
     # 简化排序逻辑：只在SQL中做基本排序
     # 复杂的子查询（source_presence, dialogue exist check）移到应用层避免性能问题
@@ -1073,7 +1099,7 @@ def _build_textmap_query(
             "order by "
             "case when tm.hash = ? then 0 else 1 end, "
             f"{match_sort_sql}, "
-            f"{_voice_order_expr('tm.hash')} "
+            f"{voice_order_sql} "
         )
         params.append(hash_value)
         params.extend(match_sort_params)
@@ -1081,7 +1107,7 @@ def _build_textmap_query(
         sql += (
             "order by "
             f"{match_sort_sql}, "
-            f"{_voice_order_expr('tm.hash')} "
+            f"{voice_order_sql} "
         )
         params.extend(match_sort_params)
 
@@ -1902,6 +1928,137 @@ def _ensure_fetter_voice_data() -> None:
         _FETTER_VOICE_SYNC_ATTEMPTED = True
 
 
+def _unwrap_sqlite_connection(target):
+    if target is None:
+        return None
+    getter = getattr(target, "_get_connection", None)
+    if callable(getter):
+        try:
+            return getter()
+        except Exception:
+            return None
+    return target
+
+
+def _get_connection_db_cache_key(connection: sqlite3.Connection | None) -> tuple | None:
+    if connection is None:
+        return None
+    try:
+        if getattr(connection, "total_changes", 0) != 0:
+            return None
+        db_rows = connection.execute("PRAGMA database_list").fetchall()
+        main_path = ""
+        for _seq, name, file_path in db_rows:
+            if name == "main":
+                main_path = str(file_path or "").strip()
+                break
+        if not main_path or main_path == ":memory:":
+            return None
+        st = os.stat(main_path)
+        data_ver_row = connection.execute("PRAGMA data_version").fetchone()
+        data_version = int(data_ver_row[0]) if data_ver_row else 0
+        return (main_path, st.st_dev, st.st_ino, st.st_mtime_ns, st.st_size, data_version)
+    except Exception:
+        return None
+
+
+def _get_voiced_text_hash_set(connection: sqlite3.Connection | None = None) -> frozenset[int] | None:
+    raw_conn = _unwrap_sqlite_connection(connection if connection is not None else conn)
+    key = _get_connection_db_cache_key(raw_conn)
+    if key is None:
+        return None
+
+    cached = _VOICED_HASH_CACHE
+    if cached.get("key") == key and cached.get("hashes") is not None:
+        return cached["hashes"]  # type: ignore[return-value]
+
+    try:
+        with closing(raw_conn.cursor()) as cursor:
+            required_tables = ("dialogue", "voice", "fetters", _FETTER_VOICE_TABLE)
+            placeholders = ",".join("?" for _ in required_tables)
+            existing = {
+                row[0]
+                for row in cursor.execute(
+                    f"SELECT name FROM sqlite_master WHERE type='table' AND name IN ({placeholders})",
+                    required_tables,
+                ).fetchall()
+            }
+            if len(existing) != len(required_tables):
+                return None
+    except Exception:
+        return None
+
+    with _VOICED_HASH_CACHE_LOCK:
+        if _VOICED_HASH_CACHE.get("key") == key and _VOICED_HASH_CACHE.get("hashes") is not None:
+            return _VOICED_HASH_CACHE["hashes"]  # type: ignore[return-value]
+        latest_key = _get_connection_db_cache_key(raw_conn)
+        if latest_key != key:
+            return None
+        try:
+            hashes: set[int] = set()
+            with closing(raw_conn.cursor()) as cursor:
+                for (text_hash,) in cursor.execute(
+                    "SELECT d.textHash FROM dialogue d "
+                    "JOIN voice v ON v.dialogueId = d.dialogueId "
+                    "WHERE d.textHash IS NOT NULL"
+                ):
+                    hashes.add(int(text_hash))
+                for (text_hash,) in cursor.execute(
+                    f"SELECT f.voiceFileTextTextMapHash FROM fetters f "
+                    f"JOIN {_FETTER_VOICE_TABLE} fv ON fv.avatarId = f.avatarId AND fv.voiceFile = f.voiceFile "
+                    "WHERE f.voiceFileTextTextMapHash IS NOT NULL"
+                ):
+                    hashes.add(int(text_hash))
+            frozen = frozenset(hashes)
+            _VOICED_HASH_CACHE["key"] = key
+            _VOICED_HASH_CACHE["hashes"] = frozen
+            return frozen
+        except Exception:
+            return None
+
+
+def _eval_gts_has_voice(connection: sqlite3.Connection | None, text_hash) -> int:
+    if text_hash is None:
+        return 0
+    try:
+        normalized = int(text_hash)
+    except (TypeError, ValueError):
+        return 0
+    hashes = _get_voiced_text_hash_set(connection)
+    if hashes is None:
+        return 0
+    return 1 if normalized in hashes else 0
+
+
+def _can_use_cached_voice_fn() -> bool:
+    raw_conn = _unwrap_sqlite_connection(conn)
+    hashes = _get_voiced_text_hash_set(raw_conn)
+    if hashes is None or raw_conn is None:
+        return False
+    try:
+        def _gts_has_voice(text_hash, _hashes=hashes):
+            if text_hash is None:
+                return 0
+            try:
+                return 1 if int(text_hash) in _hashes else 0
+            except (TypeError, ValueError):
+                return 0
+
+        raw_conn.create_function("gts_has_voice", 1, _gts_has_voice, deterministic=True)
+        return True
+    except Exception:
+        return False
+
+
+def warmup_runtime_caches() -> None:
+    """Warm process-wide read-only caches in the background without failing startup."""
+    try:
+        _ensure_fetter_voice_data()
+        _get_voiced_text_hash_set()
+    except Exception:
+        return
+
+
 def _text_hash_has_voice_expr(text_hash_field: str) -> str:
     return (
         "exists ("
@@ -1916,11 +2073,19 @@ def _text_hash_has_voice_expr(text_hash_field: str) -> str:
     )
 
 
-def _voice_exists_expr(text_hash_field: str) -> str:
+def _voice_exists_expr(text_hash_field: str, use_cached_voice: bool | None = None) -> str:
+    if use_cached_voice is None:
+        use_cached_voice = _can_use_cached_voice_fn()
+    if use_cached_voice:
+        return f"gts_has_voice({text_hash_field}) = 1"
     return _text_hash_has_voice_expr(text_hash_field)
 
 
-def _voice_order_expr(text_hash_field: str) -> str:
+def _voice_order_expr(text_hash_field: str, use_cached_voice: bool | None = None) -> str:
+    if use_cached_voice is None:
+        use_cached_voice = _can_use_cached_voice_fn()
+    if use_cached_voice:
+        return f"case when gts_has_voice({text_hash_field}) = 1 then 0 else 1 end"
     return (
         "case when "
         f"{_text_hash_has_voice_expr(text_hash_field)} "
@@ -1930,6 +2095,12 @@ def _voice_order_expr(text_hash_field: str) -> str:
 
 def _has_avatar_scoped_fetter_voice(textHash: int) -> bool:
     _ensure_fetter_voice_data()
+    hashes = _get_voiced_text_hash_set()
+    if hashes is not None:
+        try:
+            return int(textHash) in hashes
+        except (TypeError, ValueError):
+            return False
     with closing(conn.cursor()) as cursor:
         sql = (
             "SELECT EXISTS("
@@ -2456,6 +2627,48 @@ def selectTextMapFromKeyword(keyWord: str, langCode: int, limit: int | None = No
         return cursor.fetchall()
 
 
+def _build_unknown_source_not_exists_clause(hash_field: str) -> str:
+    clauses: list[str] = []
+    if _table_exists("dialogue") and _table_has_column("dialogue", "textHash"):
+        clauses.append(f"not exists (select 1 from dialogue _ud where _ud.textHash = {hash_field})")
+    if _table_exists("fetters") and _table_has_column("fetters", "voiceFileTextTextMapHash"):
+        clauses.append(
+            f"not exists (select 1 from fetters _uf where _uf.voiceFileTextTextMapHash = {hash_field})"
+        )
+    if _table_exists("fetterStory"):
+        if _table_has_column("fetterStory", "storyContextTextMapHash"):
+            clauses.append(
+                f"not exists (select 1 from fetterStory _us1 where _us1.storyContextTextMapHash = {hash_field})"
+            )
+        if _table_has_column("fetterStory", "storyContext2TextMapHash"):
+            clauses.append(
+                f"not exists (select 1 from fetterStory _us2 where _us2.storyContext2TextMapHash = {hash_field})"
+            )
+    if _table_exists("quest_hash_map") and _table_has_column("quest_hash_map", "hash"):
+        clauses.append(f"not exists (select 1 from quest_hash_map _uq where _uq.hash = {hash_field})")
+    if _table_exists("text_source_entity"):
+        if _table_has_column("text_source_entity", "text_hash"):
+            clauses.append(
+                f"not exists (select 1 from text_source_entity _uet where _uet.text_hash = {hash_field})"
+            )
+        if _table_has_column("text_source_entity", "title_hash"):
+            clauses.append(
+                f"not exists (select 1 from text_source_entity _ueh where _ueh.title_hash = {hash_field})"
+            )
+    if _table_exists("readable") and _table_has_column("readable", "titleTextMapHash"):
+        clauses.append(f"not exists (select 1 from readable _ur where _ur.titleTextMapHash = {hash_field})")
+    if not clauses:
+        return ""
+    return "".join(f"and {clause} " for clause in clauses)
+
+
+def _split_window_count_rows(rows: list[tuple]) -> tuple[list[tuple], int | None]:
+    if not rows:
+        return [], None
+    total = int(rows[0][-1])
+    return [row[:-1] for row in rows], total
+
+
 def selectTextMapFromKeywordPaged(
     keyWord: str,
     langCode: int,
@@ -2468,24 +2681,15 @@ def selectTextMapFromKeywordPaged(
 ):
     """
     分页搜索文本，优化搜索速度和结果质量
-
-    优化措施：
-    1. 使用FTS（全文搜索）与LIKE查询结合，提高搜索速度和准确性
-    2. 优化FTS查询：使用JOIN代替子查询，减少查询开销
-    3. 优先使用精确匹配，然后使用模糊匹配，提高搜索结果质量
-    4. 按匹配程度和文本长度排序，确保最相关的结果排在前面
-    5. 支持版本过滤，允许用户按游戏版本筛选结果
-    6. 支持语音过滤，允许用户筛选带语音的文本
-
-    这些优化措施在保证搜索速度的同时，不会增加数据库体积，实现了速度与体积的平衡
     """
     _ensure_fetter_voice_data()
+    use_cached_voice = _can_use_cached_voice_fn()
     with closing(conn.cursor()) as cursor:
         exact, fuzzy = _build_like_patterns(keyWord, langCode)
         like_sql, like_params = _build_keyword_like_clause("tm.content", keyWord, langCode)
         fts_match = _build_textmap_fts_match(keyWord, langCode)
         hash_value = hash_value if hash_value is not None else -1
-        voice_expr = _voice_exists_expr("tm.hash")
+        voice_expr = _voice_exists_expr("tm.hash", use_cached_voice=use_cached_voice)
 
         # 构建LIKE查询
         sql_like, params_like = _build_textmap_query(
@@ -2504,6 +2708,7 @@ def selectTextMapFromKeywordPaged(
             offset=offset,
             like_sql=like_sql,
             like_params=like_params,
+            use_cached_voice=use_cached_voice,
         )
 
         # 如果启用了FTS且有匹配表达式，构建FTS查询
@@ -2524,11 +2729,206 @@ def selectTextMapFromKeywordPaged(
                 offset=offset,
                 like_sql=like_sql,
                 like_params=like_params,
+                use_cached_voice=use_cached_voice,
             )
             _execute_with_fallback(cursor, sql_fts, params_fts, sql_like, params_like)
         else:
             cursor.execute(sql_like, params_like)
         return cursor.fetchall()
+
+
+def selectTextMapFromKeywordPagedWithCount(
+    keyWord: str,
+    langCode: int,
+    limit: int,
+    offset: int,
+    hash_value: int | None = None,
+    voice_filter: str | None = None,
+    created_version: str | None = None,
+    updated_version: str | None = None,
+) -> tuple[list[tuple], int]:
+    """Single-pass paged textMap search returning (rows, total_count)."""
+    _ensure_fetter_voice_data()
+    use_cached_voice = _can_use_cached_voice_fn()
+    with closing(conn.cursor()) as cursor:
+        exact, fuzzy = _build_like_patterns(keyWord, langCode)
+        like_sql, like_params = _build_keyword_like_clause("tm.content", keyWord, langCode)
+        fts_match = _build_textmap_fts_match(keyWord, langCode)
+        hash_value = hash_value if hash_value is not None else -1
+        voice_expr = _voice_exists_expr("tm.hash", use_cached_voice=use_cached_voice)
+
+        sql_like, params_like = _build_textmap_query(
+            use_fts=False,
+            keyword=keyWord,
+            langCode=langCode,
+            exact=exact,
+            fuzzy=fuzzy,
+            fts_match=fts_match,
+            voice_expr=voice_expr,
+            voice_filter=voice_filter,
+            created_version=created_version,
+            updated_version=updated_version,
+            hash_value=hash_value,
+            limit=limit,
+            offset=offset,
+            like_sql=like_sql,
+            like_params=like_params,
+            include_total=True,
+            use_cached_voice=use_cached_voice,
+        )
+
+        if _is_textmap_fts_lang_enabled(langCode) and fts_match is not None:
+            sql_fts, params_fts = _build_textmap_query(
+                use_fts=True,
+                keyword=keyWord,
+                langCode=langCode,
+                exact=exact,
+                fuzzy=fuzzy,
+                fts_match=fts_match,
+                voice_expr=voice_expr,
+                voice_filter=voice_filter,
+                created_version=created_version,
+                updated_version=updated_version,
+                hash_value=hash_value,
+                limit=limit,
+                offset=offset,
+                like_sql=like_sql,
+                like_params=like_params,
+                include_total=True,
+                use_cached_voice=use_cached_voice,
+            )
+            _execute_with_fallback(cursor, sql_fts, params_fts, sql_like, params_like)
+        else:
+            cursor.execute(sql_like, params_like)
+        raw_rows = cursor.fetchall()
+
+    rows, total = _split_window_count_rows(raw_rows)
+    if total is not None:
+        return rows, total
+    if not offset or offset <= 0:
+        return [], 0
+    if voice_filter in ("with", "without"):
+        return [], countTextMapFromKeywordVoice(
+            keyWord, langCode, voice_filter, created_version, updated_version
+        )
+    return [], countTextMapFromKeyword(keyWord, langCode, created_version, updated_version)
+
+
+def selectUnknownTextMapFromKeywordPagedWithCount(
+    keyWord: str,
+    langCode: int,
+    limit: int,
+    offset: int = 0,
+    hash_value: int | None = None,
+    voice_filter: str | None = None,
+    created_version: str | None = None,
+    updated_version: str | None = None,
+) -> tuple[list[tuple], int]:
+    """Filter textMap rows without any known primary source directly in SQL."""
+    _ensure_fetter_voice_data()
+    use_cached_voice = _can_use_cached_voice_fn()
+    extra_where_sql = _build_unknown_source_not_exists_clause("tm.hash")
+    with closing(conn.cursor()) as cursor:
+        exact, fuzzy = _build_like_patterns(keyWord, langCode)
+        like_sql, like_params = _build_keyword_like_clause("tm.content", keyWord, langCode)
+        fts_match = _build_textmap_fts_match(keyWord, langCode)
+        resolved_hash = hash_value if hash_value is not None else -1
+        voice_expr = _voice_exists_expr("tm.hash", use_cached_voice=use_cached_voice)
+
+        sql_like, params_like = _build_textmap_query(
+            use_fts=False,
+            keyword=keyWord,
+            langCode=langCode,
+            exact=exact,
+            fuzzy=fuzzy,
+            fts_match=fts_match,
+            voice_expr=voice_expr,
+            voice_filter=voice_filter,
+            created_version=created_version,
+            updated_version=updated_version,
+            hash_value=resolved_hash,
+            limit=limit,
+            offset=offset,
+            like_sql=like_sql,
+            like_params=like_params,
+            include_total=True,
+            extra_where_sql=extra_where_sql,
+            use_cached_voice=use_cached_voice,
+        )
+
+        if _is_textmap_fts_lang_enabled(langCode) and fts_match is not None:
+            sql_fts, params_fts = _build_textmap_query(
+                use_fts=True,
+                keyword=keyWord,
+                langCode=langCode,
+                exact=exact,
+                fuzzy=fuzzy,
+                fts_match=fts_match,
+                voice_expr=voice_expr,
+                voice_filter=voice_filter,
+                created_version=created_version,
+                updated_version=updated_version,
+                hash_value=resolved_hash,
+                limit=limit,
+                offset=offset,
+                like_sql=like_sql,
+                like_params=like_params,
+                include_total=True,
+                extra_where_sql=extra_where_sql,
+                use_cached_voice=use_cached_voice,
+            )
+            _execute_with_fallback(cursor, sql_fts, params_fts, sql_like, params_like)
+        else:
+            cursor.execute(sql_like, params_like)
+        raw_rows = cursor.fetchall()
+
+    rows, total = _split_window_count_rows(raw_rows)
+    if total is not None:
+        return rows, total
+    if not offset or offset <= 0:
+        return [], 0
+
+    with closing(conn.cursor()) as cursor:
+        count_voice_filter = voice_filter if voice_filter in ("with", "without") else None
+        sql_count_like, count_params_like = _build_textmap_count_query(
+            use_fts=False,
+            langCode=langCode,
+            exact=exact,
+            fuzzy=fuzzy,
+            fts_match=fts_match,
+            voice_expr=voice_expr if count_voice_filter else None,
+            voice_filter=count_voice_filter,
+            created_version=created_version,
+            updated_version=updated_version,
+            like_sql=like_sql,
+            like_params=like_params,
+        )
+        if extra_where_sql:
+            sql_count_like += f" {extra_where_sql}"
+
+        if _is_textmap_fts_lang_enabled(langCode) and fts_match is not None:
+            sql_count_fts, count_params_fts = _build_textmap_count_query(
+                use_fts=True,
+                langCode=langCode,
+                exact=exact,
+                fuzzy=fuzzy,
+                fts_match=fts_match,
+                voice_expr=voice_expr if count_voice_filter else None,
+                voice_filter=count_voice_filter,
+                created_version=created_version,
+                updated_version=updated_version,
+                like_sql=like_sql,
+                like_params=like_params,
+            )
+            if extra_where_sql:
+                sql_count_fts += f" {extra_where_sql}"
+            _execute_with_fallback(
+                cursor, sql_count_fts, count_params_fts, sql_count_like, count_params_like
+            )
+        else:
+            cursor.execute(sql_count_like, count_params_like)
+        row = cursor.fetchone()
+        return [], int(row[0]) if row else 0
 
 
 def countTextMapFromKeyword(
@@ -2670,6 +3070,83 @@ def _build_source_type_join(source_type: str) -> tuple[str, list]:
     return "", []
 
 
+def _build_small_source_driven_join(source_type: str) -> tuple[str, str, list] | None:
+    """For small source tables when FTS is off, return (from_clause, hash_expr, params)."""
+    if source_type == "voice":
+        return "FROM fetters _sj ", "_sj.voiceFileTextTextMapHash", []
+    if source_type == "story":
+        return (
+            "FROM ("
+            "SELECT storyContextTextMapHash AS text_hash FROM fetterStory WHERE storyContextTextMapHash IS NOT NULL "
+            "UNION "
+            "SELECT storyContext2TextMapHash AS text_hash FROM fetterStory WHERE storyContext2TextMapHash IS NOT NULL"
+            ") _sj ",
+            "_sj.text_hash",
+            [],
+        )
+    if source_type == "costume":
+        placeholders = ",".join("?" for _ in _QIANXING_SOURCE_TYPE_CODES)
+        return (
+            f"FROM (SELECT text_hash FROM text_source_entity WHERE source_type_code IN ({placeholders})) _sj ",
+            "_sj.text_hash",
+            list(_QIANXING_SOURCE_TYPE_CODES),
+        )
+    if source_type in _SOURCE_TYPE_TO_ENTITY_CODE:
+        code = _SOURCE_TYPE_TO_ENTITY_CODE[source_type]
+        return (
+            "FROM (SELECT text_hash FROM text_source_entity WHERE source_type_code = ?) _sj ",
+            "_sj.text_hash",
+            [code],
+        )
+    if source_type.startswith("custom_"):
+        try:
+            code = int(source_type[len("custom_"):])
+            return (
+                "FROM (SELECT text_hash FROM text_source_entity WHERE source_type_code = ?) _sj ",
+                "_sj.text_hash",
+                [code],
+            )
+        except ValueError:
+            return None
+    return None
+
+
+def _build_source_type_like_query(
+    keyWord: str,
+    langCode: int,
+    source_type: str,
+    like_sql: str,
+    like_params: list,
+    created_version: str | None,
+    updated_version: str | None,
+    version_select: str,
+) -> tuple[str, list] | None:
+    small_driven = _build_small_source_driven_join(source_type)
+    if small_driven is not None:
+        from_clause, hash_expr, join_params = small_driven
+        sql = (
+            f"SELECT DISTINCT tm.hash AS hash, tm.content AS content, {version_select} "
+            f"{from_clause}"
+            f"CROSS JOIN textMap tm ON tm.hash = {hash_expr} AND tm.lang = ? "
+            f"WHERE {like_sql} "
+        )
+        params = [*join_params, langCode, *like_params]
+        sql = _append_version_filter_clause(sql, params, "tm", created_version, updated_version, "textMap")
+        return sql, params
+
+    join_clause, join_params = _build_source_type_join(source_type)
+    if not join_clause:
+        return None
+    sql = (
+        f"SELECT DISTINCT tm.hash AS hash, tm.content AS content, {version_select} FROM textMap tm "
+        f"{join_clause}"
+        f"WHERE tm.lang=? AND {like_sql} "
+    )
+    params = [*join_params, langCode, *like_params]
+    sql = _append_version_filter_clause(sql, params, "tm", created_version, updated_version, "textMap")
+    return sql, params
+
+
 def selectTextMapFromKeywordBySourceType(
     keyWord: str,
     langCode: int,
@@ -2690,19 +3167,16 @@ def selectTextMapFromKeywordBySourceType(
         fts_match = _build_textmap_fts_match(keyWord, langCode)
         version_select = _version_select_expr("tm", "textMap")
 
-        # LIKE 查询
-        sql_like = (
-            f"SELECT DISTINCT tm.hash, tm.content, {version_select} FROM textMap tm "
-            f"{join_clause}"
-            f"WHERE tm.lang=? AND {like_sql} "
+        built_like = _build_source_type_like_query(
+            keyWord, langCode, source_type, like_sql, like_params,
+            created_version, updated_version, version_select,
         )
-        params_like = [*join_params, langCode, *like_params]
-        sql_like = _append_version_filter_clause(sql_like, params_like, "tm", created_version, updated_version, "textMap")
+        if not built_like:
+            return []
+        sql_like, params_like = built_like
         match_sort_sql, match_sort_params = _build_match_sort_case("tm.content", keyWord, langCode)
-        sql_like += f"ORDER BY {match_sort_sql}, length(tm.content) "
-        params_like.extend(match_sort_params)
-        sql_like += "LIMIT ? OFFSET ?"
-        params_like.extend([limit, offset])
+        sql_like += f"ORDER BY {match_sort_sql}, length(tm.content) LIMIT ? OFFSET ?"
+        params_like.extend([*match_sort_params, limit, offset])
 
         # FTS 查询
         if _is_textmap_fts_lang_enabled(langCode) and fts_match is not None:
@@ -2715,15 +3189,82 @@ def selectTextMapFromKeywordBySourceType(
             )
             params_fts = [*join_params, fts_match, langCode, *like_params]
             sql_fts = _append_version_filter_clause(sql_fts, params_fts, "tm", created_version, updated_version, "textMap")
-            sql_fts += f"ORDER BY {match_sort_sql}, length(tm.content) "
-            params_fts.extend(match_sort_params)
-            sql_fts += "LIMIT ? OFFSET ?"
-            params_fts.extend([limit, offset])
+            sql_fts += f"ORDER BY {match_sort_sql}, length(tm.content) LIMIT ? OFFSET ?"
+            params_fts.extend([*match_sort_params, limit, offset])
             _execute_with_fallback(cursor, sql_fts, params_fts, sql_like, params_like)
         else:
             cursor.execute(sql_like, params_like)
 
         return cursor.fetchall()
+
+
+def selectTextMapFromKeywordBySourceTypeWithCount(
+    keyWord: str,
+    langCode: int,
+    source_type: str,
+    limit: int,
+    offset: int = 0,
+    created_version: str | None = None,
+    updated_version: str | None = None,
+) -> tuple[list[tuple], int]:
+    """Single-pass source-type filtered textMap search returning (rows, total_count)."""
+    join_clause, join_params = _build_source_type_join(source_type)
+    if not join_clause:
+        return [], 0
+
+    _ensure_fetter_voice_data()
+    with closing(conn.cursor()) as cursor:
+        like_sql, like_params = _build_keyword_like_clause("tm.content", keyWord, langCode)
+        fts_match = _build_textmap_fts_match(keyWord, langCode)
+        version_select = _version_select_expr("tm", "textMap")
+        outer_sort_sql, outer_sort_params = _build_match_sort_case("content", keyWord, langCode)
+
+        built_like = _build_source_type_like_query(
+            keyWord, langCode, source_type, like_sql, like_params,
+            created_version, updated_version, version_select,
+        )
+        if not built_like:
+            return [], 0
+        inner_like_sql, inner_like_params = built_like
+        sql_like = (
+            f"WITH deduped AS ({inner_like_sql}) "
+            "SELECT hash, content, created_version, updated_version, COUNT(*) OVER() AS _total_count "
+            f"FROM deduped ORDER BY {outer_sort_sql}, length(content) LIMIT ? OFFSET ?"
+        )
+        params_like = [*inner_like_params, *outer_sort_params, limit, offset]
+
+        if _is_textmap_fts_lang_enabled(langCode) and fts_match is not None:
+            inner_fts_sql = (
+                f"SELECT DISTINCT tm.hash AS hash, tm.content AS content, {version_select} FROM textMap tm "
+                f"{join_clause}"
+                f"WHERE tm.id IN (SELECT rowid FROM {_TEXTMAP_FTS_TABLE} WHERE {_TEXTMAP_FTS_TABLE} MATCH ?) "
+                "AND tm.lang=? "
+                f"AND {like_sql} "
+            )
+            inner_fts_params = [*join_params, fts_match, langCode, *like_params]
+            inner_fts_sql = _append_version_filter_clause(
+                inner_fts_sql, inner_fts_params, "tm", created_version, updated_version, "textMap"
+            )
+            sql_fts = (
+                f"WITH deduped AS ({inner_fts_sql}) "
+                "SELECT hash, content, created_version, updated_version, COUNT(*) OVER() AS _total_count "
+                f"FROM deduped ORDER BY {outer_sort_sql}, length(content) LIMIT ? OFFSET ?"
+            )
+            params_fts = [*inner_fts_params, *outer_sort_params, limit, offset]
+            _execute_with_fallback(cursor, sql_fts, params_fts, sql_like, params_like)
+        else:
+            cursor.execute(sql_like, params_like)
+
+        raw_rows = cursor.fetchall()
+
+    rows, total = _split_window_count_rows(raw_rows)
+    if total is not None:
+        return rows, total
+    if not offset or offset <= 0:
+        return [], 0
+    return [], countTextMapFromKeywordBySourceType(
+        keyWord, langCode, source_type, created_version, updated_version
+    )
 
 
 def countTextMapFromKeywordBySourceType(
@@ -2777,22 +3318,14 @@ def countTextMapFromKeywordVoice(
 ) -> int:
     """
     计算带语音过滤的搜索结果数量，优化搜索速度
-
-    优化措施：
-    1. 使用FTS（全文搜索）与LIKE查询结合，提高搜索速度
-    2. 优化FTS查询：使用JOIN代替子查询，减少查询开销
-    3. 支持语音过滤，允许用户筛选带语音的文本
-    4. 支持版本过滤，允许用户按游戏版本筛选结果
-    5. 使用execute_with_fallback确保查询在不同环境下都能正常执行
-
-    这些优化措施在保证计数速度的同时，不会增加数据库体积，实现了速度与体积的平衡
     """
     _ensure_fetter_voice_data()
+    use_cached_voice = _can_use_cached_voice_fn()
     with closing(conn.cursor()) as cursor:
         exact, fuzzy = _build_like_patterns(keyWord, langCode)
         like_sql, like_params = _build_keyword_like_clause("tm.content", keyWord, langCode)
         fts_match = _build_textmap_fts_match(keyWord, langCode)
-        voice_expr = _voice_exists_expr("tm.hash")
+        voice_expr = _voice_exists_expr("tm.hash", use_cached_voice=use_cached_voice)
 
         # 构建LIKE查询
         sql_like, params_like = _build_textmap_count_query(
@@ -2858,6 +3391,105 @@ def selectTextMapFromTextHash(textHash: int, langs: list[int] | None = None):
         return cursor.fetchall()
 
 
+def _normalize_batch_int_ids(values: list[int] | tuple[int, ...] | set[int]) -> list[int]:
+    normalized_ids: list[int] = []
+    seen: set[int] = set()
+    for value in values or []:
+        normalized = _coerce_optional_int(value)
+        if normalized is None or normalized in seen:
+            continue
+        seen.add(normalized)
+        normalized_ids.append(normalized)
+    return normalized_ids
+
+
+def selectTextMapFromTextHashesBatch(
+    text_hashes: list[int],
+    langs: list[int] | None = None,
+) -> dict[int, list[tuple[str, int]]]:
+    normalized_ids = _normalize_batch_int_ids(text_hashes)
+    if not normalized_ids:
+        return {}
+
+    normalized_langs = _normalize_batch_int_ids(langs or []) if langs else []
+    if langs is not None and len(langs) > 0 and not normalized_langs:
+        return {}
+
+    result: dict[int, list[tuple[str, int]]] = {}
+    chunk_size = 500
+    with closing(conn.cursor()) as cursor:
+        lang_clause = ""
+        lang_params: list[int] = []
+        if normalized_langs:
+            lang_placeholders = ",".join("?" for _ in normalized_langs)
+            lang_clause = f" and lang in ({lang_placeholders})"
+            lang_params = normalized_langs
+
+        for start in range(0, len(normalized_ids), chunk_size):
+            chunk = normalized_ids[start:start + chunk_size]
+            hash_placeholders = ",".join("?" for _ in chunk)
+            sql = (
+                f"select hash, content, lang from textMap "
+                f"where hash in ({hash_placeholders}){lang_clause}"
+            )
+            for text_hash, content, lang_id in cursor.execute(sql, [*chunk, *lang_params]).fetchall():
+                if text_hash is None or lang_id is None:
+                    continue
+                result.setdefault(int(text_hash), []).append((content, int(lang_id)))
+    return result
+
+
+def selectVoicePathsFromTextHashesBatch(text_hashes: list[int]) -> dict[int, list[str]]:
+    _ensure_fetter_voice_data()
+    normalized_ids = _normalize_batch_int_ids(text_hashes)
+    if not normalized_ids:
+        return {}
+
+    voiced_set = _get_voiced_text_hash_set()
+    if voiced_set is not None:
+        normalized_ids = [h for h in normalized_ids if h in voiced_set]
+        if not normalized_ids:
+            return {}
+
+    resolved_paths: dict[int, str] = {}
+    chunk_size = 500
+    with closing(conn.cursor()) as cursor:
+        if _table_exists("dialogue") and _table_exists("voice"):
+            for start in range(0, len(normalized_ids), chunk_size):
+                chunk = normalized_ids[start:start + chunk_size]
+                placeholders = ",".join("?" for _ in chunk)
+                rows = cursor.execute(
+                    f"select dialogue.textHash, voice.voicePath from dialogue "
+                    f"join voice on voice.dialogueId = dialogue.dialogueId "
+                    f"where dialogue.textHash in ({placeholders})",
+                    chunk,
+                ).fetchall()
+                for text_hash, voice_path in rows:
+                    if text_hash is not None and voice_path:
+                        key = int(text_hash)
+                        if key not in resolved_paths:
+                            resolved_paths[key] = voice_path
+
+        remaining = [h for h in normalized_ids if h not in resolved_paths]
+        if remaining and _table_exists("fetters") and _table_exists(_FETTER_VOICE_TABLE):
+            for start in range(0, len(remaining), chunk_size):
+                chunk = remaining[start:start + chunk_size]
+                placeholders = ",".join("?" for _ in chunk)
+                rows = cursor.execute(
+                    f"select fetters.voiceFileTextTextMapHash, fv.voicePath from fetters "
+                    f"join {_FETTER_VOICE_TABLE} fv on fv.avatarId = fetters.avatarId and fv.voiceFile = fetters.voiceFile "
+                    f"where fetters.voiceFileTextTextMapHash in ({placeholders})",
+                    chunk,
+                ).fetchall()
+                for text_hash, voice_path in rows:
+                    if text_hash is not None and voice_path:
+                        key = int(text_hash)
+                        if key not in resolved_paths:
+                            resolved_paths[key] = voice_path
+
+    return {text_hash: [voice_path] for text_hash, voice_path in resolved_paths.items()}
+
+
 def getTextMapVersionInfo(textHash: int, preferred_lang: int | None = None):
     if not _has_version_id_columns("textMap"):
         return None, None
@@ -2885,6 +3517,40 @@ def getTextMapVersionInfo(textHash: int, preferred_lang: int | None = None):
                 return row
         # 如果没有首选语言或首选语言没有数据，返回None
         return None, None
+
+
+def getTextMapVersionInfoBatch(
+    text_hashes: list[int],
+    source_lang_code: int | None = None,
+) -> dict[int, tuple[str | None, str | None]]:
+    if not _has_version_id_columns("textMap") or not _has_version_dim():
+        return {}
+    preferred_lang = _coerce_optional_int(source_lang_code)
+    if preferred_lang is None:
+        return {}
+    normalized_ids = _normalize_batch_int_ids(text_hashes)
+    if not normalized_ids:
+        return {}
+
+    result: dict[int, tuple[str | None, str | None]] = {}
+    chunk_size = 500
+    with closing(conn.cursor()) as cursor:
+        for start in range(0, len(normalized_ids), chunk_size):
+            chunk = normalized_ids[start:start + chunk_size]
+            placeholders = ",".join("?" for _ in chunk)
+            sql = (
+                f"select tm.hash, vdc.raw_version, vdu.raw_version "
+                f"from textMap tm "
+                f"left join {_VERSION_DIM_TABLE} vdc on vdc.id = tm.created_version_id "
+                f"left join {_VERSION_DIM_TABLE} vdu on vdu.id = tm.updated_version_id "
+                f"where tm.lang=? and tm.hash in ({placeholders})"
+            )
+            for text_hash, created_raw, updated_raw in cursor.execute(
+                sql, [preferred_lang, *chunk]
+            ).fetchall():
+                if text_hash is not None:
+                    result[int(text_hash)] = (created_raw, updated_raw)
+    return result
 
 
 def getImportedTextMapLangs():
@@ -3214,22 +3880,65 @@ def _build_catalog_entity_base_query(
     sub_category: int | None = None,
     created_version: str | None = None,
     updated_version: str | None = None,
+    use_fts: bool = False,
+    fts_match: str | None = None,
 ) -> tuple[str, list]:
     has_text_version = _has_version_dim() and _has_version_id_columns("textMap")
     has_entity_version = _has_version_dim() and _table_has_column("text_source_entity", "created_version_id")
     has_version = has_text_version or has_entity_version
     version_lang_code = config.getSourceLanguage()
 
-    sql = (
-        "WITH catalog_base AS ("
+    source_type_codes = _expand_qianxing_source_type_codes(source_type_code)
+    params: list = []
+
+    if keyword and use_fts and fts_match:
+        like_sql, like_params = _build_keyword_like_clause("tm_title.content", keyword, lang_code)
+        sql = (
+            "WITH filtered_titles AS MATERIALIZED ("
+            "SELECT tm_title.hash AS title_hash, tm_title.content AS title_text "
+            "FROM textMap tm_title "
+            f"WHERE tm_title.id IN (SELECT rowid FROM {_TEXTMAP_FTS_TABLE} WHERE {_TEXTMAP_FTS_TABLE} MATCH ?) "
+            "AND tm_title.lang = ? "
+            f"AND {like_sql}"
+            "), "
+        )
+        params.extend([fts_match, lang_code, *like_params])
+    else:
+        entity_filter_sql = "WHERE 1=1 "
+        if source_type_codes:
+            placeholders = ",".join("?" for _ in source_type_codes)
+            entity_filter_sql += f"AND e0.source_type_code IN ({placeholders}) "
+            params.extend(source_type_codes)
+        if sub_category is not None:
+            entity_filter_sql += "AND e0.sub_category = ? "
+            params.append(int(sub_category))
+
+        sql = (
+            "WITH distinct_titles AS MATERIALIZED ("
+            "SELECT DISTINCT e0.title_hash "
+            "FROM text_source_entity e0 "
+            f"{entity_filter_sql}"
+            "), filtered_titles AS MATERIALIZED ("
+            "SELECT dt.title_hash AS title_hash, tm_title.content AS title_text "
+            "FROM distinct_titles dt "
+            "CROSS JOIN textMap tm_title ON tm_title.hash = dt.title_hash AND tm_title.lang = ? "
+        )
+        params.append(lang_code)
+        if keyword:
+            like_sql, like_params = _build_keyword_like_clause("tm_title.content", keyword, lang_code)
+            sql += f"WHERE {like_sql} "
+            params.extend(like_params)
+        sql += "), "
+
+    sql += (
+        "catalog_base AS ("
         "SELECT "
         "e.entity_id, "
         "e.source_type_code, "
         "MIN(e.title_hash) AS title_hash, "
         "MIN(e.sub_category) AS sub_category, "
-        "MIN(tm_title.content) AS title_text, "
+        "MIN(ft.title_text) AS title_text, "
     )
-    params: list = []
 
     if has_version:
         if has_entity_version:
@@ -3274,10 +3983,9 @@ def _build_catalog_entity_base_query(
         )
 
     sql += (
-        "FROM text_source_entity e "
-        "JOIN textMap tm_title ON tm_title.hash = e.title_hash AND tm_title.lang = ? "
+        "FROM filtered_titles ft "
+        "CROSS JOIN text_source_entity e ON e.title_hash = ft.title_hash "
     )
-    params.append(lang_code)
 
     if has_entity_version:
         sql += (
@@ -3296,13 +4004,6 @@ def _build_catalog_entity_base_query(
         params.extend([version_lang_code, version_lang_code])
 
     sql += "WHERE 1=1 "
-
-    if keyword:
-        like_sql, like_params = _build_keyword_like_clause("tm_title.content", keyword, lang_code)
-        sql += f"AND {like_sql} "
-        params.extend(like_params)
-
-    source_type_codes = _expand_qianxing_source_type_codes(source_type_code)
     if source_type_codes:
         placeholders = ",".join("?" for _ in source_type_codes)
         sql += f"AND e.source_type_code IN ({placeholders}) "
@@ -3338,6 +4039,77 @@ def _build_catalog_entity_base_query(
     return sql, params
 
 
+def _assemble_catalog_select_query(
+    keyword: str,
+    lang_code: int,
+    source_type_code: int | None,
+    sub_category: int | None,
+    created_version: str | None,
+    updated_version: str | None,
+    *,
+    has_version: bool,
+    created: str | None,
+    updated: str | None,
+    limit: int,
+    offset: int,
+    include_total: bool,
+    use_fts: bool,
+    fts_match: str | None,
+) -> tuple[str, list]:
+    base_sql, params = _build_catalog_entity_base_query(
+        keyword,
+        lang_code,
+        source_type_code=source_type_code,
+        sub_category=sub_category,
+        created_version=created_version,
+        updated_version=updated_version,
+        use_fts=use_fts,
+        fts_match=fts_match,
+    )
+    total_col = ", COUNT(*) OVER() AS _total_count" if include_total else ""
+    if has_version:
+        sql = (
+            base_sql +
+            "SELECT "
+            "base.entity_id, "
+            "base.source_type_code, "
+            "base.title_hash, "
+            "base.sub_category, "
+            "base.title_text, "
+            "vdc.raw_version AS created_version, "
+            f"vdu.raw_version AS updated_version{total_col} "
+            "FROM catalog_final base "
+            f"LEFT JOIN {_VERSION_DIM_TABLE} vdc ON vdc.id = base.created_version_id "
+            f"LEFT JOIN {_VERSION_DIM_TABLE} vdu ON vdu.id = base.updated_version_id "
+            "WHERE 1=1 "
+        )
+    else:
+        sql = (
+            base_sql +
+            "SELECT "
+            "base.entity_id, "
+            "base.source_type_code, "
+            "base.title_hash, "
+            "base.sub_category, "
+            "base.title_text, "
+            "NULL AS created_version, "
+            f"NULL AS updated_version{total_col} "
+            "FROM catalog_final base "
+            "WHERE 1=1 "
+        )
+
+    if created:
+        sql += "AND coalesce(vdc.version_tag, '') = ? "
+        params.append(created)
+    if updated:
+        sql += "AND coalesce(vdu.version_tag, '') = ? "
+        params.append(updated)
+
+    sql += "ORDER BY length(coalesce(base.title_text, '')), coalesce(base.title_text, '') LIMIT ? OFFSET ?"
+    params.extend([limit, offset])
+    return sql, params
+
+
 def selectCatalogEntities(
     keyword: str,
     lang_code: int,
@@ -3358,7 +4130,121 @@ def selectCatalogEntities(
     if not has_version and (created or updated):
         return []
 
-    base_sql, params = _build_catalog_entity_base_query(
+    sql_like, params_like = _assemble_catalog_select_query(
+        keyword,
+        lang_code,
+        source_type_code,
+        sub_category,
+        created_version,
+        updated_version,
+        has_version=has_version,
+        created=created,
+        updated=updated,
+        limit=limit,
+        offset=offset,
+        include_total=False,
+        use_fts=False,
+        fts_match=None,
+    )
+    fts_match = _build_textmap_fts_match(keyword, lang_code) if keyword else None
+
+    with closing(conn.cursor()) as cursor:
+        try:
+            if keyword and _is_textmap_fts_lang_enabled(lang_code) and fts_match is not None:
+                sql_fts, params_fts = _assemble_catalog_select_query(
+                    keyword,
+                    lang_code,
+                    source_type_code,
+                    sub_category,
+                    created_version,
+                    updated_version,
+                    has_version=has_version,
+                    created=created,
+                    updated=updated,
+                    limit=limit,
+                    offset=offset,
+                    include_total=False,
+                    use_fts=True,
+                    fts_match=fts_match,
+                )
+                _execute_with_fallback(cursor, sql_fts, params_fts, sql_like, params_like)
+            else:
+                cursor.execute(sql_like, params_like)
+            return cursor.fetchall()
+        except Exception:
+            return []
+
+
+def selectCatalogEntitiesWithCount(
+    keyword: str,
+    lang_code: int,
+    source_type_code: int | None = None,
+    sub_category: int | None = None,
+    limit: int = 50,
+    offset: int = 0,
+    created_version: str | None = None,
+    updated_version: str | None = None,
+) -> tuple[list[tuple], int]:
+    """Single-pass catalog search returning (rows, total_count)."""
+    created = _normalize_version_filter(created_version)
+    updated = _normalize_version_filter(updated_version)
+    has_version = _has_version_dim() and (
+        _has_version_id_columns("textMap")
+        or _table_has_column("text_source_entity", "created_version_id")
+    )
+    if not has_version and (created or updated):
+        return [], 0
+
+    sql_like, params_like = _assemble_catalog_select_query(
+        keyword,
+        lang_code,
+        source_type_code,
+        sub_category,
+        created_version,
+        updated_version,
+        has_version=has_version,
+        created=created,
+        updated=updated,
+        limit=limit,
+        offset=offset,
+        include_total=True,
+        use_fts=False,
+        fts_match=None,
+    )
+    fts_match = _build_textmap_fts_match(keyword, lang_code) if keyword else None
+
+    with closing(conn.cursor()) as cursor:
+        try:
+            if keyword and _is_textmap_fts_lang_enabled(lang_code) and fts_match is not None:
+                sql_fts, params_fts = _assemble_catalog_select_query(
+                    keyword,
+                    lang_code,
+                    source_type_code,
+                    sub_category,
+                    created_version,
+                    updated_version,
+                    has_version=has_version,
+                    created=created,
+                    updated=updated,
+                    limit=limit,
+                    offset=offset,
+                    include_total=True,
+                    use_fts=True,
+                    fts_match=fts_match,
+                )
+                _execute_with_fallback(cursor, sql_fts, params_fts, sql_like, params_like)
+            else:
+                cursor.execute(sql_like, params_like)
+            raw_rows = cursor.fetchall()
+        except Exception:
+            return [], 0
+
+    rows, total = _split_window_count_rows(raw_rows)
+    if total is not None:
+        return rows, total
+    if not offset or offset <= 0:
+        return [], 0
+    return [], countCatalogEntities(
         keyword,
         lang_code,
         source_type_code=source_type_code,
@@ -3366,54 +4252,6 @@ def selectCatalogEntities(
         created_version=created_version,
         updated_version=updated_version,
     )
-
-    with closing(conn.cursor()) as cursor:
-        if has_version:
-            sql = (
-                base_sql +
-                "SELECT "
-                "base.entity_id, "
-                "base.source_type_code, "
-                "base.title_hash, "
-                "base.sub_category, "
-                "base.title_text, "
-                "vdc.raw_version AS created_version, "
-                "vdu.raw_version AS updated_version "
-                "FROM catalog_final base "
-                f"LEFT JOIN {_VERSION_DIM_TABLE} vdc ON vdc.id = base.created_version_id "
-                f"LEFT JOIN {_VERSION_DIM_TABLE} vdu ON vdu.id = base.updated_version_id "
-                "WHERE 1=1 "
-            )
-        else:
-            sql = (
-                base_sql +
-                "SELECT "
-                "base.entity_id, "
-                "base.source_type_code, "
-                "base.title_hash, "
-                "base.sub_category, "
-                "base.title_text, "
-                "NULL AS created_version, "
-                "NULL AS updated_version "
-                "FROM catalog_final base "
-                "WHERE 1=1 "
-            )
-
-        if created:
-            sql += "AND coalesce(vdc.version_tag, '') = ? "
-            params.append(created)
-        if updated:
-            sql += "AND coalesce(vdu.version_tag, '') = ? "
-            params.append(updated)
-
-        sql += "ORDER BY length(coalesce(base.title_text, '')), coalesce(base.title_text, '') LIMIT ? OFFSET ?"
-        params.extend([limit, offset])
-
-        try:
-            cursor.execute(sql, params)
-            return cursor.fetchall()
-        except Exception:
-            return []
 
 
 def countCatalogEntities(
@@ -3434,33 +4272,44 @@ def countCatalogEntities(
     if not has_version and (created or updated):
         return 0
 
-    sql, params = _build_catalog_entity_base_query(
-        keyword,
-        lang_code,
-        source_type_code=source_type_code,
-        sub_category=sub_category,
-        created_version=created_version,
-        updated_version=updated_version,
-    )
-    if has_version:
-        sql += (
-            "SELECT COUNT(*) FROM catalog_final base "
-            f"LEFT JOIN {_VERSION_DIM_TABLE} vdc ON vdc.id = base.created_version_id "
-            f"LEFT JOIN {_VERSION_DIM_TABLE} vdu ON vdu.id = base.updated_version_id "
-            "WHERE 1=1 "
+    def _build_count_sql(use_fts: bool, fts_match: str | None) -> tuple[str, list]:
+        sql, params = _build_catalog_entity_base_query(
+            keyword,
+            lang_code,
+            source_type_code=source_type_code,
+            sub_category=sub_category,
+            created_version=created_version,
+            updated_version=updated_version,
+            use_fts=use_fts,
+            fts_match=fts_match,
         )
-    else:
-        sql += "SELECT COUNT(*) FROM catalog_final base WHERE 1=1 "
-    if created:
-        sql += "AND coalesce(vdc.version_tag, '') = ? "
-        params.append(created)
-    if updated:
-        sql += "AND coalesce(vdu.version_tag, '') = ? "
-        params.append(updated)
+        if has_version:
+            sql += (
+                "SELECT COUNT(*) FROM catalog_final base "
+                f"LEFT JOIN {_VERSION_DIM_TABLE} vdc ON vdc.id = base.created_version_id "
+                f"LEFT JOIN {_VERSION_DIM_TABLE} vdu ON vdu.id = base.updated_version_id "
+                "WHERE 1=1 "
+            )
+        else:
+            sql += "SELECT COUNT(*) FROM catalog_final base WHERE 1=1 "
+        if created:
+            sql += "AND coalesce(vdc.version_tag, '') = ? "
+            params.append(created)
+        if updated:
+            sql += "AND coalesce(vdu.version_tag, '') = ? "
+            params.append(updated)
+        return sql, params
+
+    sql_like, params_like = _build_count_sql(use_fts=False, fts_match=None)
+    fts_match = _build_textmap_fts_match(keyword, lang_code) if keyword else None
 
     with closing(conn.cursor()) as cursor:
         try:
-            cursor.execute(sql, params)
+            if keyword and _is_textmap_fts_lang_enabled(lang_code) and fts_match is not None:
+                sql_fts, params_fts = _build_count_sql(use_fts=True, fts_match=fts_match)
+                _execute_with_fallback(cursor, sql_fts, params_fts, sql_like, params_like)
+            else:
+                cursor.execute(sql_like, params_like)
             row = cursor.fetchone()
             return int(row[0]) if row else 0
         except Exception:
@@ -4216,18 +5065,44 @@ def selectReadableFromKeyword(
     updated_version: str | None = None,
     category: str | None = None,
 ):
+    rows, _total = selectReadableFromKeywordWithCount(
+        keyword,
+        langCode,
+        langStr,
+        limit=limit,
+        offset=offset,
+        created_version=created_version,
+        updated_version=updated_version,
+        category=category,
+        include_total=False,
+    )
+    return rows
+
+
+def selectReadableFromKeywordWithCount(
+    keyword: str,
+    langCode: int,
+    langStr: str,
+    limit: int | None = None,
+    offset: int | None = None,
+    created_version: str | None = None,
+    updated_version: str | None = None,
+    category: str | None = None,
+    include_total: bool = True,
+) -> tuple[list[tuple], int]:
     with closing(conn.cursor()) as cursor:
         like_sql, like_params = _build_keyword_like_clause("content", keyword, langCode)
         match_sort_sql, match_sort_params = _build_match_sort_case("content", keyword, langCode)
         normalized_length_sql = f"length({_build_normalized_match_expr('content', langCode)})"
         readable_langs = _expand_readable_langs([langStr])
         if not readable_langs:
-            return []
+            return [], 0
         lang_placeholders = ",".join(["?"] * len(readable_langs))
         version_select = _version_select_expr("readable", "readable")
         readable_meta_join = _build_readable_meta_join_sql("readable")
+        total_col = ", count(*) over() as _total_count" if include_total else ""
         sql = (
-            f"select fileName, content, titleTextMapHash, readableId, {version_select} from readable "
+            f"select fileName, content, titleTextMapHash, readableId, {version_select}{total_col} from readable "
             f"{readable_meta_join}"
             f"where lang in ({lang_placeholders}) and {like_sql} "
         )
@@ -4250,7 +5125,16 @@ def selectReadableFromKeyword(
             sql += " offset ?"
             params.append(int(offset))
         cursor.execute(sql, params)
-        return cursor.fetchall()
+        raw_rows = cursor.fetchall()
+
+    if not include_total:
+        return raw_rows, len(raw_rows)
+    rows, total = _split_window_count_rows(raw_rows)
+    if total is not None:
+        return rows, total
+    if not offset or offset <= 0:
+        return [], 0
+    return [], countReadableFromKeyword(keyword, langCode, langStr, created_version, updated_version)
 
 
 def countReadableFromKeyword(
@@ -4474,8 +5358,8 @@ def selectQuestByTitleKeyword(
         normalized_length_sql = f"length({_build_normalized_match_expr('textMap.content', langCode)})"
         sql = (
             f"select quest.questId, textMap.content, {source_type_select} as source_type, {version_select} from quest "
-            "join textMap on quest.titleTextMapHash=textMap.hash "
-            f"where textMap.lang=? and {like_sql} "
+            "cross join textMap on quest.titleTextMapHash=textMap.hash and textMap.lang=? "
+            f"where {like_sql} "
         )
         params = [langCode, *like_params]
         sql = _append_version_filter_clause(
@@ -4540,53 +5424,93 @@ def selectQuestByContentKeyword(
     updated_version: str | None = None,
     source_type: str | None = None,
 ):
-    with closing(conn.cursor()) as cursor:
-        desc_like_sql, desc_like_params = _build_keyword_like_clause("descText.content", keyword, langCode)
-        dialogue_like_sql, dialogue_like_params = _build_keyword_like_clause("dialogueText.content", keyword, langCode)
-        version_select = _version_select_expr("quest", "quest", langCode)
-        source_type_select = "quest.source_type" if _table_has_column("quest", "source_type") else "NULL"
+    has_desc = _table_has_column("quest", "descTextMapHash")
+    version_select = _version_select_expr("quest", "quest", langCode)
+    source_type_select = "quest.source_type" if _table_has_column("quest", "source_type") else "NULL"
+    has_tdc = _has_talk_dialogue_content_rows()
+    has_tdl = _has_talk_dialogue_link_table()
+    fts_match = _build_textmap_fts_match(keyword, langCode)
+
+    def _dialogue_join_from_tm(tm_alias: str) -> str:
+        if has_tdc:
+            return (
+                f"cross join talk_dialogue_content d on d.textHash = {tm_alias}.hash "
+                "cross join questTalk qt on qt.talkId = d.talkId and qt.coopQuestId = d.coopQuestId "
+            )
+        if has_tdl:
+            return (
+                f"cross join dialogue d on d.textHash = {tm_alias}.hash "
+                "cross join talk_dialogue_link tdl on tdl.dialogueId = d.dialogueId "
+                "cross join questTalk qt on qt.talkId = tdl.talkId and qt.coopQuestId = tdl.coopQuestId "
+            )
+        return (
+            f"cross join dialogue d on d.textHash = {tm_alias}.hash "
+            "join questTalk qt on qt.talkId = d.talkId and ("
+            + _quest_talk_dialogue_join_condition("qt", "d")
+            + ") "
+        )
+
+    def _build_query(use_fts: bool) -> tuple[str, list]:
+        tm_like_sql, tm_like_params = _build_keyword_like_clause("tm.content", keyword, langCode)
         desc_filter_sql, desc_filter_params = _quest_text_not_excluded_clause("descText.content")
-        dialogue_filter_sql, dialogue_filter_params = _quest_text_not_excluded_clause("dialogueText.content")
+        dialogue_filter_sql, dialogue_filter_params = _quest_text_not_excluded_clause("matched_tm.content")
+        params: list = []
+
+        if use_fts and fts_match:
+            matched_tm_cte = (
+                "with matched_tm as materialized ("
+                "select tm.hash, tm.content from textMap tm "
+                f"where tm.id in (select rowid from {_TEXTMAP_FTS_TABLE} where {_TEXTMAP_FTS_TABLE} match ?) "
+                f"and tm.lang = ? and {tm_like_sql}"
+                "), "
+            )
+            params.extend([fts_match, langCode, *tm_like_params])
+        else:
+            matched_tm_cte = (
+                "with matched_tm as materialized ("
+                "select tm.hash, tm.content from textMap tm "
+                f"where tm.lang = ? and {tm_like_sql}"
+                "), "
+            )
+            params.extend([langCode, *tm_like_params])
+
         match_sql_parts: list[str] = []
-        if _table_has_column("quest", "descTextMapHash"):
+        if has_desc:
             match_sql_parts.append(
                 "select q.questId as questId, 0 as match_rank, descText.content as matched_text "
                 "from quest q "
-                "join textMap descText on q.descTextMapHash=descText.hash "
-                "where descText.lang=? "
-                f"and {desc_like_sql} "
+                "cross join textMap descText on q.descTextMapHash = descText.hash and descText.lang = ? "
+                "where q.descTextMapHash in (select hash from matched_tm) "
                 f"and {desc_filter_sql} "
             )
+            params.extend([langCode, *desc_filter_params])
+
         match_sql_parts.append(
-            "select distinct qt.questId as questId, 1 as match_rank, dialogueText.content as matched_text "
-            "from questTalk qt "
-            + _quest_talk_dialogue_join_sql("qt", "d", "tdl")
-            + "join textMap dialogueText on dialogueText.hash=d.textHash "
-            + "where dialogueText.lang=? "
-            + f"and {dialogue_like_sql} "
-            + f"and {dialogue_filter_sql} "
+            "select qt.questId as questId, 1 as match_rank, matched_tm.content as matched_text "
+            "from matched_tm "
+            + _dialogue_join_from_tm("matched_tm")
+            + f"where {dialogue_filter_sql} "
         )
-        match_sql = " union all ".join(match_sql_parts)
+        params.extend(dialogue_filter_params)
+
         sql = (
-            "with matched as ("
-            + match_sql
+            matched_tm_cte
+            + "matched as ("
+            + " union all ".join(match_sql_parts)
             + "), ranked as ("
-            "select questId, min(match_rank) as best_rank "
-            "from matched "
-            "group by questId"
+            "select questId, match_rank as best_rank, matched_text, "
+            "row_number() over (partition by questId order by match_rank asc, matched_text asc) as rn "
+            "from matched"
             ") "
             f"select quest.questId, quest.titleTextMapHash, titleText.content, "
-            "(select min(m2.matched_text) from matched m2 "
-            "where m2.questId=ranked.questId and m2.match_rank=ranked.best_rank) as matched_text, "
+            "ranked.matched_text as matched_text, "
             f"{source_type_select} as source_type, {version_select}, ranked.best_rank "
             "from ranked "
-            "join quest on ranked.questId=quest.questId "
-            "left join textMap titleText on quest.titleTextMapHash=titleText.hash and titleText.lang=? "
+            "cross join quest on ranked.questId = quest.questId "
+            "left join textMap titleText on quest.titleTextMapHash = titleText.hash and titleText.lang = ? "
+            "where ranked.rn = 1 "
         )
-        params: list = []
-        if _table_has_column("quest", "descTextMapHash"):
-            params.extend([langCode, *desc_like_params, *desc_filter_params])
-        params.extend([langCode, *dialogue_like_params, *dialogue_filter_params, langCode])
+        params.append(langCode)
         sql = _append_version_filter_clause(
             sql,
             params,
@@ -4598,7 +5522,15 @@ def selectQuestByContentKeyword(
         )
         sql = _append_quest_source_type_filter_clause(sql, params, "quest", source_type)
         sql += "order by ranked.best_rank, quest.questId limit 200"
-        cursor.execute(sql, params)
+        return sql, params
+
+    sql_like, params_like = _build_query(use_fts=False)
+    with closing(conn.cursor()) as cursor:
+        if _is_textmap_fts_lang_enabled(langCode) and fts_match is not None:
+            sql_fts, params_fts = _build_query(use_fts=True)
+            _execute_with_fallback(cursor, sql_fts, params_fts, sql_like, params_like)
+        else:
+            cursor.execute(sql_like, params_like)
         return cursor.fetchall()
 
 
@@ -4688,13 +5620,13 @@ def selectNpcDialogueSearchEntries(
         keyword_text = (keyword or "").strip()
         source_lang_code = config.getSourceLanguage()
         sql = (
-            "with base_npc as ("
+            "with base_npc as materialized ("
             "select npc.npcId as npcId, npcName.content as npcName, "
             "vd_created.raw_version as created_version, "
             "coalesce(vd_created.version_tag, '') as created_version_tag, "
             "coalesce(vd_created.version_sort_key, 2147483647) as created_version_sort_key "
             "from npc "
-            "join textMap npcName on npc.textHash = npcName.hash and npcName.lang = ? "
+            "cross join textMap npcName on npc.textHash = npcName.hash and npcName.lang = ? "
             "left join version_dim vd_created on vd_created.id = npc.created_version_id "
             "where 1=1 "
         )
@@ -4704,15 +5636,20 @@ def selectNpcDialogueSearchEntries(
             sql += f"and {like_sql} "
             params.extend(like_params)
         sql += (
-            "), visible_npc as ("
-            "select distinct base.npcId, base.npcName, base.created_version, "
+            "), visible_npc as materialized ("
+            "select base.npcId, base.npcName, base.created_version, "
             "base.created_version_tag, base.created_version_sort_key "
             "from base_npc base "
-            "join dialogue d on d.talkerType = 'TALK_ROLE_NPC' and d.talkerId = base.npcId "
-            "left join questTalk qt on qt.talkId = d.talkId and ("
+            "where exists ("
+            "select 1 from dialogue d "
+            "where d.talkerType = 'TALK_ROLE_NPC' and d.talkerId = base.npcId "
+            "and not exists ("
+            "select 1 from questTalk qt "
+            "where qt.talkId = d.talkId and ("
             + _quest_talk_dialogue_join_condition("qt", "d")
-            + ") "
-            "where qt.questId is null"
+            + ")"
+            ")"
+            ")"
             "), npc_updated_ranked as ("
             "select visible.npcId as npcId, visible.npcName as npcName, vd.raw_version as dialogue_updated_version, "
             "coalesce(vd.version_tag, '') as dialogue_updated_tag, "
@@ -4721,12 +5658,11 @@ def selectNpcDialogueSearchEntries(
             "partition by visible.npcId "
             "order by coalesce(vd.version_sort_key, -1) desc, vd.id desc"
             ") as row_num "
-            "from dialogue d "
-            "join visible_npc visible on visible.npcId = d.talkerId "
-            "join textMap tm on tm.hash = d.textHash and tm.lang = ? "
-            "join version_dim vd on vd.id = tm.updated_version_id "
-            "where d.talkerType = 'TALK_ROLE_NPC' "
-            "and tm.updated_version_id is not null"
+            "from visible_npc visible "
+            "cross join dialogue d on d.talkerType = 'TALK_ROLE_NPC' and d.talkerId = visible.npcId "
+            "cross join textMap tm on tm.hash = d.textHash and tm.lang = ? "
+            "cross join version_dim vd on vd.id = tm.updated_version_id "
+            "where tm.updated_version_id is not null"
             "), npc_updated as ("
             "select npcId, npcName, dialogue_updated_version, dialogue_updated_tag, dialogue_updated_sort_key "
             "from npc_updated_ranked "
@@ -5383,25 +6319,29 @@ def selectQuestByChapterKeyword(
         version_select = _version_select_expr("quest", "quest", langCode)
         source_type_select = "quest.source_type" if _table_has_column("quest", "source_type") else "NULL"
         sql = (
-            "select quest.questId, questTitle.content, chapterTitle.content, chapterNum.content, "
+            "with matched_chapters as materialized ("
+            "select chapter.chapterId as chapterId, "
+            "chapterTitle.content as chapter_title, "
+            "chapterNum.content as chapter_num "
+            "from chapter "
+            "left join textMap as chapterTitle on chapter.chapterTitleTextMapHash=chapterTitle.hash and chapterTitle.lang=? "
+            "left join textMap as chapterNum on chapter.chapterNumTextMapHash=chapterNum.hash and chapterNum.lang=? "
+            f"where ({title_like_sql} or {num_like_sql})"
+            ") "
+            "select quest.questId, questTitle.content, mc.chapter_title, mc.chapter_num, "
             f"{source_type_select} as source_type, "
             f"{version_select} "
-            "from quest "
-            "left join textMap as questTitle on quest.titleTextMapHash=questTitle.hash "
-            "and questTitle.lang=? "
-            "join chapter on quest.chapterId=chapter.chapterId "
-            "left join textMap as chapterTitle on chapter.chapterTitleTextMapHash=chapterTitle.hash "
-            "and chapterTitle.lang=? "
-            "left join textMap as chapterNum on chapter.chapterNumTextMapHash=chapterNum.hash "
-            "and chapterNum.lang=? "
-            f"where ({title_like_sql} or {num_like_sql}) "
+            "from matched_chapters mc "
+            "cross join quest on quest.chapterId=mc.chapterId "
+            "left join textMap as questTitle on quest.titleTextMapHash=questTitle.hash and questTitle.lang=? "
+            "where 1=1 "
         )
         params = [
             langCode,
             langCode,
-            langCode,
             *title_like_params,
             *num_like_params,
+            langCode,
         ]
         sql = _append_version_filter_clause(
             sql,
@@ -5414,8 +6354,8 @@ def selectQuestByChapterKeyword(
         )
         sql = _append_quest_source_type_filter_clause(sql, params, "quest", source_type)
         sql += (
-            "order by case when (chapterTitle.content like ? escape '\\' or chapterNum.content like ? escape '\\') then 0 else 1 end, "
-            "length(coalesce(chapterTitle.content, chapterNum.content)) "
+            "order by case when (mc.chapter_title like ? escape '\\' or mc.chapter_num like ? escape '\\') then 0 else 1 end, "
+            "length(coalesce(mc.chapter_title, mc.chapter_num)) "
             "limit 200"
         )
         params.extend([exact, exact])
@@ -5453,6 +6393,38 @@ def getQuestChapterName(questId: int, langCode: int):
             chapterNumText = ans3[0][0]
             return '{} · {}'.format(chapterNumText, chapterTitleText)
         return chapterTitleText
+
+
+def getQuestChapterNamesBatch(quest_ids: list[int], lang_code: int) -> dict[int, str | None]:
+    normalized_ids = _normalize_batch_int_ids(quest_ids)
+    if not normalized_ids:
+        return {}
+
+    result: dict[int, str | None] = {qid: None for qid in normalized_ids}
+    chunk_size = 500
+    with closing(conn.cursor()) as cursor:
+        for start in range(0, len(normalized_ids), chunk_size):
+            chunk = normalized_ids[start:start + chunk_size]
+            placeholders = ",".join("?" for _ in chunk)
+            sql = (
+                "select q.questId, title_tm.content, num_tm.content "
+                "from quest q "
+                "join chapter c on c.chapterId = q.chapterId "
+                "join textMap title_tm on title_tm.hash = c.chapterTitleTextMapHash and title_tm.lang = ? "
+                "left join textMap num_tm on num_tm.hash = c.chapterNumTextMapHash and num_tm.lang = ? "
+                f"where q.questId in ({placeholders})"
+            )
+            for quest_id, chapter_title, chapter_num in cursor.execute(
+                sql, [lang_code, lang_code, *chunk]
+            ).fetchall():
+                if quest_id is None:
+                    continue
+                qid = int(quest_id)
+                if chapter_num is not None:
+                    result[qid] = "{} · {}".format(chapter_num, chapter_title)
+                else:
+                    result[qid] = chapter_title
+    return result
 
 
 def getQuestVersionInfo(questId: int, langCode: int | None = None):
@@ -5603,10 +6575,10 @@ def selectReadableByTitleKeyword(
         sql = (f"select readable.fileName, readable.readableId, readable.titleTextMapHash, textMap.content, "
                f"{version_select} "
                f"from readable {readable_meta_join}"
-               "join textMap on readable.titleTextMapHash=textMap.hash "
-               f"where readable.lang in ({readable_lang_placeholders}) and textMap.lang=? "
+               "cross join textMap on readable.titleTextMapHash=textMap.hash and textMap.lang=? "
+               f"where readable.lang in ({readable_lang_placeholders}) "
                f"and {like_sql} ")
-        params = readable_langs + [langCode, *like_params]
+        params = [langCode] + readable_langs + list(like_params)
         sql = _append_version_filter_clause(
             sql,
             params,
@@ -5776,13 +6748,35 @@ def selectSubtitleFromKeyword(
     created_version: str | None = None,
     updated_version: str | None = None,
 ):
+    rows, _total = selectSubtitleFromKeywordWithCount(
+        keyword,
+        langCode,
+        limit=limit,
+        offset=offset,
+        created_version=created_version,
+        updated_version=updated_version,
+        include_total=False,
+    )
+    return rows
+
+
+def selectSubtitleFromKeywordWithCount(
+    keyword: str,
+    langCode: int,
+    limit: int | None = None,
+    offset: int | None = None,
+    created_version: str | None = None,
+    updated_version: str | None = None,
+    include_total: bool = True,
+) -> tuple[list[tuple], int]:
     with closing(conn.cursor()) as cursor:
         like_sql, like_params = _build_keyword_like_clause("content", keyword, langCode)
         version_select = _version_select_expr("subtitle", "subtitle")
         match_sort_sql, match_sort_params = _build_match_sort_case("content", keyword, langCode)
         normalized_length_sql = f"length({_build_normalized_match_expr('content', langCode)})"
+        total_col = ", count(*) over() as _total_count" if include_total else ""
         sql = (
-            f"select fileName, content, startTime, endTime, subtitleId, {version_select} from subtitle "
+            f"select fileName, content, startTime, endTime, subtitleId, {version_select}{total_col} from subtitle "
             f"where lang=? and {like_sql} "
         )
         params = [langCode, *like_params]
@@ -5803,7 +6797,16 @@ def selectSubtitleFromKeyword(
             sql += " offset ?"
             params.append(int(offset))
         cursor.execute(sql, params)
-        return cursor.fetchall()
+        raw_rows = cursor.fetchall()
+
+    if not include_total:
+        return raw_rows, len(raw_rows)
+    rows, total = _split_window_count_rows(raw_rows)
+    if total is not None:
+        return rows, total
+    if not offset or offset <= 0:
+        return [], 0
+    return [], countSubtitleFromKeyword(keyword, langCode, created_version, updated_version)
 
 
 def countSubtitleFromKeyword(
@@ -5873,6 +6876,112 @@ def getSubtitleFileVersionInfo(fileName: str):
         return created_raw, updated_raw
 
 
+def _build_matched_npc_cte(speaker_keyword: str, lang_code: int) -> tuple[str, list]:
+    speaker_like_sql, speaker_like_params = _build_keyword_like_clause("npcName.content", speaker_keyword, lang_code)
+    cte_sql = (
+        "with matched_npc as materialized ("
+        "select npc.npcId as npcId, npcName.content as npc_name "
+        "from npc "
+        "cross join textMap as npcName on npc.textHash = npcName.hash and npcName.lang = ? "
+        f"where {speaker_like_sql}"
+        ") "
+    )
+    return cte_sql, [lang_code, *speaker_like_params]
+
+
+def _build_matched_avatar_cte(speaker_keyword: str, lang_code: int) -> tuple[str, list]:
+    speaker_like_sql, speaker_like_params = _build_keyword_like_clause("avatarName.content", speaker_keyword, lang_code)
+    cte_sql = (
+        "with matched_avatar as materialized ("
+        "select avatar.avatarId as avatarId, avatarName.content as avatar_name "
+        "from avatar "
+        "cross join textMap as avatarName on avatar.nameTextMapHash = avatarName.hash and avatarName.lang = ? "
+        f"where {speaker_like_sql}"
+        ") "
+    )
+    return cte_sql, [lang_code, *speaker_like_params]
+
+
+def _build_dialogue_by_talker_and_keyword_sql(
+    speaker_keyword: str,
+    keyword: str,
+    langCode: int,
+    created_version: str | None,
+    updated_version: str | None,
+    *,
+    use_fts: bool,
+    fts_match: str | None,
+    limit: int | None = None,
+    include_total: bool = False,
+    is_count: bool = False,
+) -> tuple[str, list]:
+    speaker_like_sql, speaker_like_params = _build_keyword_like_clause("npcName.content", speaker_keyword, langCode)
+    keyword_like_sql, keyword_like_params = _build_keyword_like_clause("tm.content", keyword, langCode)
+    params: list = [langCode, *speaker_like_params]
+    cte_sql = (
+        "with matched_npc as materialized ("
+        "select npc.npcId as npcId, npcName.content as npc_name "
+        "from npc "
+        "cross join textMap as npcName on npc.textHash = npcName.hash and npcName.lang = ? "
+        f"where {speaker_like_sql}"
+        ")"
+    )
+    if use_fts and fts_match:
+        tm_sql = (
+            ", matched_text as materialized ("
+            "select tm.hash as hash, tm.content as content "
+            "from textMap tm "
+            f"where tm.id in (select rowid from {_TEXTMAP_FTS_TABLE} where {_TEXTMAP_FTS_TABLE} match ?) "
+            "and tm.lang = ? "
+            f"and {keyword_like_sql} "
+        )
+        params.extend([fts_match, langCode, *keyword_like_params])
+        tm_sql = _append_version_filter_clause(
+            tm_sql, params, "tm", created_version, updated_version, "textMap"
+        )
+        tm_sql += ") "
+        from_sql = (
+            "from matched_text tm "
+            "cross join dialogue d on d.textHash = tm.hash "
+            "join matched_npc mn on mn.npcId = d.talkerId "
+            "where d.talkerType = 'TALK_ROLE_NPC' "
+            "and d.talkerId in (select npcId from matched_npc) "
+        )
+    else:
+        tm_sql = " "
+        from_sql = (
+            "from matched_npc mn "
+            "cross join dialogue d on d.talkerType = 'TALK_ROLE_NPC' and d.talkerId = mn.npcId "
+            "cross join textMap as tm on d.textHash = tm.hash and tm.lang = ? "
+            f"where {keyword_like_sql} "
+        )
+        params.extend([langCode, *keyword_like_params])
+        from_sql = _append_version_filter_clause(
+            from_sql, params, "tm", created_version, updated_version, "textMap"
+        )
+
+    if is_count:
+        return f"{cte_sql}{tm_sql}select count(*) {from_sql}", params
+
+    dialogue_sort_sql, dialogue_sort_params = _build_match_sort_case("tm.content", keyword, langCode)
+    speaker_sort_sql, speaker_sort_params = _build_match_sort_case("mn.npc_name", speaker_keyword, langCode)
+    dialogue_length_sql = f"length({_build_normalized_match_expr('tm.content', langCode)})"
+    total_col = ", count(*) over() as _total_count" if include_total else ""
+    sql = (
+        f"{cte_sql}{tm_sql}"
+        f"select d.textHash, d.talkerType, d.talkerId, d.dialogueId{total_col} "
+        f"{from_sql}"
+        f"order by {dialogue_sort_sql}, {speaker_sort_sql}, "
+        f"{dialogue_length_sql}, d.dialogueId "
+    )
+    params.extend(dialogue_sort_params)
+    params.extend(speaker_sort_params)
+    if limit is not None:
+        sql += " limit ?"
+        params.append(limit)
+    return sql, params
+
+
 def selectDialogueByTalkerKeyword(
     keyword: str,
     langCode: int,
@@ -5881,20 +6990,20 @@ def selectDialogueByTalkerKeyword(
     updated_version: str | None = None,
 ):
     with closing(conn.cursor()) as cursor:
-        like_sql, like_params = _build_keyword_like_clause("npcName.content", keyword, langCode)
-        speaker_sort_sql, speaker_sort_params = _build_match_sort_case("npcName.content", keyword, langCode)
-        speaker_length_sql = f"length({_build_normalized_match_expr('npcName.content', langCode)})"
+        cte_sql, params = _build_matched_npc_cte(keyword, langCode)
+        speaker_sort_sql, speaker_sort_params = _build_match_sort_case("mn.npc_name", keyword, langCode)
+        speaker_length_sql = f"length({_build_normalized_match_expr('mn.npc_name', langCode)})"
         sql = (
+            f"{cte_sql}"
             "select dialogue.textHash, dialogue.talkerType, dialogue.talkerId, dialogue.dialogueId "
-            "from dialogue "
-            "join npc on dialogue.talkerType = 'TALK_ROLE_NPC' and dialogue.talkerId = npc.npcId "
-            "join textMap as npcName on npc.textHash = npcName.hash and npcName.lang=? "
-            "join textMap as dialogueText on dialogue.textHash = dialogueText.hash and dialogueText.lang=? "
-            f"where {like_sql} "
+            "from matched_npc mn "
+            "cross join dialogue on dialogue.talkerType = 'TALK_ROLE_NPC' and dialogue.talkerId = mn.npcId "
+            "cross join textMap as dialogueText on dialogue.textHash = dialogueText.hash and dialogueText.lang=? "
+            "where 1=1 "
         )
-        params = [langCode, langCode, *like_params]
+        params.append(langCode)
         sql = _append_version_filter_clause(
-            sql + " ",
+            sql,
             params,
             "dialogueText",
             created_version,
@@ -5917,16 +7026,16 @@ def countDialogueByTalkerKeyword(
     updated_version: str | None = None,
 ) -> int:
     with closing(conn.cursor()) as cursor:
-        like_sql, like_params = _build_keyword_like_clause("npcName.content", keyword, langCode)
+        cte_sql, params = _build_matched_npc_cte(keyword, langCode)
         sql = (
+            f"{cte_sql}"
             "select count(*) "
-            "from dialogue "
-            "join npc on dialogue.talkerType = 'TALK_ROLE_NPC' and dialogue.talkerId = npc.npcId "
-            "join textMap as npcName on npc.textHash = npcName.hash and npcName.lang=? "
-            "join textMap as dialogueText on dialogue.textHash = dialogueText.hash and dialogueText.lang=? "
-            f"where {like_sql} "
+            "from matched_npc mn "
+            "cross join dialogue on dialogue.talkerType = 'TALK_ROLE_NPC' and dialogue.talkerId = mn.npcId "
+            "cross join textMap as dialogueText on dialogue.textHash = dialogueText.hash and dialogueText.lang=? "
+            "where 1=1 "
         )
-        params = [langCode, langCode, *like_params]
+        params.append(langCode)
         sql = _append_version_filter_clause(
             sql,
             params,
@@ -5948,47 +7057,61 @@ def selectDialogueByTalkerAndKeyword(
     created_version: str | None = None,
     updated_version: str | None = None,
 ):
+    rows, _total = selectDialogueByTalkerAndKeywordWithCount(
+        speaker_keyword,
+        keyword,
+        langCode,
+        limit=limit,
+        created_version=created_version,
+        updated_version=updated_version,
+        include_total=False,
+    )
+    return rows
+
+
+def selectDialogueByTalkerAndKeywordWithCount(
+    speaker_keyword: str,
+    keyword: str,
+    langCode: int,
+    limit: int | None = None,
+    created_version: str | None = None,
+    updated_version: str | None = None,
+    include_total: bool = True,
+) -> tuple[list[tuple], int]:
+    fts_match = _build_textmap_fts_match(keyword, langCode)
+    sql_like, params_like = _build_dialogue_by_talker_and_keyword_sql(
+        speaker_keyword,
+        keyword,
+        langCode,
+        created_version,
+        updated_version,
+        use_fts=False,
+        fts_match=None,
+        limit=limit,
+        include_total=include_total,
+    )
     with closing(conn.cursor()) as cursor:
-        speaker_like_sql, speaker_like_params = _build_keyword_like_clause("npcName.content", speaker_keyword, langCode)
-        keyword_like_sql, keyword_like_params = _build_keyword_like_clause("dialogueText.content", keyword, langCode)
-        dialogue_sort_sql, dialogue_sort_params = _build_match_sort_case("dialogueText.content", keyword, langCode)
-        speaker_sort_sql, speaker_sort_params = _build_match_sort_case("npcName.content", speaker_keyword, langCode)
-        dialogue_length_sql = f"length({_build_normalized_match_expr('dialogueText.content', langCode)})"
-        sql = (
-            "select dialogue.textHash, dialogue.talkerType, dialogue.talkerId, dialogue.dialogueId "
-            "from dialogue "
-            "join textMap as dialogueText on dialogue.textHash = dialogueText.hash "
-            "and dialogueText.lang = ? "
-            "join npc on dialogue.talkerType = 'TALK_ROLE_NPC' and dialogue.talkerId = npc.npcId "
-            "join textMap as npcName on npc.textHash = npcName.hash and npcName.lang = ? "
-            f"where {keyword_like_sql} "
-            f"and {speaker_like_sql} "
-        )
-        params = [
-            langCode,
-            langCode,
-            *keyword_like_params,
-            *speaker_like_params,
-        ]
-        sql = _append_version_filter_clause(
-            sql + " ",
-            params,
-            "dialogueText",
-            created_version,
-            updated_version,
-            "textMap",
-        )
-        sql += (
-            f"order by {dialogue_sort_sql}, {speaker_sort_sql}, "
-            f"{dialogue_length_sql}, dialogue.dialogueId "
-        )
-        params.extend(dialogue_sort_params)
-        params.extend(speaker_sort_params)
-        if limit is not None:
-            sql += " limit ?"
-            params.append(limit)
-        cursor.execute(sql, params)
-        return cursor.fetchall()
+        if _is_textmap_fts_lang_enabled(langCode) and fts_match is not None:
+            sql_fts, params_fts = _build_dialogue_by_talker_and_keyword_sql(
+                speaker_keyword,
+                keyword,
+                langCode,
+                created_version,
+                updated_version,
+                use_fts=True,
+                fts_match=fts_match,
+                limit=limit,
+                include_total=include_total,
+            )
+            _execute_with_fallback(cursor, sql_fts, params_fts, sql_like, params_like)
+        else:
+            cursor.execute(sql_like, params_like)
+        raw_rows = cursor.fetchall()
+
+    if not include_total:
+        return raw_rows, len(raw_rows)
+    rows, total = _split_window_count_rows(raw_rows)
+    return rows, (total if total is not None else 0)
 
 
 def selectDialogueByTalkerTypeAndKeyword(
@@ -6003,7 +7126,7 @@ def selectDialogueByTalkerTypeAndKeyword(
         like_sql, like_params = _build_keyword_like_clause("dialogueText.content", keyword, langCode)
         dialogue_sort_sql, dialogue_sort_params = _build_match_sort_case("dialogueText.content", keyword, langCode)
         dialogue_length_sql = f"length({_build_normalized_match_expr('dialogueText.content', langCode)})"
-        sql = (
+        sql_like = (
             "select dialogue.textHash, dialogue.talkerType, dialogue.talkerId, dialogue.dialogueId "
             "from dialogue "
             "join textMap as dialogueText on dialogue.textHash = dialogueText.hash "
@@ -6011,24 +7134,58 @@ def selectDialogueByTalkerTypeAndKeyword(
             "where dialogue.talkerType = ? "
             f"and {like_sql} "
         )
-        params = [langCode, talkerType, *like_params]
-        sql = _append_version_filter_clause(
-            sql + " ",
-            params,
+        params_like = [langCode, talkerType, *like_params]
+        sql_like = _append_version_filter_clause(
+            sql_like + " ",
+            params_like,
             "dialogueText",
             created_version,
             updated_version,
             "textMap",
         )
-        sql += (
+        sql_like += (
             f"order by {dialogue_sort_sql}, "
             f"{dialogue_length_sql}, dialogue.dialogueId "
         )
-        params.extend(dialogue_sort_params)
+        params_like.extend(dialogue_sort_params)
         if limit is not None:
-            sql += " limit ?"
-            params.append(limit)
-        cursor.execute(sql, params)
+            sql_like += " limit ?"
+            params_like.append(limit)
+
+        fts_match = _build_textmap_fts_match(keyword, langCode)
+        if _is_textmap_fts_lang_enabled(langCode) and fts_match is not None:
+            sql_fts = (
+                "with matched_text as materialized ("
+                "select dialogueText.hash as hash, dialogueText.content as content "
+                "from textMap as dialogueText "
+                f"where dialogueText.id in (select rowid from {_TEXTMAP_FTS_TABLE} where {_TEXTMAP_FTS_TABLE} match ?) "
+                "and dialogueText.lang = ? "
+                f"and {like_sql} "
+            )
+            params_fts = [fts_match, langCode, *like_params]
+            sql_fts = _append_version_filter_clause(
+                sql_fts,
+                params_fts,
+                "dialogueText",
+                created_version,
+                updated_version,
+                "textMap",
+            )
+            sql_fts += (
+                ") "
+                "select dialogue.textHash, dialogue.talkerType, dialogue.talkerId, dialogue.dialogueId "
+                "from matched_text as dialogueText "
+                "cross join dialogue on dialogue.textHash = dialogueText.hash "
+                "where dialogue.talkerType = ? "
+                f"order by {dialogue_sort_sql}, {dialogue_length_sql}, dialogue.dialogueId "
+            )
+            params_fts.extend([talkerType, *dialogue_sort_params])
+            if limit is not None:
+                sql_fts += " limit ?"
+                params_fts.append(limit)
+            _execute_with_fallback(cursor, sql_fts, params_fts, sql_like, params_like)
+        else:
+            cursor.execute(sql_like, params_like)
         return cursor.fetchall()
 
 
@@ -6040,22 +7197,21 @@ def selectFetterBySpeakerKeyword(
     updated_version: str | None = None,
 ):
     with closing(conn.cursor()) as cursor:
-        like_sql, like_params = _build_keyword_like_clause("avatarName.content", keyword, langCode)
-        speaker_sort_sql, speaker_sort_params = _build_match_sort_case("avatarName.content", keyword, langCode)
-        speaker_length_sql = f"length({_build_normalized_match_expr('avatarName.content', langCode)})"
+        cte_sql, params = _build_matched_avatar_cte(keyword, langCode)
+        speaker_sort_sql, speaker_sort_params = _build_match_sort_case("ma.avatar_name", keyword, langCode)
+        speaker_length_sql = f"length({_build_normalized_match_expr('ma.avatar_name', langCode)})"
         sql = (
+            f"{cte_sql}"
             "select fetters.voiceFileTextTextMapHash, fetters.avatarId "
-            "from fetters "
-            "join textMap as voiceText on fetters.voiceFileTextTextMapHash = voiceText.hash "
+            "from matched_avatar ma "
+            "cross join fetters on fetters.avatarId = ma.avatarId "
+            "cross join textMap as voiceText on fetters.voiceFileTextTextMapHash = voiceText.hash "
             "and voiceText.lang = ? "
-            "join avatar on fetters.avatarId = avatar.avatarId "
-            "join textMap as avatarName on avatar.nameTextMapHash = avatarName.hash "
-            "and avatarName.lang = ? "
-            f"where {like_sql} "
+            "where 1=1 "
         )
-        params = [langCode, langCode, *like_params]
+        params.append(langCode)
         sql = _append_version_filter_clause(
-            sql + " ",
+            sql,
             params,
             "voiceText",
             created_version,
@@ -6080,30 +7236,23 @@ def selectFetterBySpeakerAndKeyword(
     updated_version: str | None = None,
 ):
     with closing(conn.cursor()) as cursor:
-        speaker_like_sql, speaker_like_params = _build_keyword_like_clause("avatarName.content", speaker_keyword, langCode)
+        cte_sql, params = _build_matched_avatar_cte(speaker_keyword, langCode)
         keyword_like_sql, keyword_like_params = _build_keyword_like_clause("voiceText.content", keyword, langCode)
         voice_sort_sql, voice_sort_params = _build_match_sort_case("voiceText.content", keyword, langCode)
-        speaker_sort_sql, speaker_sort_params = _build_match_sort_case("avatarName.content", speaker_keyword, langCode)
+        speaker_sort_sql, speaker_sort_params = _build_match_sort_case("ma.avatar_name", speaker_keyword, langCode)
         voice_length_sql = f"length({_build_normalized_match_expr('voiceText.content', langCode)})"
         sql = (
+            f"{cte_sql}"
             "select fetters.voiceFileTextTextMapHash, fetters.avatarId "
-            "from fetters "
-            "join textMap as voiceText on fetters.voiceFileTextTextMapHash = voiceText.hash "
+            "from matched_avatar ma "
+            "cross join fetters on fetters.avatarId = ma.avatarId "
+            "cross join textMap as voiceText on fetters.voiceFileTextTextMapHash = voiceText.hash "
             "and voiceText.lang = ? "
-            "join avatar on fetters.avatarId = avatar.avatarId "
-            "join textMap as avatarName on avatar.nameTextMapHash = avatarName.hash "
-            "and avatarName.lang = ? "
             f"where {keyword_like_sql} "
-            f"and {speaker_like_sql} "
         )
-        params = [
-            langCode,
-            langCode,
-            *keyword_like_params,
-            *speaker_like_params,
-        ]
+        params.extend([langCode, *keyword_like_params])
         sql = _append_version_filter_clause(
-            sql + " ",
+            sql,
             params,
             "voiceText",
             created_version,
@@ -6131,22 +7280,21 @@ def selectAvatarStoryBySpeakerKeyword(
     updated_version: str | None = None,
 ):
     with closing(conn.cursor()) as cursor:
-        like_sql, like_params = _build_keyword_like_clause("avatarName.content", keyword, langCode)
-        speaker_sort_sql, speaker_sort_params = _build_match_sort_case("avatarName.content", keyword, langCode)
-        speaker_length_sql = f"length({_build_normalized_match_expr('avatarName.content', langCode)})"
+        cte_sql, params = _build_matched_avatar_cte(keyword, langCode)
+        speaker_sort_sql, speaker_sort_params = _build_match_sort_case("ma.avatar_name", keyword, langCode)
+        speaker_length_sql = f"length({_build_normalized_match_expr('ma.avatar_name', langCode)})"
         sql = (
+            f"{cte_sql}"
             "select entries.contextHash, entries.avatarId "
-            f"from ({_avatar_story_entries_subquery()}) as entries "
-            "join textMap as storyText on entries.contextHash = storyText.hash "
+            "from matched_avatar ma "
+            f"cross join ({_avatar_story_entries_subquery()}) as entries on entries.avatarId = ma.avatarId "
+            "cross join textMap as storyText on entries.contextHash = storyText.hash "
             "and storyText.lang = ? "
-            "join avatar on entries.avatarId = avatar.avatarId "
-            "join textMap as avatarName on avatar.nameTextMapHash = avatarName.hash "
-            "and avatarName.lang = ? "
-            f"where {like_sql} "
+            "where 1=1 "
         )
-        params = [langCode, langCode, *like_params]
+        params.append(langCode)
         sql = _append_version_filter_clause(
-            sql + " ",
+            sql,
             params,
             "storyText",
             created_version,
@@ -6171,30 +7319,23 @@ def selectAvatarStoryBySpeakerAndKeyword(
     updated_version: str | None = None,
 ):
     with closing(conn.cursor()) as cursor:
-        speaker_like_sql, speaker_like_params = _build_keyword_like_clause("avatarName.content", speaker_keyword, langCode)
+        cte_sql, params = _build_matched_avatar_cte(speaker_keyword, langCode)
         keyword_like_sql, keyword_like_params = _build_keyword_like_clause("storyText.content", keyword, langCode)
         story_sort_sql, story_sort_params = _build_match_sort_case("storyText.content", keyword, langCode)
-        speaker_sort_sql, speaker_sort_params = _build_match_sort_case("avatarName.content", speaker_keyword, langCode)
+        speaker_sort_sql, speaker_sort_params = _build_match_sort_case("ma.avatar_name", speaker_keyword, langCode)
         story_length_sql = f"length({_build_normalized_match_expr('storyText.content', langCode)})"
         sql = (
+            f"{cte_sql}"
             "select entries.contextHash, entries.avatarId "
-            f"from ({_avatar_story_entries_subquery()}) as entries "
-            "join textMap as storyText on entries.contextHash = storyText.hash "
+            "from matched_avatar ma "
+            f"cross join ({_avatar_story_entries_subquery()}) as entries on entries.avatarId = ma.avatarId "
+            "cross join textMap as storyText on entries.contextHash = storyText.hash "
             "and storyText.lang = ? "
-            "join avatar on entries.avatarId = avatar.avatarId "
-            "join textMap as avatarName on avatar.nameTextMapHash = avatarName.hash "
-            "and avatarName.lang = ? "
             f"where {keyword_like_sql} "
-            f"and {speaker_like_sql} "
         )
-        params = [
-            langCode,
-            langCode,
-            *keyword_like_params,
-            *speaker_like_params,
-        ]
+        params.extend([langCode, *keyword_like_params])
         sql = _append_version_filter_clause(
-            sql + " ",
+            sql,
             params,
             "storyText",
             created_version,
@@ -6250,34 +7391,32 @@ def countDialogueByTalkerAndKeyword(
     created_version: str | None = None,
     updated_version: str | None = None,
 ) -> int:
+    fts_match = _build_textmap_fts_match(keyword, langCode)
+    sql_like, params_like = _build_dialogue_by_talker_and_keyword_sql(
+        speaker_keyword,
+        keyword,
+        langCode,
+        created_version,
+        updated_version,
+        use_fts=False,
+        fts_match=None,
+        is_count=True,
+    )
     with closing(conn.cursor()) as cursor:
-        speaker_like_sql, speaker_like_params = _build_keyword_like_clause("npcName.content", speaker_keyword, langCode)
-        keyword_like_sql, keyword_like_params = _build_keyword_like_clause("dialogueText.content", keyword, langCode)
-        sql = (
-            "select count(*) "
-            "from dialogue "
-            "join textMap as dialogueText on dialogue.textHash = dialogueText.hash "
-            "and dialogueText.lang = ? "
-            "join npc on dialogue.talkerType = 'TALK_ROLE_NPC' and dialogue.talkerId = npc.npcId "
-            "join textMap as npcName on npc.textHash = npcName.hash and npcName.lang = ? "
-            f"where {keyword_like_sql} "
-            f"and {speaker_like_sql}"
-        )
-        params = [
-            langCode,
-            langCode,
-            *keyword_like_params,
-            *speaker_like_params,
-        ]
-        sql = _append_version_filter_clause(
-            sql + " ",
-            params,
-            "dialogueText",
-            created_version,
-            updated_version,
-            "textMap",
-        )
-        cursor.execute(sql, params)
+        if _is_textmap_fts_lang_enabled(langCode) and fts_match is not None:
+            sql_fts, params_fts = _build_dialogue_by_talker_and_keyword_sql(
+                speaker_keyword,
+                keyword,
+                langCode,
+                created_version,
+                updated_version,
+                use_fts=True,
+                fts_match=fts_match,
+                is_count=True,
+            )
+            _execute_with_fallback(cursor, sql_fts, params_fts, sql_like, params_like)
+        else:
+            cursor.execute(sql_like, params_like)
         row = cursor.fetchone()
         return int(row[0]) if row else 0
 
@@ -6291,7 +7430,7 @@ def countDialogueByTalkerTypeAndKeyword(
 ) -> int:
     with closing(conn.cursor()) as cursor:
         like_sql, like_params = _build_keyword_like_clause("dialogueText.content", keyword, langCode)
-        sql = (
+        sql_like = (
             "select count(*) "
             "from dialogue "
             "join textMap as dialogueText on dialogue.textHash = dialogueText.hash "
@@ -6299,16 +7438,44 @@ def countDialogueByTalkerTypeAndKeyword(
             "where dialogue.talkerType = ? "
             f"and {like_sql}"
         )
-        params = [langCode, talkerType, *like_params]
-        sql = _append_version_filter_clause(
-            sql + " ",
-            params,
+        params_like = [langCode, talkerType, *like_params]
+        sql_like = _append_version_filter_clause(
+            sql_like + " ",
+            params_like,
             "dialogueText",
             created_version,
             updated_version,
             "textMap",
         )
-        cursor.execute(sql, params)
+        fts_match = _build_textmap_fts_match(keyword, langCode)
+        if _is_textmap_fts_lang_enabled(langCode) and fts_match is not None:
+            sql_fts = (
+                "with matched_text as materialized ("
+                "select dialogueText.hash as hash "
+                "from textMap as dialogueText "
+                f"where dialogueText.id in (select rowid from {_TEXTMAP_FTS_TABLE} where {_TEXTMAP_FTS_TABLE} match ?) "
+                "and dialogueText.lang = ? "
+                f"and {like_sql} "
+            )
+            params_fts = [fts_match, langCode, *like_params]
+            sql_fts = _append_version_filter_clause(
+                sql_fts,
+                params_fts,
+                "dialogueText",
+                created_version,
+                updated_version,
+                "textMap",
+            )
+            sql_fts += (
+                ") "
+                "select count(*) from matched_text mt "
+                "cross join dialogue on dialogue.textHash = mt.hash "
+                "where dialogue.talkerType = ?"
+            )
+            params_fts.append(talkerType)
+            _execute_with_fallback(cursor, sql_fts, params_fts, sql_like, params_like)
+        else:
+            cursor.execute(sql_like, params_like)
         row = cursor.fetchone()
         return int(row[0]) if row else 0
 
@@ -6320,20 +7487,19 @@ def countFetterBySpeakerKeyword(
     updated_version: str | None = None,
 ) -> int:
     with closing(conn.cursor()) as cursor:
-        like_sql, like_params = _build_keyword_like_clause("avatarName.content", keyword, langCode)
+        cte_sql, params = _build_matched_avatar_cte(keyword, langCode)
         sql = (
+            f"{cte_sql}"
             "select count(*) "
-            "from fetters "
-            "join textMap as voiceText on fetters.voiceFileTextTextMapHash = voiceText.hash "
+            "from matched_avatar ma "
+            "cross join fetters on fetters.avatarId = ma.avatarId "
+            "cross join textMap as voiceText on fetters.voiceFileTextTextMapHash = voiceText.hash "
             "and voiceText.lang = ? "
-            "join avatar on fetters.avatarId = avatar.avatarId "
-            "join textMap as avatarName on avatar.nameTextMapHash = avatarName.hash "
-            "and avatarName.lang = ? "
-            f"where {like_sql}"
+            "where 1=1 "
         )
-        params = [langCode, langCode, *like_params]
+        params.append(langCode)
         sql = _append_version_filter_clause(
-            sql + " ",
+            sql,
             params,
             "voiceText",
             created_version,
@@ -6353,27 +7519,20 @@ def countFetterBySpeakerAndKeyword(
     updated_version: str | None = None,
 ) -> int:
     with closing(conn.cursor()) as cursor:
-        speaker_like_sql, speaker_like_params = _build_keyword_like_clause("avatarName.content", speaker_keyword, langCode)
+        cte_sql, params = _build_matched_avatar_cte(speaker_keyword, langCode)
         keyword_like_sql, keyword_like_params = _build_keyword_like_clause("voiceText.content", keyword, langCode)
         sql = (
+            f"{cte_sql}"
             "select count(*) "
-            "from fetters "
-            "join textMap as voiceText on fetters.voiceFileTextTextMapHash = voiceText.hash "
+            "from matched_avatar ma "
+            "cross join fetters on fetters.avatarId = ma.avatarId "
+            "cross join textMap as voiceText on fetters.voiceFileTextTextMapHash = voiceText.hash "
             "and voiceText.lang = ? "
-            "join avatar on fetters.avatarId = avatar.avatarId "
-            "join textMap as avatarName on avatar.nameTextMapHash = avatarName.hash "
-            "and avatarName.lang = ? "
             f"where {keyword_like_sql} "
-            f"and {speaker_like_sql}"
         )
-        params = [
-            langCode,
-            langCode,
-            *keyword_like_params,
-            *speaker_like_params,
-        ]
+        params.extend([langCode, *keyword_like_params])
         sql = _append_version_filter_clause(
-            sql + " ",
+            sql,
             params,
             "voiceText",
             created_version,
@@ -6392,20 +7551,19 @@ def countAvatarStoryBySpeakerKeyword(
     updated_version: str | None = None,
 ) -> int:
     with closing(conn.cursor()) as cursor:
-        like_sql, like_params = _build_keyword_like_clause("avatarName.content", keyword, langCode)
+        cte_sql, params = _build_matched_avatar_cte(keyword, langCode)
         sql = (
+            f"{cte_sql}"
             "select count(*) "
-            f"from ({_avatar_story_entries_subquery()}) as entries "
-            "join textMap as storyText on entries.contextHash = storyText.hash "
+            "from matched_avatar ma "
+            f"cross join ({_avatar_story_entries_subquery()}) as entries on entries.avatarId = ma.avatarId "
+            "cross join textMap as storyText on entries.contextHash = storyText.hash "
             "and storyText.lang = ? "
-            "join avatar on entries.avatarId = avatar.avatarId "
-            "join textMap as avatarName on avatar.nameTextMapHash = avatarName.hash "
-            "and avatarName.lang = ? "
-            f"where {like_sql}"
+            "where 1=1 "
         )
-        params = [langCode, langCode, *like_params]
+        params.append(langCode)
         sql = _append_version_filter_clause(
-            sql + " ",
+            sql,
             params,
             "storyText",
             created_version,
@@ -6425,27 +7583,20 @@ def countAvatarStoryBySpeakerAndKeyword(
     updated_version: str | None = None,
 ) -> int:
     with closing(conn.cursor()) as cursor:
-        speaker_like_sql, speaker_like_params = _build_keyword_like_clause("avatarName.content", speaker_keyword, langCode)
+        cte_sql, params = _build_matched_avatar_cte(speaker_keyword, langCode)
         keyword_like_sql, keyword_like_params = _build_keyword_like_clause("storyText.content", keyword, langCode)
         sql = (
+            f"{cte_sql}"
             "select count(*) "
-            f"from ({_avatar_story_entries_subquery()}) as entries "
-            "join textMap as storyText on entries.contextHash = storyText.hash "
+            "from matched_avatar ma "
+            f"cross join ({_avatar_story_entries_subquery()}) as entries on entries.avatarId = ma.avatarId "
+            "cross join textMap as storyText on entries.contextHash = storyText.hash "
             "and storyText.lang = ? "
-            "join avatar on entries.avatarId = avatar.avatarId "
-            "join textMap as avatarName on avatar.nameTextMapHash = avatarName.hash "
-            "and avatarName.lang = ? "
             f"where {keyword_like_sql} "
-            f"and {speaker_like_sql}"
         )
-        params = [
-            langCode,
-            langCode,
-            *keyword_like_params,
-            *speaker_like_params,
-        ]
+        params.extend([langCode, *keyword_like_params])
         sql = _append_version_filter_clause(
-            sql + " ",
+            sql,
             params,
             "storyText",
             created_version,

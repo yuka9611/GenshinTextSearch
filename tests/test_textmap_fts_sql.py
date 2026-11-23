@@ -123,18 +123,27 @@ def test_long_literal_search_uses_trigram_index_and_verifies_substring(search_db
 
 
 @pytest.mark.parametrize("detail", ["none", "column"])
-def test_long_chinese_search_retains_noncontiguous_like_results(search_db, detail):
+def test_long_chinese_search_uses_overlapping_trigrams_and_multi_term_noncontiguous(search_db, detail):
     helper, connection = search_db
     connection.execute(build_textmap_fts_table_sql("trigram", detail, 0))
     connection.executemany(
         "INSERT INTO textMap(hash, content, lang) VALUES (?, ?, 1)",
-        [(10, "天空之琴"), (20, "天边的空岛之上有琴声"), (30, "琴之空天")],
+        [(10, "天空之琴"), (20, "天边的空岛之上有琴声"), (30, "琴之空天"), (40, "今天天空下着琴声")],
     )
     connection.execute("INSERT INTO textMap_fts(textMap_fts) VALUES ('rebuild')")
 
-    assert helper._build_textmap_fts_match("天空之琴", 1) is None
-    assert {row[0] for row in helper.selectTextMapFromKeyword("天空之琴", 1)} == {10, 20}
-    assert helper.countTextMapFromKeyword("天空之琴", 1) == 2
+    # Chinese 4+ character single term now uses overlapping trigram FTS & contiguous matching.
+    assert helper._build_textmap_fts_match("天空之琴", 1) == '"天空之" AND "空之琴"'
+    assert {row[0] for row in helper.selectTextMapFromKeyword("天空之琴", 1)} == {10}
+    assert helper.countTextMapFromKeyword("天空之琴", 1) == 1
+
+    # Space-separated terms continue to support non-contiguous matching.
+    assert {row[0] for row in helper.selectTextMapFromKeyword("天空 琴", 1)} == {10, 40}
+    assert helper.countTextMapFromKeyword("天空 琴", 1) == 2
+
+    # Short Chinese (<4 chars) continues to allow non-contiguous fuzzy matches without FTS.
+    assert helper._build_textmap_fts_match("天琴", 1) is None
+    assert {row[0] for row in helper.selectTextMapFromKeyword("天琴", 1)} == {10, 20, 40}
 
 
 @pytest.mark.parametrize("lang", [1, 2, 4, 9])
@@ -447,3 +456,60 @@ def test_multi_term_across_readable_subtitle_quest_catalog_voice_story(search_db
     assert helper.countCatalogEntities("Mondstadt Harp", 4) == 1
     assert len(helper._select_avatar_scoped_voice_items_by_filters("abyssosque astra", 4)) == 1
     assert len(helper.selectAvatarStoryItemsByFilters("abyssosque Katheryne", 4)) == 1
+
+
+def test_with_count_helpers_match_legacy_select_and_count(search_db):
+    helper, connection = search_db
+    connection.executescript(
+        """
+        CREATE TABLE dialogue(dialogueId INTEGER PRIMARY KEY, textHash INTEGER);
+        CREATE TABLE voice(dialogueId INTEGER, voicePath TEXT);
+        CREATE TABLE fetters(avatarId INTEGER, voiceFile INTEGER, voiceFileTextTextMapHash INTEGER);
+        CREATE TABLE fetterVoice(avatarId INTEGER, voiceFile INTEGER, voicePath TEXT);
+        CREATE TABLE readable(
+            fileName TEXT,
+            content TEXT,
+            titleTextMapHash INTEGER,
+            readableId INTEGER,
+            lang TEXT
+        );
+        CREATE TABLE subtitle(
+            fileName TEXT,
+            content TEXT,
+            startTime REAL,
+            endTime REAL,
+            subtitleId INTEGER,
+            lang INTEGER
+        );
+        """
+    )
+    connection.execute(build_textmap_fts_table_sql("trigram", "none", 0))
+    connection.executemany(
+        "INSERT INTO textMap(hash, content, lang) VALUES (?, ?, 4)",
+        [(1, "Traveler alpha",), (2, "Traveler beta",), (3, "Traveler gamma",)],
+    )
+    connection.execute("INSERT INTO textMap_fts(textMap_fts) VALUES ('rebuild')")
+    connection.executemany(
+        "INSERT INTO readable VALUES (?, ?, 1, ?, 'EN')",
+        [("BookA_EN", "Traveler note A", 10), ("BookB_EN", "Traveler note B", 11)],
+    )
+    connection.executemany(
+        "INSERT INTO subtitle VALUES (?, ?, ?, ?, ?, 4)",
+        [("CutA_EN", "Traveler scene 1", 0.0, 1.0, 1), ("CutB_EN", "Traveler scene 2", 1.0, 2.0, 2)],
+    )
+
+    tm_rows, tm_total = helper.selectTextMapFromKeywordPagedWithCount("Traveler", 4, limit=2, offset=0)
+    assert [r[0] for r in tm_rows] == [r[0] for r in helper.selectTextMapFromKeywordPaged("Traveler", 4, 2, 0)]
+    assert tm_total == helper.countTextMapFromKeyword("Traveler", 4) == 3
+
+    empty_rows, oob_total = helper.selectTextMapFromKeywordPagedWithCount("Traveler", 4, limit=2, offset=10)
+    assert empty_rows == []
+    assert oob_total == 3
+
+    r_rows, r_total = helper.selectReadableFromKeywordWithCount("Traveler", 4, "EN", limit=1, offset=0)
+    assert len(r_rows) == 1
+    assert r_total == helper.countReadableFromKeyword("Traveler", 4, "EN") == 2
+
+    s_rows, s_total = helper.selectSubtitleFromKeywordWithCount("Traveler", 4, limit=1, offset=0)
+    assert len(s_rows) == 1
+    assert s_total == helper.countSubtitleFromKeyword("Traveler", 4) == 2

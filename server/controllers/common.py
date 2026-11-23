@@ -1403,6 +1403,18 @@ def _select_primary_source_from_text_hash(text_hash: int, lang_code: int) -> tup
     return primary, unknown_origin, False, 0
 
 
+def _resolve_text_hash_info_lang_list(langs: 'list[int]', sourceLangCode: int) -> list[int]:
+    # 请求级偏好严格限制结果语言；本地旧调用仍附加来源语言并保留兜底。
+    lang_list = list(dict.fromkeys(langs or []))
+    if (
+        not config.hasRequestDisplayPreferences()
+        and sourceLangCode
+        and sourceLangCode not in lang_list
+    ):
+        lang_list.append(sourceLangCode)
+    return lang_list
+
+
 def queryTextHashInfo(textHash: int, langs: 'list[int]', sourceLangCode: int, queryOrigin=True):
     """
     查询文本哈希的信息
@@ -1412,14 +1424,7 @@ def queryTextHashInfo(textHash: int, langs: 'list[int]', sourceLangCode: int, qu
     - queryOrigin=False 用于搜索阶段，跳过来源查询以大幅减少数据库查询
     """
     obj = {'translates': {}, 'voicePaths': [], 'availableVoiceLangs': [], 'hash': textHash}
-    # 请求级偏好严格限制结果语言；本地旧调用仍附加来源语言并保留兜底。
-    lang_list = list(dict.fromkeys(langs or []))
-    if (
-        not config.hasRequestDisplayPreferences()
-        and sourceLangCode
-        and sourceLangCode not in lang_list
-    ):
-        lang_list.append(sourceLangCode)
+    lang_list = _resolve_text_hash_info_lang_list(langs, sourceLangCode)
 
     # 获取翻译
     translates = databaseHelper.selectTextMapFromTextHash(textHash, lang_list)
@@ -1451,6 +1456,66 @@ def queryTextHashInfo(textHash: int, langs: 'list[int]', sourceLangCode: int, qu
     created_raw, updated_raw = databaseHelper.getTextMapVersionInfo(textHash, sourceLangCode)
     obj.update(_build_version_fields(created_raw, updated_raw))
     return obj
+
+
+def queryTextHashInfoBatch(
+    text_hashes: 'list[int]',
+    langs: 'list[int]',
+    sourceLangCode: int,
+    queryOrigin: bool = False,
+) -> list[dict]:
+    """Batch version of queryTextHashInfo used for paginated search results."""
+    if not text_hashes:
+        return []
+    if (
+        queryOrigin
+        or queryTextHashInfo is not _DEFAULT_QUERY_TEXT_HASH_INFO
+        or selectVoicePathFromTextHash is not _DEFAULT_SELECT_VOICE_PATH_FROM_TEXT_HASH
+        or databaseHelper.selectTextMapFromTextHash is not _DEFAULT_DB_SELECT_TEXTMAP_FROM_TEXT_HASH
+        or databaseHelper.getTextMapVersionInfo is not _DEFAULT_DB_GET_TEXTMAP_VERSION_INFO
+    ):
+        return [
+            queryTextHashInfo(text_hash, langs, sourceLangCode, queryOrigin=queryOrigin)
+            for text_hash in text_hashes
+        ]
+
+    lang_list = _resolve_text_hash_info_lang_list(langs, sourceLangCode)
+    translates_by_hash = databaseHelper.selectTextMapFromTextHashesBatch(text_hashes, lang_list)
+    if not config.hasRequestDisplayPreferences():
+        missing_hashes: list[int] = []
+        for text_hash in text_hashes:
+            key = _coerce_optional_sort_int(text_hash)
+            if key is None or not translates_by_hash.get(key):
+                missing_hashes.append(text_hash)
+        if missing_hashes:
+            fallback_translates = databaseHelper.selectTextMapFromTextHashesBatch(missing_hashes, None)
+            translates_by_hash.update(fallback_translates)
+
+    voice_paths_by_hash = databaseHelper.selectVoicePathsFromTextHashesBatch(text_hashes)
+    version_info_by_hash = databaseHelper.getTextMapVersionInfoBatch(text_hashes, sourceLangCode)
+
+    results: list[dict] = []
+    for text_hash in text_hashes:
+        normalized_hash = _coerce_optional_sort_int(text_hash)
+        lookup_key = normalized_hash if normalized_hash is not None else text_hash
+        obj = {
+            'translates': {},
+            'voicePaths': [],
+            'availableVoiceLangs': [],
+            'hash': text_hash,
+            'origin': "其他文本",
+            'isTalk': False,
+        }
+        for content, trans_lang in translates_by_hash.get(lookup_key, ()):
+            obj['translates'][str(trans_lang)] = _normalize_text_map_content(content, trans_lang)
+
+        for voice_path in voice_paths_by_hash.get(lookup_key, ()):
+            _attach_voice_metadata(obj, voice_path, lang_list)
+
+        created_raw, updated_raw = version_info_by_hash.get(lookup_key, (None, None))
+        obj.update(_build_version_fields(created_raw, updated_raw))
+        results.append(obj)
+    return results
 
 
 def _resolve_avatar_query_langs(search_lang: int | None = None) -> tuple[list[int], int, int]:
@@ -2246,14 +2311,35 @@ def _handle_speaker_and_keyword_query(speaker_keyword: str, keyword_trim: str, l
         return _paginate(ans, page, page_size, total)
 
     # 查询对话
-    dialogue_rows = databaseHelper.selectDialogueByTalkerAndKeyword(
-        speaker_keyword,
-        keyword_trim,
-        langCode,
-        page * page_size * 3,
-        created_version_filter,
-        updated_version_filter,
-    )
+    if (
+        databaseHelper.selectDialogueByTalkerAndKeyword is _DEFAULT_DB_SELECT_DIALOGUE_BY_TALKER_AND_KEYWORD
+        and _count_dialogue_by_talker_and_keyword_cached is _DEFAULT_COUNT_DIALOGUE_BY_TALKER_AND_KEYWORD_CACHED
+        and databaseHelper.countDialogueByTalkerAndKeyword is _DEFAULT_DB_COUNT_DIALOGUE_BY_TALKER_AND_KEYWORD
+    ):
+        dialogue_rows, dialogue_total = databaseHelper.selectDialogueByTalkerAndKeywordWithCount(
+            speaker_keyword,
+            keyword_trim,
+            langCode,
+            page * page_size * 3,
+            created_version_filter,
+            updated_version_filter,
+        )
+    else:
+        dialogue_rows = databaseHelper.selectDialogueByTalkerAndKeyword(
+            speaker_keyword,
+            keyword_trim,
+            langCode,
+            page * page_size * 3,
+            created_version_filter,
+            updated_version_filter,
+        )
+        dialogue_total = _count_dialogue_by_talker_and_keyword_cached(
+            speaker_keyword,
+            keyword_trim,
+            langCode,
+            created_version_filter,
+            updated_version_filter,
+        )
     for textHash, talkerType, talkerId, _dialogueId in dialogue_rows:
         if textHash in seen_hashes:
             continue
@@ -2262,13 +2348,6 @@ def _handle_speaker_and_keyword_query(speaker_keyword: str, keyword_trim: str, l
         obj['talker'] = databaseHelper.getTalkerName(talkerType, talkerId, langCode)
         ans.append(obj)
 
-    dialogue_total = _count_dialogue_by_talker_and_keyword_cached(
-        speaker_keyword,
-        keyword_trim,
-        langCode,
-        created_version_filter,
-        updated_version_filter,
-    )
     total = dialogue_total
 
     # 查询特殊说话者类型
@@ -2608,6 +2687,352 @@ def _handle_specific_voice_filter(keyword, keyword_trim, langCode, safe_page, sa
     return ans, total
 
 
+def _ranked_seams_patched() -> bool:
+    return (
+        queryTextHashInfo is not _DEFAULT_QUERY_TEXT_HASH_INFO
+        or selectVoicePathFromTextHash is not _DEFAULT_SELECT_VOICE_PATH_FROM_TEXT_HASH
+        or _count_textmap_from_keyword_cached is not _DEFAULT_COUNT_TEXTMAP_CACHED
+        or _count_textmap_from_keyword_voice_cached is not _DEFAULT_COUNT_TEXTMAP_VOICE_CACHED
+        or _count_readable_from_keyword_cached is not _DEFAULT_COUNT_READABLE_CACHED
+        or _count_subtitle_from_keyword_cached is not _DEFAULT_COUNT_SUBTITLE_CACHED
+        or databaseHelper.selectTextMapFromKeywordPaged is not _DEFAULT_DB_SELECT_TEXTMAP_PAGED
+        or databaseHelper.countTextMapFromKeyword is not _DEFAULT_DB_COUNT_TEXTMAP
+        or databaseHelper.countTextMapFromKeywordVoice is not _DEFAULT_DB_COUNT_TEXTMAP_VOICE
+        or databaseHelper.selectTextMapFromKeywordBySourceType is not _DEFAULT_DB_SELECT_TEXTMAP_BY_SOURCE_TYPE
+        or databaseHelper.countTextMapFromKeywordBySourceType is not _DEFAULT_DB_COUNT_TEXTMAP_BY_SOURCE_TYPE
+        or databaseHelper.selectReadableFromKeyword is not _DEFAULT_DB_SELECT_READABLE_FROM_KEYWORD
+        or databaseHelper.countReadableFromKeyword is not _DEFAULT_DB_COUNT_READABLE_FROM_KEYWORD
+        or databaseHelper.selectSubtitleFromKeyword is not _DEFAULT_DB_SELECT_SUBTITLE_FROM_KEYWORD
+        or databaseHelper.countSubtitleFromKeyword is not _DEFAULT_DB_COUNT_SUBTITLE_FROM_KEYWORD
+        or databaseHelper.selectTextMapFromTextHash is not _DEFAULT_DB_SELECT_TEXTMAP_FROM_TEXT_HASH
+        or databaseHelper.getTextMapVersionInfo is not _DEFAULT_DB_GET_TEXTMAP_VERSION_INFO
+        or databaseHelper.hasVoiceForTextHashDb is not _DEFAULT_DB_HAS_VOICE_FOR_TEXT_HASH
+        or databaseHelper.selectTextHashesWithKnownPrimarySource is not _DEFAULT_DB_SELECT_TEXT_HASHES_WITH_KNOWN_PRIMARY_SOURCE
+    )
+
+
+def _supports_fast_ranked_source_type(normalized_source_type: str | None) -> bool:
+    return (
+        normalized_source_type is None
+        or normalized_source_type in {"textmap", "unknown", "readable", "subtitle"}
+        or normalized_source_type in _get_db_filterable_source_types()
+    )
+
+
+def _lookup_known_primary_source_hashes(lookup_hashes: list[int]) -> set[int]:
+    if not lookup_hashes:
+        return set()
+    if len(lookup_hashes) <= 500:
+        return databaseHelper.selectTextHashesWithKnownPrimarySource(lookup_hashes)
+    matches: set[int] = set()
+    for start in range(0, len(lookup_hashes), 500):
+        matches.update(
+            databaseHelper.selectTextHashesWithKnownPrimarySource(lookup_hashes[start:start + 500])
+        )
+    return matches
+
+
+def _build_entry_sort_key(entry: dict, keyword_trim: str, langCode: int, is_hash_query: bool, hash_value: int | None) -> tuple[int, int, int, int]:
+    target_text = entry.get('translates', {}).get(str(langCode))
+    match_rank = _match_rank(target_text, keyword_trim, langCode)
+    normalized_hash = _coerce_optional_sort_int(entry.get('hash'))
+    exact_hash_hit = bool(is_hash_query and hash_value is not None and normalized_hash == hash_value)
+    primary_rank = min(match_rank, 0 if exact_hash_hit else 3)
+    voice_rank = 0 if entry.get('voicePaths') else 1
+    source_rank = 0 if _entry_has_known_primary_source(entry) else 1
+    hash_numeric_rank = normalized_hash if normalized_hash is not None else 10**12
+    return (primary_rank, voice_rank, source_rank, hash_numeric_rank)
+
+
+def _execute_ranked_keyword_search_fast(
+    keyword: str,
+    keyword_trim: str,
+    langCode: int,
+    safe_page: int,
+    safe_size: int,
+    voice_filter: str,
+    hash_value: int | None,
+    is_hash_query: bool,
+    hash_obj: dict | None,
+    include_hash_extra: bool,
+    text_hashes_seen: set[int],
+    langs: list[int],
+    sourceLangCode: int,
+    langStr: str | None,
+    targetLangStrs: list[str],
+    strToLangId: dict[str, int],
+    prefix_labels: dict[str, str],
+    created_version_filter: str | None,
+    updated_version_filter: str | None,
+    normalized_source_type: str | None,
+) -> tuple[list[dict], int]:
+    candidate_limit = max(safe_size, safe_page * safe_size)
+    effective_voice_filter = None if voice_filter == "all" else voice_filter
+    effective_lang_list = _resolve_text_hash_info_lang_list(langs, sourceLangCode)
+    has_search_lang_textmap = langCode in effective_lang_list
+    has_search_lang_non_textmap = langCode in (langs or [])
+
+    if include_hash_extra and hash_obj is not None:
+        if normalized_source_type in {"voice", "story"}:
+            hash_obj['_preferredSourceType'] = normalized_source_type
+        if hash_value is not None:
+            text_hashes_seen.add(hash_value)
+
+    raw_textmap_rows: list[tuple] = []
+    readable_contents: list[tuple] = []
+    subtitle_contents: list[tuple] = []
+    total = 0
+
+    if normalized_source_type == "textmap":
+        raw_textmap_rows, base_total = databaseHelper.selectTextMapFromKeywordPagedWithCount(
+            keyword,
+            langCode,
+            candidate_limit,
+            0,
+            hash_value if is_hash_query else None,
+            effective_voice_filter,
+            created_version_filter,
+            updated_version_filter,
+        )
+        total = base_total + (1 if include_hash_extra else 0)
+
+    elif normalized_source_type == "unknown":
+        raw_textmap_rows, base_total = databaseHelper.selectUnknownTextMapFromKeywordPagedWithCount(
+            keyword,
+            langCode,
+            candidate_limit,
+            0,
+            hash_value if is_hash_query else None,
+            effective_voice_filter,
+            created_version_filter,
+            updated_version_filter,
+        )
+        total = base_total + (1 if include_hash_extra else 0)
+
+    elif normalized_source_type in _get_db_filterable_source_types():
+        db_source_type = normalized_source_type or ""
+        if effective_voice_filter is None:
+            raw_textmap_rows, base_total = databaseHelper.selectTextMapFromKeywordBySourceTypeWithCount(
+                keyword,
+                langCode,
+                db_source_type,
+                candidate_limit,
+                0,
+                created_version_filter,
+                updated_version_filter,
+            )
+            total = base_total + (1 if include_hash_extra else 0)
+        else:
+            unfiltered_rows = databaseHelper.selectTextMapFromKeywordBySourceType(
+                keyword,
+                langCode,
+                db_source_type,
+                candidate_limit * 3,
+                0,
+                created_version_filter,
+                updated_version_filter,
+            )
+            for row in unfiltered_rows:
+                text_hash = row[0]
+                if text_hash in text_hashes_seen:
+                    continue
+                text_hashes_seen.add(text_hash)
+                has_voice = databaseHelper.hasVoiceForTextHashDb(text_hash)
+                if (effective_voice_filter == "with" and not has_voice) or (
+                    effective_voice_filter == "without" and has_voice
+                ):
+                    continue
+                raw_textmap_rows.append(row)
+            total = len(raw_textmap_rows) + (1 if include_hash_extra else 0)
+
+    elif normalized_source_type == "readable":
+        if (effective_voice_filter is None or effective_voice_filter == "without") and langStr:
+            readable_contents, total = databaseHelper.selectReadableFromKeywordWithCount(
+                keyword,
+                langCode,
+                langStr,
+                candidate_limit,
+                None,
+                created_version_filter,
+                updated_version_filter,
+            )
+
+    elif normalized_source_type == "subtitle":
+        if effective_voice_filter is None or effective_voice_filter == "without":
+            subtitle_contents, total = databaseHelper.selectSubtitleFromKeywordWithCount(
+                keyword,
+                langCode,
+                candidate_limit,
+                None,
+                created_version_filter,
+                updated_version_filter,
+            )
+
+    else:
+        raw_textmap_rows, total_textmap = databaseHelper.selectTextMapFromKeywordPagedWithCount(
+            keyword,
+            langCode,
+            candidate_limit,
+            0,
+            hash_value if is_hash_query else None,
+            effective_voice_filter,
+            created_version_filter,
+            updated_version_filter,
+        )
+        total_readable = 0
+        total_subtitle = 0
+        if effective_voice_filter is None or effective_voice_filter == "without":
+            if langStr:
+                readable_contents, total_readable = databaseHelper.selectReadableFromKeywordWithCount(
+                    keyword,
+                    langCode,
+                    langStr,
+                    candidate_limit,
+                    None,
+                    created_version_filter,
+                    updated_version_filter,
+                )
+            subtitle_contents, total_subtitle = databaseHelper.selectSubtitleFromKeywordWithCount(
+                keyword,
+                langCode,
+                candidate_limit,
+                None,
+                created_version_filter,
+                updated_version_filter,
+            )
+        total = total_textmap + total_readable + total_subtitle + (1 if include_hash_extra else 0)
+
+    # Deduplicate raw textMap rows before pre-hydration ranking.
+    deduped_textmap_rows: list[tuple] = []
+    if normalized_source_type in _get_db_filterable_source_types() and effective_voice_filter is not None:
+        deduped_textmap_rows = raw_textmap_rows
+    else:
+        for row in raw_textmap_rows:
+            text_hash = row[0]
+            if text_hash in text_hashes_seen:
+                continue
+            text_hashes_seen.add(text_hash)
+            deduped_textmap_rows.append(row)
+
+    lookup_hashes: list[int] = []
+    lookup_seen: set[int] = set()
+    if include_hash_extra and hash_obj is not None and not _entry_has_known_primary_source(hash_obj):
+        coerced = _coerce_optional_sort_int(hash_obj.get("hash"))
+        if coerced is not None and coerced not in lookup_seen:
+            lookup_seen.add(coerced)
+            lookup_hashes.append(coerced)
+    if normalized_source_type != "unknown":
+        for text_hash, _content, _created_raw, _updated_raw in deduped_textmap_rows:
+            coerced = _coerce_optional_sort_int(text_hash)
+            if coerced is not None and coerced not in lookup_seen:
+                lookup_seen.add(coerced)
+                lookup_hashes.append(coerced)
+
+    known_source_hashes = _lookup_known_primary_source_hashes(lookup_hashes)
+
+    deferred: list[tuple[tuple[int, int, int, int], str, object]] = []
+    if include_hash_extra and hash_obj is not None:
+        if not _entry_has_known_primary_source(hash_obj):
+            coerced = _coerce_optional_sort_int(hash_obj.get("hash"))
+            if coerced is not None and coerced in known_source_hashes:
+                hash_obj["_hasKnownPrimarySource"] = True
+        deferred.append((
+            _build_entry_sort_key(hash_obj, keyword_trim, langCode, is_hash_query, hash_value),
+            "entry",
+            hash_obj,
+        ))
+
+    for text_hash, raw_content, _created_raw, _updated_raw in deduped_textmap_rows:
+        normalized_hash = _coerce_optional_sort_int(text_hash)
+        target_text = _normalize_text_map_content(raw_content, langCode) if has_search_lang_textmap else None
+        match_rank = _match_rank(target_text, keyword_trim, langCode)
+        exact_hash_hit = bool(is_hash_query and hash_value is not None and normalized_hash == hash_value)
+        primary_rank = min(match_rank, 0 if exact_hash_hit else 3)
+        voice_rank = 0 if databaseHelper.hasVoiceForTextHashDb(text_hash) else 1
+        source_rank = 0 if (normalized_hash is not None and normalized_hash in known_source_hashes) else 1
+        hash_numeric_rank = normalized_hash if normalized_hash is not None else 10**12
+        deferred.append((
+            (primary_rank, voice_rank, source_rank, hash_numeric_rank),
+            "textmap",
+            text_hash,
+        ))
+
+    for row in readable_contents:
+        fileName, content, _titleTextMapHash, _readableId, _created_raw, _updated_raw = row
+        file_hash = zlib.crc32(fileName.encode('utf-8'))
+        target_text = _normalize_text_map_content(content, langCode) if has_search_lang_non_textmap else None
+        match_rank = _match_rank(target_text, keyword_trim, langCode)
+        exact_hash_hit = bool(is_hash_query and hash_value is not None and file_hash == hash_value)
+        primary_rank = min(match_rank, 0 if exact_hash_hit else 3)
+        deferred.append(((primary_rank, 1, 0, file_hash), "readable", row))
+
+    for row in subtitle_contents:
+        fileName, content, startTime, _endTime, _subtitleId, _created_raw, _updated_raw = row
+        file_hash = zlib.crc32(f"{fileName}_{startTime}".encode('utf-8'))
+        target_text = _normalize_text_map_content(content, langCode) if has_search_lang_non_textmap else None
+        match_rank = _match_rank(target_text, keyword_trim, langCode)
+        exact_hash_hit = bool(is_hash_query and hash_value is not None and file_hash == hash_value)
+        primary_rank = min(match_rank, 0 if exact_hash_hit else 3)
+        deferred.append(((primary_rank, 1, 0, file_hash), "subtitle", row))
+
+    deferred.sort(key=lambda item: item[0])
+    start = (safe_page - 1) * safe_size
+    end = start + safe_size
+    sliced = deferred[start:end]
+
+    sliced_textmap_hashes = [payload for _sort_key, kind, payload in sliced if kind == "textmap"]
+    hydrated_by_hash: dict[int, dict] = {}
+    if sliced_textmap_hashes:
+        preferred_source = normalized_source_type if normalized_source_type in {"voice", "story"} else None
+        for entry in queryTextHashInfoBatch(sliced_textmap_hashes, langs, sourceLangCode, queryOrigin=False):
+            if preferred_source:
+                entry['_preferredSourceType'] = preferred_source
+            coerced = _coerce_optional_sort_int(entry.get("hash"))
+            if coerced is not None and coerced in known_source_hashes:
+                entry['_hasKnownPrimarySource'] = True
+            hydrated_by_hash[entry['hash']] = entry
+
+    results: list[dict] = []
+    for _sort_key, kind, payload in sliced:
+        if kind == "entry":
+            results.append(payload)  # type: ignore[arg-type]
+        elif kind == "textmap":
+            results.append(hydrated_by_hash[payload])  # type: ignore[index]
+        elif kind == "readable":
+            fileName, content, titleTextMapHash, readableId, created_raw, updated_raw = payload  # type: ignore[misc]
+            results.append(
+                _build_readable_obj(
+                    fileName,
+                    content,
+                    titleTextMapHash,
+                    readableId,
+                    created_raw,
+                    updated_raw,
+                    sourceLangCode,
+                    langCode,
+                    targetLangStrs,
+                    strToLangId,
+                    prefix_labels,
+                    isSearchPhase=True,
+                )
+            )
+        else:
+            fileName, content, startTime, endTime, subtitleId, created_raw, updated_raw = payload  # type: ignore[misc]
+            results.append(
+                _build_subtitle_obj(
+                    fileName,
+                    content,
+                    startTime,
+                    endTime,
+                    subtitleId,
+                    created_raw,
+                    updated_raw,
+                    langs,
+                )
+            )
+    return results, total
+
+
 def _handle_all_voice_filter_ranked(keyword, keyword_trim, langCode, safe_page, safe_size, hash_value, is_hash_query, hash_obj, hash_extra, text_hashes_seen, langs, sourceLangCode, langStr, targetLangStrs, strToLangId, prefix_labels, created_version_filter, updated_version_filter, source_type_filter=None):
     normalized_source_type = _normalize_source_type_filter(source_type_filter)
     candidate_limit = max(safe_size, safe_page * safe_size)
@@ -2620,6 +3045,31 @@ def _handle_all_voice_filter_ranked(keyword, keyword_trim, langCode, safe_page, 
             hash_obj,
         )
     )
+    include_hash_extra = bool(hash_extra and hash_obj is not None and hash_matches_source_type)
+
+    if not _ranked_seams_patched() and _supports_fast_ranked_source_type(normalized_source_type):
+        return _execute_ranked_keyword_search_fast(
+            keyword=keyword,
+            keyword_trim=keyword_trim,
+            langCode=langCode,
+            safe_page=safe_page,
+            safe_size=safe_size,
+            voice_filter="all",
+            hash_value=hash_value,
+            is_hash_query=is_hash_query,
+            hash_obj=hash_obj,
+            include_hash_extra=include_hash_extra,
+            text_hashes_seen=text_hashes_seen,
+            langs=langs,
+            sourceLangCode=sourceLangCode,
+            langStr=langStr,
+            targetLangStrs=targetLangStrs,
+            strToLangId=strToLangId,
+            prefix_labels=prefix_labels,
+            created_version_filter=created_version_filter,
+            updated_version_filter=updated_version_filter,
+            normalized_source_type=normalized_source_type,
+        )
 
     if hash_extra and hash_obj is not None and hash_matches_source_type:
         if normalized_source_type in {"voice", "story"}:
@@ -2780,6 +3230,30 @@ def _handle_specific_voice_filter_ranked(keyword, keyword_trim, langCode, safe_p
             voice_filter == "without" and not hash_has_voice
         ):
             hash_extra_filtered = hash_matches_source_type
+
+    if not _ranked_seams_patched() and _supports_fast_ranked_source_type(normalized_source_type):
+        return _execute_ranked_keyword_search_fast(
+            keyword=keyword,
+            keyword_trim=keyword_trim,
+            langCode=langCode,
+            safe_page=safe_page,
+            safe_size=safe_size,
+            voice_filter=voice_filter,
+            hash_value=hash_value,
+            is_hash_query=is_hash_query,
+            hash_obj=hash_obj,
+            include_hash_extra=hash_extra_filtered,
+            text_hashes_seen=text_hashes_seen,
+            langs=langs,
+            sourceLangCode=sourceLangCode,
+            langStr=langStr,
+            targetLangStrs=targetLangStrs,
+            strToLangId=strToLangId,
+            prefix_labels=prefix_labels,
+            created_version_filter=created_version_filter,
+            updated_version_filter=updated_version_filter,
+            normalized_source_type=normalized_source_type,
+        )
 
     candidate_limit = max(safe_size, safe_page * safe_size)
     candidates = []
@@ -3226,6 +3700,8 @@ def searchNameEntries(
             entry["contentPreview"] = content_preview
         return entry
 
+    batch_chapters = databaseHelper.getQuestChapterName is _DEFAULT_DB_GET_QUEST_CHAPTER_NAME
+    chapter_resolved_ids: set[int] = set()
     quest_map = {}
     if keyword_trim:
         questMatches = databaseHelper.selectQuestByTitleKeyword(
@@ -3236,7 +3712,7 @@ def searchNameEntries(
             quest_source_type_filter,
         )
         for questId, questTitle, source_type, created_raw, updated_raw in questMatches:
-            chapterName = databaseHelper.getQuestChapterName(questId, langCode)
+            chapterName = None if batch_chapters else databaseHelper.getQuestChapterName(questId, langCode)
             quest_map[questId] = {
                 "questId": questId,
                 "title": questTitle,
@@ -3256,6 +3732,7 @@ def searchNameEntries(
             if questId in quest_map:
                 continue
             chapterName = format_chapter_name(chapterNum, chapterTitle)
+            chapter_resolved_ids.add(questId)
             quest_map[questId] = {
                 "questId": questId,
                 "title": questTitle,
@@ -3273,7 +3750,7 @@ def searchNameEntries(
         for questId, questTitle, source_type, created_raw, updated_raw in questIdMatches:
             if questId in quest_map:
                 continue
-            chapterName = databaseHelper.getQuestChapterName(questId, langCode)
+            chapterName = None if batch_chapters else databaseHelper.getQuestChapterName(questId, langCode)
             quest_map[questId] = {
                 "questId": questId,
                 "title": questTitle,
@@ -3296,7 +3773,7 @@ def searchNameEntries(
                 if not quest_map[questId].get("contentMatchType"):
                     quest_map[questId]["contentMatchType"] = "description" if best_rank == 0 else "dialogue"
                 continue
-            chapterName = databaseHelper.getQuestChapterName(questId, langCode)
+            chapterName = None if batch_chapters else databaseHelper.getQuestChapterName(questId, langCode)
             resolved_title = questTitle or _get_text_map_content_with_fallback(
                 title_hash,
                 langCode,
@@ -3320,7 +3797,7 @@ def searchNameEntries(
                 quest_source_type_filter,
             )
             for questId, questTitle, source_type, created_raw, updated_raw in questMatches:
-                chapterName = databaseHelper.getQuestChapterName(questId, langCode)
+                chapterName = None if batch_chapters else databaseHelper.getQuestChapterName(questId, langCode)
                 quest_map[questId] = {
                     "questId": questId,
                     "title": questTitle,
@@ -3339,7 +3816,7 @@ def searchNameEntries(
             quest_source_type_filter,
         )
         for questId, questTitle, source_type, created_raw, updated_raw in speakerMatches:
-            chapterName = databaseHelper.getQuestChapterName(questId, langCode)
+            chapterName = None if batch_chapters else databaseHelper.getQuestChapterName(questId, langCode)
             speaker_quest_map[questId] = {
                 "questId": questId,
                 "title": questTitle,
@@ -3365,7 +3842,7 @@ def searchNameEntries(
             for questId, questTitle, source_type, created_raw, updated_raw in specialMatches:
                 if questId in speaker_quest_map:
                     continue
-                chapterName = databaseHelper.getQuestChapterName(questId, langCode)
+                chapterName = None if batch_chapters else databaseHelper.getQuestChapterName(questId, langCode)
                 speaker_quest_map[questId] = {
                     "questId": questId,
                     "title": questTitle,
@@ -3383,11 +3860,24 @@ def searchNameEntries(
         else:
             quest_map = speaker_quest_map
 
-    quests.extend(
+    visible_quests = [
         entry
         for questId, entry in quest_map.items()
         if not should_skip_quest(questId) and _has_visible_quest_card_content(entry)
-    )
+    ]
+    if batch_chapters and visible_quests:
+        missing_chapter_ids = [
+            entry["questId"]
+            for entry in visible_quests
+            if entry["questId"] not in chapter_resolved_ids
+        ]
+        if missing_chapter_ids:
+            chapter_names = databaseHelper.getQuestChapterNamesBatch(missing_chapter_ids, langCode)
+            for entry in visible_quests:
+                qid = entry["questId"]
+                if qid not in chapter_resolved_ids and qid in chapter_names:
+                    entry["chapterName"] = chapter_names[qid]
+    quests.extend(visible_quests)
 
     langMap = databaseHelper.getLangCodeMap()
     if (
@@ -4253,22 +4743,36 @@ def searchCatalog(keyword: str, langCode: int, sourceTypeCode: int | None = None
     import time
     start = time.time()
     offset = (max(1, page) - 1) * pageSize
-    rows = databaseHelper.selectCatalogEntities(
-        keyword, langCode,
-        source_type_code=sourceTypeCode,
-        sub_category=subCategory,
-        limit=pageSize,
-        offset=offset,
-        created_version=createdVersion,
-        updated_version=updatedVersion,
-    )
-    total = databaseHelper.countCatalogEntities(
-        keyword, langCode,
-        source_type_code=sourceTypeCode,
-        sub_category=subCategory,
-        created_version=createdVersion,
-        updated_version=updatedVersion,
-    )
+    if (
+        databaseHelper.selectCatalogEntities is _DEFAULT_DB_SELECT_CATALOG_ENTITIES
+        and databaseHelper.countCatalogEntities is _DEFAULT_DB_COUNT_CATALOG_ENTITIES
+    ):
+        rows, total = databaseHelper.selectCatalogEntitiesWithCount(
+            keyword, langCode,
+            source_type_code=sourceTypeCode,
+            sub_category=subCategory,
+            limit=pageSize,
+            offset=offset,
+            created_version=createdVersion,
+            updated_version=updatedVersion,
+        )
+    else:
+        rows = databaseHelper.selectCatalogEntities(
+            keyword, langCode,
+            source_type_code=sourceTypeCode,
+            sub_category=subCategory,
+            limit=pageSize,
+            offset=offset,
+            created_version=createdVersion,
+            updated_version=updatedVersion,
+        )
+        total = databaseHelper.countCatalogEntities(
+            keyword, langCode,
+            source_type_code=sourceTypeCode,
+            sub_category=subCategory,
+            created_version=createdVersion,
+            updated_version=updatedVersion,
+        )
     results = []
     for entity_id, stc, title_hash, sub_cat, title_text, created_raw, updated_raw in rows:
         _, source_label = _get_entity_source_meta(stc)
@@ -4622,3 +5126,30 @@ def searchAvatarVoicesByFilters(
     return {
         "voices": voices
     }
+
+
+_DEFAULT_QUERY_TEXT_HASH_INFO = queryTextHashInfo
+_DEFAULT_SELECT_VOICE_PATH_FROM_TEXT_HASH = selectVoicePathFromTextHash
+_DEFAULT_COUNT_TEXTMAP_CACHED = _count_textmap_from_keyword_cached
+_DEFAULT_COUNT_TEXTMAP_VOICE_CACHED = _count_textmap_from_keyword_voice_cached
+_DEFAULT_COUNT_READABLE_CACHED = _count_readable_from_keyword_cached
+_DEFAULT_COUNT_SUBTITLE_CACHED = _count_subtitle_from_keyword_cached
+_DEFAULT_COUNT_DIALOGUE_BY_TALKER_AND_KEYWORD_CACHED = _count_dialogue_by_talker_and_keyword_cached
+_DEFAULT_DB_SELECT_TEXTMAP_PAGED = databaseHelper.selectTextMapFromKeywordPaged
+_DEFAULT_DB_COUNT_TEXTMAP = databaseHelper.countTextMapFromKeyword
+_DEFAULT_DB_COUNT_TEXTMAP_VOICE = databaseHelper.countTextMapFromKeywordVoice
+_DEFAULT_DB_SELECT_TEXTMAP_BY_SOURCE_TYPE = databaseHelper.selectTextMapFromKeywordBySourceType
+_DEFAULT_DB_COUNT_TEXTMAP_BY_SOURCE_TYPE = databaseHelper.countTextMapFromKeywordBySourceType
+_DEFAULT_DB_SELECT_READABLE_FROM_KEYWORD = databaseHelper.selectReadableFromKeyword
+_DEFAULT_DB_COUNT_READABLE_FROM_KEYWORD = databaseHelper.countReadableFromKeyword
+_DEFAULT_DB_SELECT_SUBTITLE_FROM_KEYWORD = databaseHelper.selectSubtitleFromKeyword
+_DEFAULT_DB_COUNT_SUBTITLE_FROM_KEYWORD = databaseHelper.countSubtitleFromKeyword
+_DEFAULT_DB_SELECT_TEXTMAP_FROM_TEXT_HASH = databaseHelper.selectTextMapFromTextHash
+_DEFAULT_DB_GET_TEXTMAP_VERSION_INFO = databaseHelper.getTextMapVersionInfo
+_DEFAULT_DB_HAS_VOICE_FOR_TEXT_HASH = databaseHelper.hasVoiceForTextHashDb
+_DEFAULT_DB_SELECT_TEXT_HASHES_WITH_KNOWN_PRIMARY_SOURCE = databaseHelper.selectTextHashesWithKnownPrimarySource
+_DEFAULT_DB_SELECT_DIALOGUE_BY_TALKER_AND_KEYWORD = databaseHelper.selectDialogueByTalkerAndKeyword
+_DEFAULT_DB_COUNT_DIALOGUE_BY_TALKER_AND_KEYWORD = databaseHelper.countDialogueByTalkerAndKeyword
+_DEFAULT_DB_GET_QUEST_CHAPTER_NAME = databaseHelper.getQuestChapterName
+_DEFAULT_DB_SELECT_CATALOG_ENTITIES = databaseHelper.selectCatalogEntities
+_DEFAULT_DB_COUNT_CATALOG_ENTITIES = databaseHelper.countCatalogEntities
