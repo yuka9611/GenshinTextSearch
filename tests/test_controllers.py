@@ -226,6 +226,13 @@ class TestSourceTypeFilter:
         entry = {"primarySource": {"sourceType": source_type}}
         assert controllers._matches_source_type_filter(entry, "costume") is True
 
+    def test_map_source_type_filter_and_alias_normalization(self):
+        assert controllers._normalize_source_type_filter("地图") == "map"
+        assert "map" in controllers._DB_FILTERABLE_SOURCE_TYPES_BUILTIN
+        assert controllers._matches_source_type_filter({"primarySource": {"sourceType": "map"}}, "map") is True
+        assert controllers._matches_source_type_filter({"primarySource": {"sourceType": "map"}}, "地图") is True
+        assert controllers._matches_source_type_filter({"primarySource": {"sourceType": "viewpoint"}}, "map") is False
+
     def test_matches_source_type_filter_unknown_uses_known_source_flag(self):
         assert controllers._matches_source_type_filter({"hash": 101}, "unknown") is True
         assert controllers._matches_source_type_filter(
@@ -1303,6 +1310,60 @@ class TestCatalogMeta:
             "label": "其他",
         }
 
+    def test_catalog_meta_and_db_helper_aggregate_map_source_codes(self, monkeypatch):
+        main_cats = controllers.getCatalogMainCategories()
+        sub_cats = controllers.getCatalogSubCategories()
+        assert main_cats["31"] == "地图"
+        assert sum(1 for v in main_cats.values() if v == "地图") == 1
+        assert sub_cats["38"] == "区域地名"
+        assert sub_cats["39"] == "地区与子地图"
+        assert sub_cats["40"] == "分层地图"
+        assert sub_cats["41"] == "国家与神像"
+        assert sub_cats["42"] == "地图标点"
+
+        assert controllers.databaseHelper._expand_qianxing_source_type_codes(31) == (31, 32, 33, 34, 35)
+        assert controllers.databaseHelper._display_catalog_source_type_code(35) == 31
+        join_clause, params = controllers.databaseHelper._build_source_type_join("map")
+        assert "text_source_entity" in join_clause and params == [31, 32, 33, 34, 35]
+        small_from, small_expr, small_params = controllers.databaseHelper._build_small_source_driven_join("map")
+        assert "text_source_entity" in small_from and small_expr == "_sj.text_hash"
+        assert small_params == [31, 32, 33, 34, 35]
+
+        conn = sqlite3.connect(":memory:")
+        try:
+            conn.executescript(
+                """
+                CREATE TABLE text_source_entity (
+                    text_hash INTEGER NOT NULL,
+                    source_type_code INTEGER NOT NULL,
+                    entity_id INTEGER NOT NULL,
+                    title_hash INTEGER NOT NULL,
+                    extra INTEGER NOT NULL DEFAULT 0,
+                    sub_category INTEGER NOT NULL DEFAULT 0
+                );
+                """
+            )
+            conn.executemany(
+                "INSERT INTO text_source_entity(text_hash, source_type_code, entity_id, title_hash, extra, sub_category) VALUES (?, ?, ?, ?, ?, ?)",
+                [
+                    (101, 31, 1100, 101, 5, 38),
+                    (102, 32, 7, 102, 5, 39),
+                    (103, 33, 3110101, 103, 5, 40),
+                    (104, 34, 1, 104, 5, 41),
+                    (105, 35, 1001, 105, 5, 42),
+                ],
+            )
+            monkeypatch.setattr(controllers.databaseHelper, "conn", conn)
+            assert controllers.databaseHelper.selectCatalogCategoryPairs() == [
+                (31, 38),
+                (31, 39),
+                (31, 40),
+                (31, 41),
+                (31, 42),
+            ]
+        finally:
+            conn.close()
+
 
 class TestEntityTexts:
     def test_get_entity_texts_returns_missing_body_with_top_level_versions(self, monkeypatch):
@@ -1419,6 +1480,51 @@ class TestEntityTexts:
                 "text": {"translates": {"1": "造成2点物理伤害。"}},
             }
         ]
+
+    def test_get_entity_texts_labels_map_fields_properly(self, monkeypatch):
+        title_map = {1001: "蒙德", 2001: "渊下宫"}
+        monkeypatch.setattr(controllers.config, "getResultLanguages", lambda: [1])
+        monkeypatch.setattr(controllers.config, "getSourceLanguage", lambda: 1)
+        monkeypatch.setattr(
+            controllers.databaseHelper,
+            "getCatalogEntityVersionInfo",
+            lambda source_type_code, entity_id, version_lang_code=None: (None, None),
+        )
+        monkeypatch.setattr(
+            controllers,
+            "_get_text_map_content_with_fallback",
+            lambda text_hash, *args, **kwargs: title_map.get(text_hash),
+        )
+        monkeypatch.setattr(
+            controllers,
+            "queryTextHashInfo",
+            lambda text_hash, *args, **kwargs: {"translates": {"1": f"text-{text_hash}"}},
+        )
+        monkeypatch.setattr(controllers, "_collect_entity_readable_entries", lambda *args, **kwargs: [])
+
+        monkeypatch.setattr(
+            controllers.databaseHelper,
+            "selectEntityTextHashesByEntity",
+            lambda source_type_code, entity_id: [
+                (1001, 1001, 5, 41),
+                (1002, 1001, 4, 41),
+                (1003, 1001, 1, 41),
+            ],
+        )
+        city_res = controllers.getEntityTexts(34, 1, searchLang=1)
+        assert [e["fieldLabel"] for e in city_res["entries"]] == ["名称", "神像名称", "描述"]
+
+        monkeypatch.setattr(
+            controllers.databaseHelper,
+            "selectEntityTextHashesByEntity",
+            lambda source_type_code, entity_id: [
+                (2001, 2001, 5, 39),
+                (2002, 2001, 3, 39),
+                (2003, 2001, 1, 39),
+            ],
+        )
+        tag_res = controllers.getEntityTexts(32, 7, searchLang=1)
+        assert [e["fieldLabel"] for e in tag_res["entries"]] == ["名称", "别称 / 补充", "描述"]
 
     def test_build_entity_source_payload_marks_unisex_costume(self, monkeypatch):
         monkeypatch.setattr(controllers, "_get_entity_source_meta", lambda code: ("costume", "千星奇域"))

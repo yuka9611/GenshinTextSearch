@@ -398,6 +398,7 @@ def _normalize_source_type_filter(source_type: str | None) -> str | None:
         "观景点": "viewpoint",
         "秘境": "dungeon",
         "过场提示": "loading_tip",
+        "地图": "map",
     }
     return alias_map.get(normalized, normalized)
 
@@ -453,7 +454,7 @@ _DB_FILTERABLE_SOURCE_TYPES_BUILTIN: frozenset[str] = frozenset({
     "blueprint", "gcg", "namecard", "performance",
     "avatar_intro", "dressing", "music_theme", "other_mat",
     "avatar_mat", "achievement", "viewpoint", "dungeon",
-    "loading_tip",
+    "loading_tip", "map",
 })
 
 
@@ -494,6 +495,11 @@ _ENTITY_SOURCE_META = {
     28: ("qianxing_pose", "千星奇域"),
     29: ("qianxing_effect", "千星奇域"),
     30: ("qianxing_hall", "千星奇域"),
+    31: ("map", "地图"),
+    32: ("map", "地图"),
+    33: ("map", "地图"),
+    34: ("map", "地图"),
+    35: ("map", "地图"),
 }
 
 _QIANXING_SOURCE_TYPES = frozenset({
@@ -531,9 +537,14 @@ _ENTITY_SOURCE_PRIORITY = {
     24: 23,
     25: 24,
     26: 25,
-    21: 26,
-    4: 27,
-    1: 28,
+    31: 26,
+    32: 27,
+    33: 28,
+    34: 29,
+    35: 30,
+    21: 31,
+    4: 32,
+    1: 33,
 }
 
 
@@ -599,6 +610,13 @@ _SUB_CATEGORY_LABELS: dict[int, str] = {
     33: "特效",
     34: "大厅设施",
     35: "角色技能",
+    36: "TPS武器配件图纸",
+    37: "TPS披风升级",
+    38: "区域地名",
+    39: "地区与子地图",
+    40: "分层地图",
+    41: "国家与神像",
+    42: "地图标点",
 }
 
 _CATALOG_OTHER_SUB_CATEGORY_CODE = "0"
@@ -1260,6 +1278,14 @@ def _build_entity_detail_payload(
                 5: "技能名",
             }
             field_label = field_label_map.get(field_code, "技能描述")
+        elif source_type == "map":
+            field_label_map = {
+                1: "描述",
+                3: "别称 / 补充",
+                4: "神像名称" if _sub_category == 41 else "类型",
+                5: "名称",
+            }
+            field_label = field_label_map.get(field_code, "描述")
         else:
             field_label_map = {
                 1: "描述",

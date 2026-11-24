@@ -177,6 +177,7 @@ const sourceTypeLabel = computed(() => {
         viewpoint: "观景点",
         dungeon: "秘境",
         loading_tip: "过场提示",
+        map: "地图",
         unknown: "未归类",
     };
     return map[sourceType] || UI_TEXT.source;
@@ -442,6 +443,7 @@ const showUpdatedVersionTag = () => {
 .entry-with-strip[data-source-type="reliquary"]::before { background: #7a5cb5; }
 .entry-with-strip[data-source-type="item"]::before,
 .entry-with-strip[data-source-type="material"]::before { background: var(--theme-accent); }
+.entry-with-strip[data-source-type="map"]::before { background: #3f8a6e; }
 
 .info {
     font-size: 14px;
@@ -572,6 +574,10 @@ const showUpdatedVersionTag = () => {
 .entry[data-source-type="subtitle"] .sourceType {
     background: rgba(92, 127, 88, 0.12);
     color: #5c7f58;
+}
+.entry[data-source-type="map"] .sourceType {
+    background: rgba(63, 138, 110, 0.12);
+    color: #3f8a6e;
 }
 
 
@@ -785,6 +791,10 @@ const showUpdatedVersionTag = () => {
 [data-theme="dark"] .entry[data-source-type="subtitle"] .sourceType {
     background: rgba(92, 127, 88, 0.18);
     color: #7aa075;
+}
+[data-theme="dark"] .entry[data-source-type="map"] .sourceType {
+    background: rgba(104, 181, 151, 0.18);
+    color: #68b597;
 }
 [data-theme="dark"] .versionTag.created {
     color: var(--theme-success);

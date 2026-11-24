@@ -3870,6 +3870,12 @@ _ENTITY_SNAPSHOT_FILE_KEYS = {
     "GCGSkillExcelConfigData.json": "gcg_skills",
     "GCGKeywordExcelConfigData.json": "gcg_keywords",
     "GCGElementExcelConfigData.json": "gcg_elements",
+    "WorldAreaConfigData.json": "world_areas",
+    "MapTagDataConfigData.json": "map_tags",
+    "MapCrossSceneConfigData.json": "map_cross_scenes",
+    "MapLayerFloorExcelConfigData.json": "map_layer_floors",
+    "CityConfigData.json": "cities",
+    "ManualTextMapConfigData.json": "manual_text_maps",
 }
 
 
@@ -3910,6 +3916,12 @@ def _load_entity_snapshot_data(repo_path: str, commit_sha: str) -> dict[str, obj
         "gcg_skills": rows_by_key.get("gcg_skills", []),
         "gcg_keywords": rows_by_key.get("gcg_keywords", []),
         "gcg_elements": rows_by_key.get("gcg_elements", []),
+        "world_areas": rows_by_key.get("world_areas", []),
+        "map_tags": rows_by_key.get("map_tags", []),
+        "map_cross_scenes": rows_by_key.get("map_cross_scenes", []),
+        "map_layer_floors": rows_by_key.get("map_layer_floors", []),
+        "cities": rows_by_key.get("cities", []),
+        "manual_text_maps": rows_by_key.get("manual_text_maps", []),
         "describe_title_map": entitySourceImport._build_describe_title_map(
             rows_by_key.get("animal_describes", []),
             rows_by_key.get("monster_describes", []),

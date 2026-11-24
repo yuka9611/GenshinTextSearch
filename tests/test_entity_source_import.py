@@ -1694,3 +1694,149 @@ def test_7_2_hall_aliases_preserve_public_template_text():
 def test_7_2_hall_facility_style_ignores_other_numeric_field():
     assert entitySourceImport.get_hall_facility_style_id({"GIHBGKOICBD": 12, "AKGIGJGJJAK": 1}) == 12
     assert entitySourceImport.get_hall_facility_style_id({"AKGIGJGJJAK": 1}) is None
+
+
+def test_map_excel_sources_are_tracked_in_entity_diff_and_history():
+    expected = {
+        "WorldAreaConfigData.json",
+        "MapTagDataConfigData.json",
+        "MapCrossSceneConfigData.json",
+        "MapLayerFloorExcelConfigData.json",
+        "CityConfigData.json",
+        "ManualTextMapConfigData.json",
+    }
+    assert expected.issubset(set(entitySourceImport._ENTITY_EXCEL_FILES))
+    assert set(history_backfill._ENTITY_SNAPSHOT_FILE_KEYS) == set(
+        entitySourceImport._ENTITY_EXCEL_FILES
+    )
+
+
+def test_world_area_mappings_support_legacy_current_and_fallback_keys():
+    rows = [
+        {"id": 1100, "areaNameTextMapHash": 124522774, "OOCGHJKMLAJ": 1333393882},
+        {"ID": 1102, "AreaNameTextMapHash": 2290453598, "ENDJIAGANPH": 1382294882, "ZZZFLAG": True},
+        {"id": 60203, "areaNameTextMapHash": 3001, "FUTUREALTBC": 300200, "SOMEBOOLKEY": True},
+    ]
+    result = list(entitySourceImport._iter_world_area_mappings(rows))
+    assert result == [
+        (124522774, entitySourceImport.SOURCE_TYPE_MAP_AREA, 1100, 124522774, entitySourceImport._pack_extra(entitySourceImport.FIELD_TITLE), entitySourceImport.entity_constants.SUB_MAP_AREA),
+        (1333393882, entitySourceImport.SOURCE_TYPE_MAP_AREA, 1100, 124522774, entitySourceImport._pack_extra(entitySourceImport.FIELD_SPECIAL_DESC), entitySourceImport.entity_constants.SUB_MAP_AREA),
+        (2290453598, entitySourceImport.SOURCE_TYPE_MAP_AREA, 1102, 2290453598, entitySourceImport._pack_extra(entitySourceImport.FIELD_TITLE), entitySourceImport.entity_constants.SUB_MAP_AREA),
+        (1382294882, entitySourceImport.SOURCE_TYPE_MAP_AREA, 1102, 2290453598, entitySourceImport._pack_extra(entitySourceImport.FIELD_SPECIAL_DESC), entitySourceImport.entity_constants.SUB_MAP_AREA),
+        (3001, entitySourceImport.SOURCE_TYPE_MAP_AREA, 60203, 3001, entitySourceImport._pack_extra(entitySourceImport.FIELD_TITLE), entitySourceImport.entity_constants.SUB_MAP_AREA),
+        (300200, entitySourceImport.SOURCE_TYPE_MAP_AREA, 60203, 3001, entitySourceImport._pack_extra(entitySourceImport.FIELD_SPECIAL_DESC), entitySourceImport.entity_constants.SUB_MAP_AREA),
+    ]
+
+
+def test_map_tag_and_cross_scene_merge_and_dedupe():
+    tags = [
+        {"id": 7, "nameTextMapHash": 1829417819, "nameWithRubyTextTextMapHash": 1002315050},
+        {"Id": 4, "NameTextMapHash": 706446364, "NameWithRubyTextTextMapHash": 706446364},
+    ]
+    cross_scenes = [
+        {"id": 2, "BEFAEFHLNFI": 7, "IMPBCOAAPBJ": 2845987677},
+    ]
+    result = list(entitySourceImport._iter_map_tag_mappings(tags, cross_scenes))
+    assert result == [
+        (1829417819, entitySourceImport.SOURCE_TYPE_MAP_TAG, 7, 1829417819, entitySourceImport._pack_extra(entitySourceImport.FIELD_TITLE), entitySourceImport.entity_constants.SUB_MAP_TAG),
+        (1002315050, entitySourceImport.SOURCE_TYPE_MAP_TAG, 7, 1829417819, entitySourceImport._pack_extra(entitySourceImport.FIELD_SPECIAL_DESC), entitySourceImport.entity_constants.SUB_MAP_TAG),
+        (2845987677, entitySourceImport.SOURCE_TYPE_MAP_TAG, 7, 1829417819, entitySourceImport._pack_extra(entitySourceImport.FIELD_DESC), entitySourceImport.entity_constants.SUB_MAP_TAG),
+        (706446364, entitySourceImport.SOURCE_TYPE_MAP_TAG, 4, 706446364, entitySourceImport._pack_extra(entitySourceImport.FIELD_TITLE), entitySourceImport.entity_constants.SUB_MAP_TAG),
+    ]
+
+
+def test_map_layer_floor_supports_known_aliases_and_rotating_key_fallback():
+    rows = [
+        {"id": 3110101, "DOKDHJAEKJK": -1, "KDDJALFKDCH": 31101, "CAMMHAFAMLA": 282263247, "CHMMFNIHJHG": 417561169, "AJIGCHPEMCM": {}},
+        {"id": 3210101, "XYZFLOORKKK": -1, "XYZGROUPKKK": 32101, "ABCFIRSTKEY": 111222333, "XYZSECNDKEY": 444555666, "EXTRAOBJKKK": {}},
+    ]
+    result = list(entitySourceImport._iter_map_layer_floor_mappings(rows))
+    assert result == [
+        (282263247, entitySourceImport.SOURCE_TYPE_MAP_LAYER, 3110101, 282263247, entitySourceImport._pack_extra(entitySourceImport.FIELD_TITLE), entitySourceImport.entity_constants.SUB_MAP_LAYER),
+        (417561169, entitySourceImport.SOURCE_TYPE_MAP_LAYER, 3110101, 282263247, entitySourceImport._pack_extra(entitySourceImport.FIELD_SPECIAL_DESC), entitySourceImport.entity_constants.SUB_MAP_LAYER),
+        (111222333, entitySourceImport.SOURCE_TYPE_MAP_LAYER, 3210101, 111222333, entitySourceImport._pack_extra(entitySourceImport.FIELD_TITLE), entitySourceImport.entity_constants.SUB_MAP_LAYER),
+        (444555666, entitySourceImport.SOURCE_TYPE_MAP_LAYER, 3210101, 111222333, entitySourceImport._pack_extra(entitySourceImport.FIELD_SPECIAL_DESC), entitySourceImport.entity_constants.SUB_MAP_LAYER),
+    ]
+
+
+def test_city_mappings_handle_5_5_aliases_and_filter_test_statues():
+    rows = [
+        {"cityId": 1, "CCOHMABLMMK": 3559383185, "KBHJDHJBDLB": 272562616, "CEBILCKGEDP": 3971725780},
+        {"cityId": 2, "HMCCGNFEKDA": 3553833321, "NPJLEAAGPDD": 2121291984, "JHMMPPKGNGA": 343060548},
+        {"CityId": 3, "CityNameTextMapHash": 2288905665, "CityGoddnessNameTextMapHash": 3937156496, "CityGoddnessDescTextMapHash": 770110860},
+        {"cityId": 9, "CCOHMABLMMK": 9001, "KBHJDHJBDLB": 9002, "CEBILCKGEDP": 9003},
+        {"cityId": 99, "CCOHMABLMMK": 9901, "KBHJDHJBDLB": 9902, "CEBILCKGEDP": 9903},
+        {"cityId": 100, "CCOHMABLMMK": 514439353, "KBHJDHJBDLB": 2033907088, "CEBILCKGEDP": 1624649972},
+    ]
+    result = list(entitySourceImport._iter_city_mappings(rows))
+    entity_ids = {row[2] for row in result}
+    assert entity_ids == {1, 2, 3, 100}
+    assert [row for row in result if row[2] == 100] == [
+        (514439353, entitySourceImport.SOURCE_TYPE_MAP_CITY, 100, 514439353, entitySourceImport._pack_extra(entitySourceImport.FIELD_TITLE), entitySourceImport.entity_constants.SUB_MAP_STATUE),
+    ]
+    assert [row for row in result if row[2] == 2] == [
+        (3553833321, entitySourceImport.SOURCE_TYPE_MAP_CITY, 2, 3553833321, entitySourceImport._pack_extra(entitySourceImport.FIELD_TITLE), entitySourceImport.entity_constants.SUB_MAP_STATUE),
+        (2121291984, entitySourceImport.SOURCE_TYPE_MAP_CITY, 2, 3553833321, entitySourceImport._pack_extra(entitySourceImport.FIELD_TYPE_DESC), entitySourceImport.entity_constants.SUB_MAP_STATUE),
+        (343060548, entitySourceImport.SOURCE_TYPE_MAP_CITY, 2, 3553833321, entitySourceImport._pack_extra(entitySourceImport.FIELD_DESC), entitySourceImport.entity_constants.SUB_MAP_STATUE),
+    ]
+
+
+def test_manual_map_mappings_pair_marks_filter_tests_and_avoid_area_id_collision():
+    rows = [
+        {"textMapId": "UI_MAP_City1_TITLE_1", "textMapContentTextMapHash": 3922567678},
+        {"TextMapId": "UI_MAP_AREA35_TITLE_1", "TextMapContentTextMapHash": 3417406915},
+        {"textMapId": "UI_MAPMARK_MarkPub_TITLE", "textMapContentTextMapHash": 2268549335},
+        {"textMapId": "UI_MAPMARK_MarkPub_DESC", "textMapContentTextMapHash": 2686215559},
+        {"textMapId": "UI_MAP_ADVENTURE_TITLE", "textMapContentTextMapHash": 170218525},
+        {"textMapId": "UI_MAP_ADVENTURE_DESC", "textMapContentTextMapHash": 2137379021},
+        {"textMapId": "UI_ROLE_COMBAT_MAPMARK_MAGIC_BOOK", "textMapContentTextMapHash": 6101},
+        {"textMapId": "UI_ROLE_COMBAT_MAPMARK_MAGIC_BOOK_DESC", "textMapContentTextMapHash": 6102},
+        {"textMapId": "UI_ROLE_COMBAT_MAPMARK_DESC", "textMapContentTextMapHash": 6202},
+        {"textMapId": "UI_MAPMARK_RoleCombat_TITLE", "textMapContentTextMapHash": 9991},
+        {"textMapId": "UI_MAPMARK_RoleCombat_DESC", "textMapContentTextMapHash": 9992},
+        {"textMapId": "UI_MAPMARK_HomeworldMainhouse_DESC", "textMapContentTextMapHash": 9993},
+        {"textMapId": "UI_MAPMARK_MarkMoonTransPointLocked_HINT", "textMapContentTextMapHash": 9994},
+    ]
+    result = list(entitySourceImport._iter_manual_map_mappings(rows))
+    hashes = {row[0] for row in result}
+    assert {9991, 9992, 9993, 9994}.isdisjoint(hashes)
+    area_rows = [row for row in result if row[1] == entitySourceImport.SOURCE_TYPE_MAP_AREA]
+    mark_rows = [row for row in result if row[1] == entitySourceImport.SOURCE_TYPE_MAP_MARK]
+    assert len(area_rows) == 2
+    assert all(row[2] >= 1_000_000_000 for row in area_rows)
+    assert len(mark_rows) == 7
+    assert all(row[5] == entitySourceImport.entity_constants.SUB_MAP_MARK for row in mark_rows)
+    assert result == list(entitySourceImport._iter_manual_map_mappings(rows))
+
+
+def test_map_entities_import_into_sqlite_without_pk_collisions():
+    connection = sqlite3.connect(":memory:")
+    try:
+        _create_entity_version_tables(connection)
+        data = {
+            "materials": [], "furnitures": [], "costumes": [], "suits": [],
+            "emojis": [], "poses": [], "effects": [], "halls": [], "hall_facilities": [],
+            "avatars": [], "avatar_skill_depots": [], "avatar_skills": [], "avatar_costumes": [],
+            "weapons": [], "tps_weapons": [], "tps_weapon_accessories": [], "reliquaries": [],
+            "codex": [], "achievements": [], "viewpoints": [], "dungeons": [], "loading_tips": [],
+            "gcg_cards": [], "gcg_chars": [], "gcg_skills": [],
+            "describe_title_map": {}, "codex_desc_map": {},
+            "world_areas": [{"id": 1, "areaNameTextMapHash": 10001}],
+            "map_tags": [{"id": 1, "nameTextMapHash": 10002}],
+            "map_cross_scenes": [{"id": 1, "BEFAEFHLNFI": 1, "IMPBCOAAPBJ": 10003}],
+            "map_layer_floors": [{"id": 1, "CAMMHAFAMLA": 10004}],
+            "cities": [{"cityId": 1, "CCOHMABLMMK": 10005, "KBHJDHJBDLB": 10006, "CEBILCKGEDP": 10007}],
+            "manual_text_maps": [
+                {"textMapId": "UI_MAP_City1_TITLE_1", "textMapContentTextMapHash": 10008},
+                {"textMapId": "UI_MAPMARK_MarkPub_TITLE", "textMapContentTextMapHash": 10009},
+                {"textMapId": "UI_MAPMARK_MarkPub_DESC", "textMapContentTextMapHash": 10010},
+            ],
+        }
+        rows = list(entitySourceImport._build_rows_iter(data, {}))
+        connection.executemany(
+            "INSERT INTO text_source_entity(text_hash, source_type_code, entity_id, title_hash, extra, sub_category, created_version_id) VALUES (?,?,?,?,?,?,NULL)",
+            rows,
+        )
+        assert connection.execute("SELECT COUNT(*) FROM text_source_entity").fetchone()[0] == len(rows)
+    finally:
+        connection.close()

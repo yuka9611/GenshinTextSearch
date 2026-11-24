@@ -3430,10 +3430,13 @@ _SOURCE_TYPE_TO_ENTITY_CODE = {
     "avatar_intro": 18, "dressing": 19, "music_theme": 20, "other_mat": 21,
     "avatar_mat": 22, "achievement": 23, "viewpoint": 24, "dungeon": 25,
     "loading_tip": 26,
+    "map": 31,
 }
 
 _QIANXING_SOURCE_TYPE_CODES: tuple[int, ...] = (5, 6, 27, 28, 29, 30)
 _QIANXING_DISPLAY_SOURCE_TYPE_CODE = 5
+_MAP_SOURCE_TYPE_CODES: tuple[int, ...] = (31, 32, 33, 34, 35)
+_MAP_DISPLAY_SOURCE_TYPE_CODE = 31
 
 
 def _expand_qianxing_source_type_codes(source_type_code: int | None) -> tuple[int, ...] | None:
@@ -3445,13 +3448,18 @@ def _expand_qianxing_source_type_codes(source_type_code: int | None) -> tuple[in
         return None
     if normalized == _QIANXING_DISPLAY_SOURCE_TYPE_CODE:
         return _QIANXING_SOURCE_TYPE_CODES
+    if normalized == _MAP_DISPLAY_SOURCE_TYPE_CODE:
+        return _MAP_SOURCE_TYPE_CODES
     return (normalized,)
 
 
 def _display_catalog_source_type_code(source_type_code: int) -> int:
-    if int(source_type_code) in _QIANXING_SOURCE_TYPE_CODES:
+    normalized = int(source_type_code)
+    if normalized in _QIANXING_SOURCE_TYPE_CODES:
         return _QIANXING_DISPLAY_SOURCE_TYPE_CODE
-    return int(source_type_code)
+    if normalized in _MAP_SOURCE_TYPE_CODES:
+        return _MAP_DISPLAY_SOURCE_TYPE_CODE
+    return normalized
 
 
 def _build_entity_source_join_clause(source_codes: tuple[int, ...]) -> tuple[str, list]:
@@ -3486,6 +3494,8 @@ def _build_source_type_join(source_type: str) -> tuple[str, list]:
         return "JOIN quest_hash_map _sj ON _sj.hash = tm.hash ", []
     elif source_type == "costume":
         return _build_entity_source_join_clause(_QIANXING_SOURCE_TYPE_CODES)
+    elif source_type == "map":
+        return _build_entity_source_join_clause(_MAP_SOURCE_TYPE_CODES)
     elif source_type in _SOURCE_TYPE_TO_ENTITY_CODE:
         code = _SOURCE_TYPE_TO_ENTITY_CODE[source_type]
         return _build_entity_source_join_clause((code,))
@@ -3518,6 +3528,13 @@ def _build_small_source_driven_join(source_type: str) -> tuple[str, str, list] |
             f"FROM (SELECT text_hash FROM text_source_entity WHERE source_type_code IN ({placeholders})) _sj ",
             "_sj.text_hash",
             list(_QIANXING_SOURCE_TYPE_CODES),
+        )
+    if source_type == "map":
+        placeholders = ",".join("?" for _ in _MAP_SOURCE_TYPE_CODES)
+        return (
+            f"FROM (SELECT text_hash FROM text_source_entity WHERE source_type_code IN ({placeholders})) _sj ",
+            "_sj.text_hash",
+            list(_MAP_SOURCE_TYPE_CODES),
         )
     if source_type in _SOURCE_TYPE_TO_ENTITY_CODE:
         code = _SOURCE_TYPE_TO_ENTITY_CODE[source_type]

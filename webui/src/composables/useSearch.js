@@ -48,6 +48,7 @@ const useSearch = () => {
     { value: 'viewpoint', label: '观景点' },
     { value: 'dungeon', label: '秘境' },
     { value: 'loading_tip', label: '过场提示' },
+    { value: 'map', label: '地图' },
     { value: 'unknown', label: '未归类' },
   ])
 

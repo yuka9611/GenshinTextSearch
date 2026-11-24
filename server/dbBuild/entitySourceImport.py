@@ -33,6 +33,8 @@ from entity_constants import (
     SOURCE_TYPE_ACHIEVEMENT, SOURCE_TYPE_VIEWPOINT, SOURCE_TYPE_DUNGEON, SOURCE_TYPE_LOADING_TIP,
     SOURCE_TYPE_QIANXING_EMOJI, SOURCE_TYPE_QIANXING_POSE, SOURCE_TYPE_QIANXING_EFFECT,
     SOURCE_TYPE_QIANXING_HALL,
+    SOURCE_TYPE_MAP_AREA, SOURCE_TYPE_MAP_TAG, SOURCE_TYPE_MAP_LAYER,
+    SOURCE_TYPE_MAP_CITY, SOURCE_TYPE_MAP_MARK,
     # 字段
     FIELD_DESC, FIELD_EFFECT_DESC, FIELD_SPECIAL_DESC, FIELD_TYPE_DESC, FIELD_TITLE, FIELD_CODEX_DESC, FIELD_SKILL_DESC,
     # 二级分类
@@ -40,6 +42,7 @@ from entity_constants import (
     SUB_COSTUME_DRESS, SUB_AVATAR_SKILL, SUB_QIANXING_PARADOX, SUB_QIANXING_SUIT,
     SUB_QIANXING_EMOJI, SUB_QIANXING_POSE, SUB_QIANXING_EFFECT, SUB_QIANXING_HALL,
     SUB_TPS_WEAPON_ACCESSORY, SUB_TPS_CLOAK_UPGRADE,
+    SUB_MAP_AREA, SUB_MAP_TAG, SUB_MAP_LAYER, SUB_MAP_STATUE, SUB_MAP_MARK,
     # 映射与标签
     MATERIAL_TYPE_TO_CATEGORY, SUB_CATEGORY_LABELS, SOURCE_TYPE_LABELS,
     # 工具函数
@@ -383,6 +386,12 @@ _ENTITY_EXCEL_FILES = [
     "GCGSkillExcelConfigData.json",
     "GCGKeywordExcelConfigData.json",
     "GCGElementExcelConfigData.json",
+    "WorldAreaConfigData.json",
+    "MapTagDataConfigData.json",
+    "MapCrossSceneConfigData.json",
+    "MapLayerFloorExcelConfigData.json",
+    "CityConfigData.json",
+    "ManualTextMapConfigData.json",
 ]
 
 
@@ -420,6 +429,12 @@ def _load_all_entity_data(excel_root: str) -> dict[str, Any]:
     gcg_skills = _load_rows(os.path.join(excel_root, "GCGSkillExcelConfigData.json"))
     gcg_keywords = _load_rows(os.path.join(excel_root, "GCGKeywordExcelConfigData.json"))
     gcg_elements = _load_rows(os.path.join(excel_root, "GCGElementExcelConfigData.json"))
+    world_areas = _load_rows(os.path.join(excel_root, "WorldAreaConfigData.json"))
+    map_tags = _load_rows(os.path.join(excel_root, "MapTagDataConfigData.json"))
+    map_cross_scenes = _load_rows(os.path.join(excel_root, "MapCrossSceneConfigData.json"))
+    map_layer_floors = _load_rows(os.path.join(excel_root, "MapLayerFloorExcelConfigData.json"))
+    cities = _load_rows(os.path.join(excel_root, "CityConfigData.json"))
+    manual_text_maps = _load_rows(os.path.join(excel_root, "ManualTextMapConfigData.json"))
 
     describe_title_map = _build_describe_title_map(animal_describes, monster_describes)
     codex_desc_map = _build_codex_desc_map(material_codex)
@@ -452,6 +467,12 @@ def _load_all_entity_data(excel_root: str) -> dict[str, Any]:
         "gcg_skills": gcg_skills,
         "gcg_keywords": gcg_keywords,
         "gcg_elements": gcg_elements,
+        "world_areas": world_areas,
+        "map_tags": map_tags,
+        "map_cross_scenes": map_cross_scenes,
+        "map_layer_floors": map_layer_floors,
+        "cities": cities,
+        "manual_text_maps": manual_text_maps,
         "describe_title_map": describe_title_map,
         "codex_desc_map": codex_desc_map,
     }
@@ -472,6 +493,9 @@ def _print_entity_source_summary(data: dict[str, Any]):
         ("loading_tips", "过场提示"), ("gcg_cards", "七圣召唤卡牌"),
         ("gcg_chars", "七圣召唤角色牌"), ("gcg_skills", "七圣召唤技能"),
         ("gcg_keywords", "七圣召唤关键词"), ("gcg_elements", "七圣召唤元素"),
+        ("world_areas", "地图区域"), ("map_tags", "地图标签"),
+        ("map_cross_scenes", "跨场景介绍"), ("map_layer_floors", "分层地图"),
+        ("cities", "国家与神像"), ("manual_text_maps", "手工文本表"),
     ]
     parts = []
     for key, label in names:
@@ -521,6 +545,14 @@ def _build_rows_iter(data: dict[str, Any], overrides: dict[str, tuple[int, int]]
             data["codex_desc_map"],
             data.get("_gcg_synthetic_hashes"),
         ),
+        _iter_world_area_mappings(data.get("world_areas", [])),
+        _iter_map_tag_mappings(
+            data.get("map_tags", []),
+            data.get("map_cross_scenes", []),
+        ),
+        _iter_map_layer_floor_mappings(data.get("map_layer_floors", [])),
+        _iter_city_mappings(data.get("cities", [])),
+        _iter_manual_map_mappings(data.get("manual_text_maps", [])),
     )
 
 
@@ -539,7 +571,7 @@ def build_entity_key_set(data: dict[str, Any], overrides: dict[str, tuple[int, i
 
 
 def _as_nonzero_int(value) -> int | None:
-    if isinstance(value, int) and value != 0:
+    if isinstance(value, int) and not isinstance(value, bool) and value != 0:
         return value
     return None
 
@@ -1624,6 +1656,218 @@ def _iter_loading_tip_mappings(rows: list[dict[str, Any]]):
             yield (title_hash, SOURCE_TYPE_LOADING_TIP, tip_id, title_hash, _pack_extra(FIELD_TITLE), SUB_NONE)
         if desc_hash:
             yield (desc_hash, SOURCE_TYPE_LOADING_TIP, tip_id, title_hash, _pack_extra(FIELD_DESC), SUB_NONE)
+
+
+_MANUAL_MAP_AREA_RE = re.compile(r"^UI_MAP_(?:City\d+|AREA\d+)_TITLE_\d+$")
+_EXCLUDED_MANUAL_MAP_IDS = frozenset({
+    "UI_MAPMARK_RoleCombat_TITLE",
+    "UI_MAPMARK_RoleCombat_DESC",
+    "UI_MAPMARK_HomeworldMainhouse_DESC",
+})
+
+
+def _is_obfuscated_key(key: Any) -> bool:
+    return isinstance(key, str) and len(key) == 11 and key.isascii() and key.isupper() and key.isalpha()
+
+
+def _as_positive_hash_int(value: Any) -> int | None:
+    if isinstance(value, int) and not isinstance(value, bool) and 0 < value < 2**32:
+        return value
+    return None
+
+
+def _stable_map_manual_entity_id(key: str, *, offset: int = 1, span: int = 900_000_000) -> int:
+    digest = hashlib.blake2s(key.encode("utf-8"), digest_size=8).digest()
+    return offset + (int.from_bytes(digest, "big") % span)
+
+
+def _iter_world_area_mappings(rows: list[dict[str, Any]]):
+    alt_aliases = ("OOCGHJKMLAJ", "GEBLJONICEL", "ENDJIAGANPH", "CHHHPLMAABB")
+    for row in rows:
+        area_id = _extract_first_int(row, "id", "ID", "Id")
+        title_hash = _extract_first_int(row, "areaNameTextMapHash", "AreaNameTextMapHash")
+        if area_id is None or title_hash is None:
+            continue
+
+        yield (title_hash, SOURCE_TYPE_MAP_AREA, area_id, title_hash, _pack_extra(FIELD_TITLE), SUB_MAP_AREA)
+
+        alt_hash = _extract_first_int(row, *alt_aliases)
+        if alt_hash is None:
+            for key in sorted(row):
+                if not _is_obfuscated_key(key):
+                    continue
+                candidate = _as_positive_hash_int(row.get(key))
+                if candidate is not None and candidate >= 10_000 and candidate != area_id:
+                    alt_hash = candidate
+                    break
+        if alt_hash is not None and alt_hash != title_hash:
+            yield (alt_hash, SOURCE_TYPE_MAP_AREA, area_id, title_hash, _pack_extra(FIELD_SPECIAL_DESC), SUB_MAP_AREA)
+
+
+def _iter_map_tag_mappings(tag_rows: list[dict[str, Any]], cross_scene_rows: list[dict[str, Any]]):
+    tag_ids: set[int] = set()
+    for row in tag_rows:
+        tag_id = _extract_first_int(row, "id", "Id", "ID")
+        if tag_id is not None:
+            tag_ids.add(tag_id)
+
+    cross_desc_by_tag_id: dict[int, int] = {}
+    tag_id_aliases = ("BEFAEFHLNFI", "PMPIEKJHLKM", "BOJFBILMMKA", "ENFBGPMPALA")
+    desc_aliases = ("IMPBCOAAPBJ", "MAJLOFMPNLD", "FIMEFPCAEMB", "FIKLPBFHENK")
+    for row in cross_scene_rows:
+        map_tag_id = _extract_first_int(row, *tag_id_aliases)
+        if map_tag_id is None:
+            for key in sorted(row):
+                if not _is_obfuscated_key(key):
+                    continue
+                candidate = _as_positive_hash_int(row.get(key))
+                if candidate is not None and candidate != 3 and candidate in tag_ids:
+                    map_tag_id = candidate
+                    break
+        if map_tag_id is None:
+            continue
+        desc_hash = _extract_first_int(row, *desc_aliases)
+        if desc_hash is not None:
+            cross_desc_by_tag_id.setdefault(map_tag_id, desc_hash)
+
+    for row in tag_rows:
+        tag_id = _extract_first_int(row, "id", "Id", "ID")
+        name_hash = _extract_first_int(row, "nameTextMapHash", "NameTextMapHash")
+        ruby_hash = _extract_first_int(row, "nameWithRubyTextTextMapHash", "NameWithRubyTextTextMapHash")
+        if tag_id is None or name_hash is None:
+            continue
+
+        yielded: set[int] = {name_hash}
+        yield (name_hash, SOURCE_TYPE_MAP_TAG, tag_id, name_hash, _pack_extra(FIELD_TITLE), SUB_MAP_TAG)
+
+        if ruby_hash is not None and ruby_hash not in yielded:
+            yielded.add(ruby_hash)
+            yield (ruby_hash, SOURCE_TYPE_MAP_TAG, tag_id, name_hash, _pack_extra(FIELD_SPECIAL_DESC), SUB_MAP_TAG)
+
+        desc_hash = cross_desc_by_tag_id.get(tag_id)
+        if desc_hash is not None and desc_hash not in yielded:
+            yielded.add(desc_hash)
+            yield (desc_hash, SOURCE_TYPE_MAP_TAG, tag_id, name_hash, _pack_extra(FIELD_DESC), SUB_MAP_TAG)
+
+
+def _iter_map_layer_floor_mappings(rows: list[dict[str, Any]]):
+    primary_aliases = ("CAMMHAFAMLA", "KGGGIELJAEE", "AKCPHEFJCOO", "ILOCEKGKKAN", "GBFCGEKBBKC")
+    secondary_aliases = ("CHMMFNIHJHG", "BGNMBLPLPCO", "GNIAPKFLFBD", "AGDNCFLNIPF", "OCHNBEBHGMB")
+    for row in rows:
+        floor_id = _extract_first_int(row, "id", "Id", "ID")
+        if floor_id is None:
+            continue
+
+        primary_hash = _extract_first_int(row, *primary_aliases)
+        secondary_hash = _extract_first_int(row, *secondary_aliases)
+
+        if primary_hash is None:
+            group_id = floor_id // 100
+            candidates: list[int] = []
+            for key in sorted(row):
+                if not _is_obfuscated_key(key):
+                    continue
+                candidate = _as_positive_hash_int(row.get(key))
+                if candidate is not None and candidate > 1000 and candidate != floor_id and candidate != group_id:
+                    candidates.append(candidate)
+            if candidates:
+                primary_hash = candidates[0]
+                if secondary_hash is None and len(candidates) > 1:
+                    secondary_hash = candidates[1]
+
+        if primary_hash is None:
+            continue
+
+        yield (primary_hash, SOURCE_TYPE_MAP_LAYER, floor_id, primary_hash, _pack_extra(FIELD_TITLE), SUB_MAP_LAYER)
+        if secondary_hash is not None and secondary_hash != primary_hash:
+            yield (secondary_hash, SOURCE_TYPE_MAP_LAYER, floor_id, primary_hash, _pack_extra(FIELD_SPECIAL_DESC), SUB_MAP_LAYER)
+
+
+def _iter_city_mappings(rows: list[dict[str, Any]]):
+    for row in rows:
+        city_id = _extract_first_int(row, "cityId", "CityId")
+        if city_id is None or city_id in (9, 99):
+            continue
+
+        name_hash = _extract_first_int(
+            row,
+            "cityNameTextMapHash",
+            "CityNameTextMapHash",
+            "CCOHMABLMMK",
+            "KILFEDNMHFL",
+            "HMCCGNFEKDA",
+        )
+        statue_name_hash = _extract_first_int(
+            row,
+            "cityGoddnessNameTextMapHash",
+            "CityGoddnessNameTextMapHash",
+            "KBHJDHJBDLB",
+            "OMGGIDBJBCG",
+            "NPJLEAAGPDD",
+        )
+        statue_desc_hash = _extract_first_int(
+            row,
+            "cityGoddnessDescTextMapHash",
+            "CityGoddnessDescTextMapHash",
+            "CEBILCKGEDP",
+            "OOJFANJDMFG",
+            "JHMMPPKGNGA",
+        )
+        if name_hash is None:
+            continue
+
+        yielded: set[int] = {name_hash}
+        yield (name_hash, SOURCE_TYPE_MAP_CITY, city_id, name_hash, _pack_extra(FIELD_TITLE), SUB_MAP_STATUE)
+
+        if city_id < 100:
+            if statue_name_hash is not None and statue_name_hash not in yielded:
+                yielded.add(statue_name_hash)
+                yield (statue_name_hash, SOURCE_TYPE_MAP_CITY, city_id, name_hash, _pack_extra(FIELD_TYPE_DESC), SUB_MAP_STATUE)
+            if statue_desc_hash is not None and statue_desc_hash not in yielded:
+                yielded.add(statue_desc_hash)
+                yield (statue_desc_hash, SOURCE_TYPE_MAP_CITY, city_id, name_hash, _pack_extra(FIELD_DESC), SUB_MAP_STATUE)
+
+
+def _iter_manual_map_mappings(rows: list[dict[str, Any]]):
+    mark_groups: dict[str, dict[str, int]] = {}
+    for row in rows:
+        text_map_id = str(row.get("textMapId") or row.get("TextMapId") or "").strip()
+        text_hash = _extract_first_int(row, "textMapContentTextMapHash", "TextMapContentTextMapHash")
+        if not text_map_id or text_hash is None or text_map_id in _EXCLUDED_MANUAL_MAP_IDS:
+            continue
+
+        if _MANUAL_MAP_AREA_RE.match(text_map_id):
+            entity_id = _stable_map_manual_entity_id(f"map_area:{text_map_id}", offset=1_000_000_000)
+            yield (text_hash, SOURCE_TYPE_MAP_AREA, entity_id, text_hash, _pack_extra(FIELD_TITLE), SUB_MAP_AREA)
+            continue
+
+        if text_map_id == "UI_MAP_ADVENTURE_TITLE":
+            mark_groups.setdefault("UI_MAP_ADVENTURE", {})["title"] = text_hash
+        elif text_map_id == "UI_MAP_ADVENTURE_DESC":
+            mark_groups.setdefault("UI_MAP_ADVENTURE", {})["desc"] = text_hash
+        elif text_map_id == "UI_ROLE_COMBAT_MAPMARK_MAGIC_BOOK":
+            mark_groups.setdefault("UI_ROLE_COMBAT_MAPMARK_MAGIC_BOOK", {})["title"] = text_hash
+        elif text_map_id == "UI_ROLE_COMBAT_MAPMARK_MAGIC_BOOK_DESC":
+            mark_groups.setdefault("UI_ROLE_COMBAT_MAPMARK_MAGIC_BOOK", {})["desc"] = text_hash
+        elif text_map_id == "UI_ROLE_COMBAT_MAPMARK_DESC":
+            mark_groups.setdefault("UI_ROLE_COMBAT_MAPMARK", {})["desc"] = text_hash
+        elif "MAPMARK" in text_map_id and text_map_id.endswith("_TITLE"):
+            mark_groups.setdefault(text_map_id[:-6], {})["title"] = text_hash
+        elif "MAPMARK" in text_map_id and text_map_id.endswith("_DESC"):
+            mark_groups.setdefault(text_map_id[:-5], {})["desc"] = text_hash
+
+    for base_key in sorted(mark_groups):
+        group = mark_groups[base_key]
+        title_hash = group.get("title")
+        desc_hash = group.get("desc")
+        effective_title = title_hash or desc_hash
+        if effective_title is None:
+            continue
+        entity_id = _stable_map_manual_entity_id(f"map_mark:{base_key}", offset=1)
+        if title_hash is not None:
+            yield (title_hash, SOURCE_TYPE_MAP_MARK, entity_id, effective_title, _pack_extra(FIELD_TITLE), SUB_MAP_MARK)
+        if desc_hash is not None and desc_hash != title_hash:
+            yield (desc_hash, SOURCE_TYPE_MAP_MARK, entity_id, effective_title, _pack_extra(FIELD_DESC), SUB_MAP_MARK)
 
 
 def importEntitySources(*, commit: bool = True, batch_size: int = DEFAULT_BATCH_SIZE, interactive: bool = True):

@@ -35,6 +35,11 @@ SOURCE_TYPE_QIANXING_EMOJI = 27  # 千星奇域表情
 SOURCE_TYPE_QIANXING_POSE = 28   # 千星奇域动作
 SOURCE_TYPE_QIANXING_EFFECT = 29 # 千星奇域特效
 SOURCE_TYPE_QIANXING_HALL = 30  # 千星奇域大厅设施
+SOURCE_TYPE_MAP_AREA = 31       # 地图 - 区域地名
+SOURCE_TYPE_MAP_TAG = 32        # 地图 - 地区与子地图
+SOURCE_TYPE_MAP_LAYER = 33      # 地图 - 分层地图
+SOURCE_TYPE_MAP_CITY = 34       # 地图 - 国家与神像
+SOURCE_TYPE_MAP_MARK = 35       # 地图 - 地图标点
 
 # ── 字段编码 ──────────────────────────────────────────────────────
 FIELD_DESC = 1
@@ -84,6 +89,11 @@ SUB_QIANXING_HALL = 34      # 大厅设施
 SUB_AVATAR_SKILL = 35       # 角色技能
 SUB_TPS_WEAPON_ACCESSORY = 36  # TPS 武器配件图纸
 SUB_TPS_CLOAK_UPGRADE = 37     # TPS 战斗装束披风升级
+SUB_MAP_AREA = 38               # 区域地名
+SUB_MAP_TAG = 39                # 地区与子地图
+SUB_MAP_LAYER = 40              # 分层地图
+SUB_MAP_STATUE = 41             # 国家与神像
+SUB_MAP_MARK = 42               # 地图标点
 
 # ── materialType → (source_type_code, sub_category_code) ─────────
 MATERIAL_TYPE_TO_CATEGORY: dict[str, tuple[int, int]] = {
@@ -221,6 +231,11 @@ SUB_CATEGORY_LABELS: dict[int, str] = {
     SUB_AVATAR_SKILL: "角色技能",
     SUB_TPS_WEAPON_ACCESSORY: "TPS武器配件图纸",
     SUB_TPS_CLOAK_UPGRADE: "TPS披风升级",
+    SUB_MAP_AREA: "区域地名",
+    SUB_MAP_TAG: "地区与子地图",
+    SUB_MAP_LAYER: "分层地图",
+    SUB_MAP_STATUE: "国家与神像",
+    SUB_MAP_MARK: "地图标点",
 }
 
 # ── 内置大分类标签 ─────────────────────────────────────────────────
@@ -253,6 +268,11 @@ SOURCE_TYPE_LABELS: dict[int, str] = {
     SOURCE_TYPE_QIANXING_POSE: "千星奇域",
     SOURCE_TYPE_QIANXING_EFFECT: "千星奇域",
     SOURCE_TYPE_QIANXING_HALL: "千星奇域",
+    SOURCE_TYPE_MAP_AREA: "地图",
+    SOURCE_TYPE_MAP_TAG: "地图",
+    SOURCE_TYPE_MAP_LAYER: "地图",
+    SOURCE_TYPE_MAP_CITY: "地图",
+    SOURCE_TYPE_MAP_MARK: "地图",
 }
 
 
