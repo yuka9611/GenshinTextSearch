@@ -515,3 +515,16 @@ def test_with_count_helpers_match_legacy_select_and_count(search_db):
     s_rows, s_total = helper.selectSubtitleFromKeywordWithCount("Traveler", 4, limit=1, offset=0)
     assert len(s_rows) == 1
     assert s_total == helper.countSubtitleFromKeyword("Traveler", 4) == 2
+
+
+def test_keyword_like_clause_prefers_instr_for_non_ascii_and_single_ascii(search_db):
+    helper, _connection = search_db
+
+    zh_sql, zh_params = helper._build_keyword_like_clause("tm.content", "风", 1)
+    assert "instr(" in zh_sql and zh_params == ["风"]
+
+    en_single_sql, en_single_params = helper._build_keyword_like_clause("tm.content", "a", 4)
+    assert "instr(" in en_single_sql and en_single_params == ["a", "A"]
+
+    en_multi_sql, en_multi_params = helper._build_keyword_like_clause("tm.content", "ab", 4)
+    assert "LIKE" in en_multi_sql and en_multi_params == ["%ab%"]

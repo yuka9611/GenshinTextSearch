@@ -7,6 +7,7 @@ import os
 from pathlib import Path
 
 import config
+import compact_text_cache
 import fts_tokenizer
 import short_literal_cache
 from quest_text_filters import build_quest_text_not_excluded_sql, is_excluded_quest_text
@@ -228,6 +229,8 @@ _CACHE: dict[str, dict] = {
 _RAW_CHARACTER_NAME_CACHE: dict[str, str | None] = {}
 _VOICED_HASH_CACHE_LOCK = threading.Lock()
 _VOICED_HASH_CACHE: dict[str, object] = {"key": None, "hashes": None}
+_KNOWN_SOURCE_HASH_CACHE_LOCK = threading.Lock()
+_KNOWN_SOURCE_HASH_CACHE: dict[str, object] = {"key": None, "hashes": None}
 _FETTER_VOICE_TABLE = "fetterVoice"
 _FETTER_VOICE_SYNC_LOCK = threading.Lock()
 _FETTER_VOICE_SYNC_ATTEMPTED = False
@@ -894,9 +897,13 @@ def _execute_with_fallback(
         if (
             _TEXTMAP_FTS_TABLE.lower() not in sql_lower
             and "genshin_short" not in sql_lower
+            and "genshin_compact" not in sql_lower
             and " match " not in sql_lower
         ):
             return False
+
+        if "genshin_compact" in sql_lower:
+            return True
 
         message = str(exc).lower()
         fallback_markers = (
@@ -906,6 +913,7 @@ def _execute_with_fallback(
             "no such module",
             "no such table",
             "no such column: fts",
+            "compact_text",
         )
         return any(marker in message for marker in fallback_markers)
 
@@ -916,9 +924,15 @@ def _execute_with_fallback(
             raise
         if sql_fallback is None:
             raise
-        if "genshin_short" in sql_main.lower():
+        sql_lower = sql_main.lower()
+        if "genshin_short" in sql_lower:
             try:
                 short_literal_cache.detach_short_fts(cursor.connection)
+            except Exception:
+                pass
+        if "genshin_compact" in sql_lower:
+            try:
+                compact_text_cache.detach_compact_text(cursor.connection)
             except Exception:
                 pass
         fallback_params = params_fallback if params_fallback is not None else []
@@ -971,23 +985,43 @@ def _build_like_patterns(keyword: str, lang_code: int) -> tuple[str, str]:
     return exact, exact
 
 
+def _build_literal_substring_clause(field_expr: str, term: str) -> tuple[str, list[str]]:
+    if not any("A" <= ch <= "Z" or "a" <= ch <= "z" for ch in term):
+        return f"instr({field_expr}, ?) > 0", [term]
+    if len(term) == 1 and term.isascii() and term.isalpha():
+        return (
+            f"(instr({field_expr}, ?) > 0 OR instr({field_expr}, ?) > 0)",
+            [term.lower(), term.upper()],
+        )
+    return f"{field_expr} LIKE ? ESCAPE '\\'", [f"%{_escape_like(term)}%"]
+
+
 def _build_keyword_like_clause(
     field_expr: str,
     keyword: str,
     lang_code: int,
 ) -> tuple[str, list[str]]:
     """
-    构建关键词 LIKE 查询子句：
+    构建关键词子串查询子句：
     - 多词（空白分隔）要求同一文本包含全部词项（不限顺序）
-    - 单词保持原有 exact/fuzzy 模式
+    - 单词保持连续子串匹配，并对非 ASCII 与单 ASCII 字母使用等价更快的 instr()
     """
     terms = fts_tokenizer.split_search_terms(keyword)
     if len(terms) > 1:
-        clauses = [f"{field_expr} LIKE ? ESCAPE '\\'" for _ in terms]
-        params = [f"%{_escape_like(term)}%" for term in terms]
+        clauses: list[str] = []
+        params: list[str] = []
+        for term in terms:
+            sub_sql, sub_params = _build_literal_substring_clause(field_expr, term)
+            clauses.append(sub_sql)
+            params.extend(sub_params)
         return "(" + " AND ".join(clauses) + ")", params
     exact, fuzzy = _build_like_patterns(keyword, lang_code)
     if fuzzy == exact:
+        raw_keyword = str(keyword or "").strip()
+        normalized = fts_tokenizer.normalize_search_keyword(raw_keyword) or raw_keyword
+        if len(terms) == 1 and normalized == terms[0]:
+            sub_sql, sub_params = _build_literal_substring_clause(field_expr, terms[0])
+            return f"({sub_sql})", sub_params
         return f"({field_expr} LIKE ? ESCAPE '\\')", [exact]
     return (
         f"({field_expr} LIKE ? ESCAPE '\\' OR {field_expr} LIKE ? ESCAPE '\\')",
@@ -2091,6 +2125,58 @@ def _can_use_cached_voice_fn() -> bool:
         return False
 
 
+def _get_known_primary_source_hash_set(
+    connection: sqlite3.Connection | None = None,
+) -> frozenset[int] | None:
+    raw_conn = _unwrap_sqlite_connection(connection if connection is not None else conn)
+    key = _get_connection_db_cache_key(raw_conn)
+    if key is None:
+        return None
+
+    cached = _KNOWN_SOURCE_HASH_CACHE
+    if cached.get("key") == key and cached.get("hashes") is not None:
+        return cached["hashes"]  # type: ignore[return-value]
+
+    source_specs = (
+        ("dialogue", "textHash"),
+        ("fetters", "voiceFileTextTextMapHash"),
+        ("fetterStory", "storyContextTextMapHash"),
+        ("fetterStory", "storyContext2TextMapHash"),
+        ("quest_hash_map", "hash"),
+        ("text_source_entity", "text_hash"),
+        ("text_source_entity", "title_hash"),
+        ("readable", "titleTextMapHash"),
+    )
+    active_specs: list[tuple[str, str]] = []
+    for table_name, col_name in source_specs:
+        if _table_exists(table_name) and _table_has_column(table_name, col_name):
+            active_specs.append((table_name, col_name))
+
+    with _KNOWN_SOURCE_HASH_CACHE_LOCK:
+        if (
+            _KNOWN_SOURCE_HASH_CACHE.get("key") == key
+            and _KNOWN_SOURCE_HASH_CACHE.get("hashes") is not None
+        ):
+            return _KNOWN_SOURCE_HASH_CACHE["hashes"]  # type: ignore[return-value]
+        latest_key = _get_connection_db_cache_key(raw_conn)
+        if latest_key != key:
+            return None
+        try:
+            hashes: set[int] = set()
+            with closing(raw_conn.cursor()) as cursor:
+                for table_name, col_name in active_specs:
+                    for (text_hash,) in cursor.execute(
+                        f"SELECT {col_name} FROM {table_name} WHERE {col_name} IS NOT NULL"
+                    ):
+                        hashes.add(int(text_hash))
+            frozen = frozenset(hashes)
+            _KNOWN_SOURCE_HASH_CACHE["key"] = key
+            _KNOWN_SOURCE_HASH_CACHE["hashes"] = frozen
+            return frozen
+        except Exception:
+            return None
+
+
 def warmup_runtime_caches() -> None:
     """Warm process-wide read-only caches in the background without failing startup."""
     try:
@@ -2100,6 +2186,10 @@ def warmup_runtime_caches() -> None:
         pass
     try:
         short_literal_cache.warmup_short_fts(_unwrap_sqlite_connection(conn))
+    except Exception:
+        pass
+    try:
+        compact_text_cache.warmup_compact_text(_unwrap_sqlite_connection(conn))
     except Exception:
         return
 
@@ -2669,7 +2759,16 @@ def selectTextMapFromKeyword(keyWord: str, langCode: int, limit: int | None = No
                 params_fts.append(limit)
             _execute_with_fallback(cursor, sql_fts, params_fts, sql_like, params_like)
         else:
-            cursor.execute(sql_like, params_like)
+            compact_table = (
+                compact_text_cache.resolve_compact_text_table(cursor.connection, langCode)
+                if config.getEnableTextMapFts()
+                else None
+            )
+            if compact_table is not None:
+                sql_compact = sql_like.replace("from textMap tm ", f"from {compact_table} tm ", 1)
+                _execute_with_fallback(cursor, sql_compact, params_like, sql_like, params_like)
+            else:
+                cursor.execute(sql_like, params_like)
         return cursor.fetchall()
 
 
@@ -2715,6 +2814,220 @@ def _split_window_count_rows(rows: list[tuple]) -> tuple[list[tuple], int | None
     return [row[:-1] for row in rows], total
 
 
+def _resolve_textmap_version_filter(
+    cursor: sqlite3.Cursor,
+    created_version: str | None,
+    updated_version: str | None,
+) -> tuple[bool, dict[int, str | None], dict[int, str], tuple[int, ...] | None, tuple[int, ...] | None, bool]:
+    created = _normalize_version_filter(created_version)
+    updated = _normalize_version_filter(updated_version)
+    has_version_cols = _has_version_id_columns("textMap") and _has_version_dim()
+    if not has_version_cols:
+        return False, {}, {}, None, None, bool(created or updated)
+
+    rows = cursor.execute(
+        f"SELECT id, raw_version, version_tag FROM {_VERSION_DIM_TABLE}"
+    ).fetchall()
+    id_to_raw: dict[int, str | None] = {}
+    id_to_norm_tag: dict[int, str] = {}
+    created_list: list[int] = []
+    updated_list: list[int] = []
+    for vid, raw_v, vtag in rows:
+        vid_int = int(vid)
+        id_to_raw[vid_int] = raw_v
+        base_tag = vtag if vtag is not None else (raw_v if raw_v is not None else "")
+        id_to_norm_tag[vid_int] = str(base_tag).strip().lower()
+        if created and (vtag or "") == created:
+            created_list.append(vid_int)
+        if updated and (vtag or "") == updated:
+            updated_list.append(vid_int)
+
+    created_ids = tuple(created_list) if created else None
+    updated_ids = tuple(updated_list) if updated else None
+    impossible = bool((created and not created_list) or (updated and not updated_list))
+    return True, id_to_raw, id_to_norm_tag, created_ids, updated_ids, impossible
+
+
+def _compute_textmap_match_rank(content: str | None, norm_kw: str, is_zh: bool) -> int:
+    if not norm_kw:
+        return 0
+    s = (content or "").strip()
+    if is_zh and (" " in s or "\t" in s or "\n" in s or "\r" in s):
+        s = s.replace(" ", "").replace("\t", "").replace("\n", "").replace("\r", "")
+    s_low = s.lower()
+    if s_low == norm_kw:
+        return 0
+    if s_low.startswith(norm_kw):
+        return 1
+    if norm_kw in s_low:
+        return 2
+    return 3
+
+
+def _stream_textmap_bucketed_paged(
+    cursor: sqlite3.Cursor,
+    keyWord: str,
+    langCode: int,
+    limit: int | None,
+    offset: int | None,
+    hash_value: int | None,
+    voice_filter: str | None,
+    created_version: str | None,
+    updated_version: str | None,
+    *,
+    unknown_only: bool = False,
+) -> tuple[list[tuple], int] | None:
+    raw_conn = _unwrap_sqlite_connection(cursor.connection)
+    compact_table = (
+        compact_text_cache.resolve_compact_text_table(raw_conn, langCode)
+        if config.getEnableTextMapFts()
+        else None
+    )
+    voiced_set: frozenset[int] | None = None
+    known_set: frozenset[int] | None = None
+    if compact_table is None:
+        voiced_set = _get_voiced_text_hash_set(raw_conn)
+        if voiced_set is None:
+            return None
+        if unknown_only:
+            known_set = _get_known_primary_source_hash_set(raw_conn)
+            if known_set is None:
+                return None
+
+    (
+        has_version_cols,
+        id_to_raw,
+        id_to_norm_tag,
+        created_ids,
+        updated_ids,
+        impossible,
+    ) = _resolve_textmap_version_filter(cursor, created_version, updated_version)
+    if impossible:
+        return [], 0
+
+    like_sql, like_params = _build_keyword_like_clause("tm.content", keyWord, langCode)
+    where_parts = ["tm.lang = ?", like_sql]
+    params: list = [langCode, *like_params]
+    if has_version_cols:
+        if created_ids is not None:
+            placeholders = ",".join("?" for _ in created_ids)
+            where_parts.append(f"tm.created_version_id IN ({placeholders})")
+            params.extend(created_ids)
+        if updated_ids is not None:
+            placeholders = ",".join("?" for _ in updated_ids)
+            where_parts.append(f"tm.updated_version_id IN ({placeholders})")
+            params.extend(updated_ids)
+
+    if compact_table is not None:
+        if voice_filter == "with":
+            where_parts.append("(tm.flags & 1) != 0")
+        elif voice_filter == "without":
+            where_parts.append("(tm.flags & 1) = 0")
+        if unknown_only:
+            where_parts.append("(tm.flags & 2) = 0")
+        sql_stream = (
+            "SELECT tm.hash, tm.content, tm.created_version_id, tm.updated_version_id, tm.flags "
+            f"FROM {compact_table} tm WHERE {' AND '.join(where_parts)}"
+        )
+    else:
+        ver_cols = (
+            "tm.created_version_id, tm.updated_version_id"
+            if has_version_cols
+            else "NULL, NULL"
+        )
+        sql_stream = (
+            f"SELECT tm.hash, tm.content, {ver_cols}, 0 "
+            f"FROM textMap tm WHERE {' AND '.join(where_parts)}"
+        )
+
+    try:
+        cursor.execute(sql_stream, params)
+    except sqlite3.Error as exc:
+        if "interrupted" in str(exc).lower():
+            raise
+        if compact_table is not None:
+            compact_text_cache.detach_compact_text(raw_conn)
+            return None
+        raise
+
+    safe_offset = max(0, int(offset or 0))
+    safe_limit = None if limit is None else max(0, int(limit))
+    cap = None if safe_limit is None else (safe_offset + safe_limit)
+    norm_kw = _normalize_match_keyword(keyWord, langCode)
+    is_zh = langCode in CHINESE_LANG_CODES
+    check_hash = hash_value is not None
+    check_actual_update = updated_ids is not None
+    need_py_voice_filter = (compact_table is None) and (voice_filter in ("with", "without"))
+    need_py_unknown_filter = (compact_table is None) and unknown_only
+
+    buckets: list[list[tuple[object, object, object, object]]] = [[] for _ in range(16)]
+    bucket_counts = [0] * 16
+    total = 0
+
+    for row_hash, content, cv_id, uv_id, flags in cursor:
+        if (
+            check_actual_update
+            and cv_id is not None
+            and uv_id is not None
+            and cv_id in id_to_norm_tag
+            and uv_id in id_to_norm_tag
+            and id_to_norm_tag[cv_id] == id_to_norm_tag[uv_id]
+        ):
+            continue
+        if need_py_unknown_filter and row_hash in known_set:  # type: ignore[operator]
+            continue
+        if compact_table is not None:
+            has_voice = bool(flags & 1)
+        else:
+            has_voice = row_hash in voiced_set  # type: ignore[operator]
+            if need_py_voice_filter:
+                if (voice_filter == "with" and not has_voice) or (
+                    voice_filter == "without" and has_voice
+                ):
+                    continue
+        total += 1
+        if cap == 0:
+            continue
+        hash_rank = 0 if (check_hash and row_hash == hash_value) else 1
+        match_rank = _compute_textmap_match_rank(content, norm_kw, is_zh)
+        voice_rank = 0 if has_voice else 1
+        bidx = (hash_rank * 8) + (match_rank * 2) + voice_rank
+        if cap is None or bucket_counts[bidx] < cap:
+            buckets[bidx].append((row_hash, content, cv_id, uv_id))
+            bucket_counts[bidx] += 1
+
+    if safe_limit == 0 or safe_offset >= total:
+        return [], total
+
+    ordered: list[tuple[object, object, object, object]] = []
+    for bucket in buckets:
+        if not bucket:
+            continue
+        if cap is None:
+            ordered.extend(bucket)
+        else:
+            remaining = cap - len(ordered)
+            if remaining <= 0:
+                break
+            ordered.extend(bucket[:remaining])
+
+    page_slice = (
+        ordered[safe_offset:]
+        if safe_limit is None
+        else ordered[safe_offset:safe_offset + safe_limit]
+    )
+    hydrated = [
+        (
+            row_hash,
+            content,
+            id_to_raw.get(int(cv_id)) if has_version_cols and cv_id is not None else None,
+            id_to_raw.get(int(uv_id)) if has_version_cols and uv_id is not None else None,
+        )
+        for row_hash, content, cv_id, uv_id in page_slice
+    ]
+    return hydrated, total
+
+
 def selectTextMapFromKeywordPaged(
     keyWord: str,
     langCode: int,
@@ -2736,6 +3049,22 @@ def selectTextMapFromKeywordPaged(
         fts_source = _resolve_textmap_fts_source(keyWord, langCode, connection=cursor.connection)
         fts_subquery, fts_match = fts_source if fts_source is not None else (None, None)
         hash_value = hash_value if hash_value is not None else -1
+
+        if fts_subquery is None or fts_match is None:
+            streamed = _stream_textmap_bucketed_paged(
+                cursor,
+                keyWord,
+                langCode,
+                limit,
+                offset,
+                hash_value,
+                voice_filter,
+                created_version,
+                updated_version,
+            )
+            if streamed is not None:
+                return streamed[0]
+
         voice_expr = _voice_exists_expr("tm.hash", use_cached_voice=use_cached_voice)
 
         # 构建LIKE查询
@@ -2804,6 +3133,22 @@ def selectTextMapFromKeywordPagedWithCount(
         fts_source = _resolve_textmap_fts_source(keyWord, langCode, connection=cursor.connection)
         fts_subquery, fts_match = fts_source if fts_source is not None else (None, None)
         hash_value = hash_value if hash_value is not None else -1
+
+        if fts_subquery is None or fts_match is None:
+            streamed = _stream_textmap_bucketed_paged(
+                cursor,
+                keyWord,
+                langCode,
+                limit,
+                offset,
+                hash_value,
+                voice_filter,
+                created_version,
+                updated_version,
+            )
+            if streamed is not None:
+                return streamed
+
         voice_expr = _voice_exists_expr("tm.hash", use_cached_voice=use_cached_voice)
 
         sql_like, params_like = _build_textmap_query(
@@ -2884,6 +3229,23 @@ def selectUnknownTextMapFromKeywordPagedWithCount(
         fts_source = _resolve_textmap_fts_source(keyWord, langCode, connection=cursor.connection)
         fts_subquery, fts_match = fts_source if fts_source is not None else (None, None)
         resolved_hash = hash_value if hash_value is not None else -1
+
+        if fts_subquery is None or fts_match is None:
+            streamed = _stream_textmap_bucketed_paged(
+                cursor,
+                keyWord,
+                langCode,
+                limit,
+                offset,
+                resolved_hash,
+                voice_filter,
+                created_version,
+                updated_version,
+                unknown_only=True,
+            )
+            if streamed is not None:
+                return streamed
+
         voice_expr = _voice_exists_expr("tm.hash", use_cached_voice=use_cached_voice)
 
         sql_like, params_like = _build_textmap_query(
@@ -3042,7 +3404,16 @@ def countTextMapFromKeyword(
             )
             _execute_with_fallback(cursor, sql_fts, params_fts, sql_like, params_like)
         else:
-            cursor.execute(sql_like, params_like)
+            compact_table = (
+                compact_text_cache.resolve_compact_text_table(cursor.connection, langCode)
+                if config.getEnableTextMapFts()
+                else None
+            )
+            if compact_table is not None:
+                sql_compact = sql_like.replace("from textMap tm ", f"from {compact_table} tm ", 1)
+                _execute_with_fallback(cursor, sql_compact, params_like, sql_like, params_like)
+            else:
+                cursor.execute(sql_like, params_like)
         row = cursor.fetchone()
         return int(row[0]) if row else 0
 
@@ -3232,7 +3603,7 @@ def selectTextMapFromKeywordBySourceType(
             return []
         sql_like, params_like = built_like
         match_sort_sql, match_sort_params = _build_match_sort_case("tm.content", keyWord, langCode)
-        sql_like += f"ORDER BY {match_sort_sql}, length(tm.content) LIMIT ? OFFSET ?"
+        sql_like += f"ORDER BY {match_sort_sql}, length(tm.content), tm.hash LIMIT ? OFFSET ?"
         params_like.extend([*match_sort_params, limit, offset])
 
         # FTS 查询
@@ -3247,11 +3618,20 @@ def selectTextMapFromKeywordBySourceType(
             )
             params_fts = [*join_params, fts_match, langCode, *like_params]
             sql_fts = _append_version_filter_clause(sql_fts, params_fts, "tm", created_version, updated_version, "textMap")
-            sql_fts += f"ORDER BY {match_sort_sql}, length(tm.content) LIMIT ? OFFSET ?"
+            sql_fts += f"ORDER BY {match_sort_sql}, length(tm.content), tm.hash LIMIT ? OFFSET ?"
             params_fts.extend([*match_sort_params, limit, offset])
             _execute_with_fallback(cursor, sql_fts, params_fts, sql_like, params_like)
         else:
-            cursor.execute(sql_like, params_like)
+            compact_table = (
+                compact_text_cache.resolve_compact_text_table(cursor.connection, langCode)
+                if config.getEnableTextMapFts() and _build_small_source_driven_join(source_type) is None
+                else None
+            )
+            if compact_table is not None:
+                sql_compact = sql_like.replace("FROM textMap tm ", f"FROM {compact_table} tm ", 1)
+                _execute_with_fallback(cursor, sql_compact, params_like, sql_like, params_like)
+            else:
+                cursor.execute(sql_like, params_like)
 
         return cursor.fetchall()
 
@@ -3271,30 +3651,51 @@ def selectTextMapFromKeywordBySourceTypeWithCount(
         return [], 0
 
     _ensure_fetter_voice_data()
+    has_text_version = _has_version_id_columns("textMap") and _has_version_dim()
     with closing(conn.cursor()) as cursor:
         like_sql, like_params = _build_keyword_like_clause("tm.content", keyWord, langCode)
         fts_source = _resolve_textmap_fts_source(keyWord, langCode, connection=cursor.connection)
-        version_select = _version_select_expr("tm", "textMap")
+        inner_version_select = (
+            "tm.created_version_id AS created_version_id, tm.updated_version_id AS updated_version_id"
+            if has_text_version
+            else "NULL AS created_version, NULL AS updated_version"
+        )
         outer_sort_sql, outer_sort_params = _build_match_sort_case("content", keyWord, langCode)
 
         built_like = _build_source_type_like_query(
             keyWord, langCode, source_type, like_sql, like_params,
-            created_version, updated_version, version_select,
+            created_version, updated_version, inner_version_select,
         )
         if not built_like:
             return [], 0
         inner_like_sql, inner_like_params = built_like
-        sql_like = (
-            f"WITH deduped AS ({inner_like_sql}) "
-            "SELECT hash, content, created_version, updated_version, COUNT(*) OVER() AS _total_count "
-            f"FROM deduped ORDER BY {outer_sort_sql}, length(content) LIMIT ? OFFSET ?"
-        )
+
+        def _wrap_paged_count(inner_sql: str) -> str:
+            if has_text_version:
+                return (
+                    f"WITH deduped AS ({inner_sql}) "
+                    "SELECT p.hash, p.content, "
+                    f"(SELECT raw_version FROM {_VERSION_DIM_TABLE} vd WHERE vd.id = p.created_version_id) AS created_version, "
+                    f"(SELECT raw_version FROM {_VERSION_DIM_TABLE} vd WHERE vd.id = p.updated_version_id) AS updated_version, "
+                    "p._total_count "
+                    "FROM ("
+                    "SELECT hash, content, created_version_id, updated_version_id, COUNT(*) OVER() AS _total_count "
+                    f"FROM deduped ORDER BY {outer_sort_sql}, length(content), hash LIMIT ? OFFSET ?"
+                    ") p"
+                )
+            return (
+                f"WITH deduped AS ({inner_sql}) "
+                "SELECT hash, content, created_version, updated_version, COUNT(*) OVER() AS _total_count "
+                f"FROM deduped ORDER BY {outer_sort_sql}, length(content), hash LIMIT ? OFFSET ?"
+            )
+
+        sql_like = _wrap_paged_count(inner_like_sql)
         params_like = [*inner_like_params, *outer_sort_params, limit, offset]
 
         if fts_source is not None:
             fts_subquery, fts_match = fts_source
             inner_fts_sql = (
-                f"SELECT DISTINCT tm.hash AS hash, tm.content AS content, {version_select} FROM textMap tm "
+                f"SELECT DISTINCT tm.hash AS hash, tm.content AS content, {inner_version_select} FROM textMap tm "
                 f"{join_clause}"
                 f"WHERE tm.id IN ({fts_subquery}) "
                 "AND tm.lang=? "
@@ -3304,15 +3705,21 @@ def selectTextMapFromKeywordBySourceTypeWithCount(
             inner_fts_sql = _append_version_filter_clause(
                 inner_fts_sql, inner_fts_params, "tm", created_version, updated_version, "textMap"
             )
-            sql_fts = (
-                f"WITH deduped AS ({inner_fts_sql}) "
-                "SELECT hash, content, created_version, updated_version, COUNT(*) OVER() AS _total_count "
-                f"FROM deduped ORDER BY {outer_sort_sql}, length(content) LIMIT ? OFFSET ?"
-            )
+            sql_fts = _wrap_paged_count(inner_fts_sql)
             params_fts = [*inner_fts_params, *outer_sort_params, limit, offset]
             _execute_with_fallback(cursor, sql_fts, params_fts, sql_like, params_like)
         else:
-            cursor.execute(sql_like, params_like)
+            compact_table = (
+                compact_text_cache.resolve_compact_text_table(cursor.connection, langCode)
+                if config.getEnableTextMapFts() and _build_small_source_driven_join(source_type) is None
+                else None
+            )
+            if compact_table is not None:
+                inner_compact_sql = inner_like_sql.replace("FROM textMap tm ", f"FROM {compact_table} tm ", 1)
+                sql_compact = _wrap_paged_count(inner_compact_sql)
+                _execute_with_fallback(cursor, sql_compact, params_like, sql_like, params_like)
+            else:
+                cursor.execute(sql_like, params_like)
 
         raw_rows = cursor.fetchall()
 
@@ -3363,7 +3770,16 @@ def countTextMapFromKeywordBySourceType(
             sql_fts = _append_version_filter_clause(sql_fts, params_fts, "tm", created_version, updated_version, "textMap")
             _execute_with_fallback(cursor, sql_fts, params_fts, sql_like, params_like)
         else:
-            cursor.execute(sql_like, params_like)
+            compact_table = (
+                compact_text_cache.resolve_compact_text_table(cursor.connection, langCode)
+                if config.getEnableTextMapFts() and _build_small_source_driven_join(source_type) is None
+                else None
+            )
+            if compact_table is not None:
+                sql_compact = sql_like.replace("FROM textMap tm ", f"FROM {compact_table} tm ", 1)
+                _execute_with_fallback(cursor, sql_compact, params_like, sql_like, params_like)
+            else:
+                cursor.execute(sql_like, params_like)
 
         row = cursor.fetchone()
         return int(row[0]) if row else 0
@@ -3421,7 +3837,29 @@ def countTextMapFromKeywordVoice(
             )
             _execute_with_fallback(cursor, sql_fts, params_fts, sql_like, params_like)
         else:
-            cursor.execute(sql_like, params_like)
+            compact_table = (
+                compact_text_cache.resolve_compact_text_table(cursor.connection, langCode)
+                if config.getEnableTextMapFts()
+                else None
+            )
+            if compact_table is not None:
+                sql_compact, params_compact = _build_textmap_count_query(
+                    use_fts=False,
+                    langCode=langCode,
+                    exact=exact,
+                    fuzzy=fuzzy,
+                    fts_match=None,
+                    voice_expr="(tm.flags & 1) != 0",
+                    voice_filter=voice_filter,
+                    created_version=created_version,
+                    updated_version=updated_version,
+                    like_sql=like_sql,
+                    like_params=like_params,
+                )
+                sql_compact = sql_compact.replace("from textMap tm ", f"from {compact_table} tm ", 1)
+                _execute_with_fallback(cursor, sql_compact, params_compact, sql_like, params_like)
+            else:
+                cursor.execute(sql_like, params_like)
         row = cursor.fetchone()
         return int(row[0]) if row else 0
 
@@ -3945,10 +4383,11 @@ def _build_catalog_entity_base_query(
     use_fts: bool = False,
     fts_match: str | None = None,
     fts_subquery: str | None = None,
+    include_versions: bool = True,
 ) -> tuple[str, list]:
     has_text_version = _has_version_dim() and _has_version_id_columns("textMap")
     has_entity_version = _has_version_dim() and _table_has_column("text_source_entity", "created_version_id")
-    has_version = has_text_version or has_entity_version
+    has_version = include_versions and (has_text_version or has_entity_version)
     version_lang_code = config.getSourceLanguage()
 
     source_type_codes = _expand_qianxing_source_type_codes(source_type_code)
@@ -3996,6 +4435,29 @@ def _build_catalog_entity_base_query(
             sql += f"WHERE {like_sql} "
             params.extend(like_params)
         sql += "), "
+
+    if not include_versions:
+        sql += (
+            "catalog_final AS ("
+            "SELECT "
+            "e.entity_id, "
+            "e.source_type_code, "
+            "MIN(e.title_hash) AS title_hash, "
+            "MIN(e.sub_category) AS sub_category, "
+            "MIN(ft.title_text) AS title_text "
+            "FROM filtered_titles ft "
+            "CROSS JOIN text_source_entity e ON e.title_hash = ft.title_hash "
+            "WHERE 1=1 "
+        )
+        if source_type_codes:
+            placeholders = ",".join("?" for _ in source_type_codes)
+            sql += f"AND e.source_type_code IN ({placeholders}) "
+            params.extend(source_type_codes)
+        if sub_category is not None:
+            sql += "AND e.sub_category = ? "
+            params.append(int(sub_category))
+        sql += "GROUP BY e.entity_id, e.source_type_code) "
+        return sql, params
 
     sql += (
         "catalog_base AS ("
@@ -4106,6 +4568,136 @@ def _build_catalog_entity_base_query(
     return sql, params
 
 
+def _hydrate_catalog_entity_versions(
+    cursor: sqlite3.Cursor,
+    pairs: list[tuple[int, int]],
+    keyword: str,
+    lang_code: int,
+    sub_category: int | None,
+) -> dict[tuple[int, int], tuple[str | None, str | None]]:
+    if not pairs:
+        return {}
+    has_text_version = _has_version_dim() and _has_version_id_columns("textMap")
+    has_entity_version = _has_version_dim() and _table_has_column("text_source_entity", "created_version_id")
+    if not (has_text_version or has_entity_version):
+        return {}
+
+    unique_pairs: list[tuple[int, int]] = []
+    seen_pairs: set[tuple[int, int]] = set()
+    for eid, stc in pairs:
+        pair = (int(eid), int(stc))
+        if pair not in seen_pairs:
+            seen_pairs.add(pair)
+            unique_pairs.append(pair)
+
+    version_lang_code = config.getSourceLanguage()
+    params: list = []
+    pair_clauses = " OR ".join(
+        "(e.source_type_code = ? AND e.entity_id = ?)" for _ in unique_pairs
+    )
+
+    sql = "WITH catalog_base AS (SELECT e.entity_id, e.source_type_code, "
+    if has_entity_version:
+        sql += (
+            "MIN(CASE WHEN e.created_version_id IS NOT NULL THEN e.created_version_id END) AS entity_created_version_id, "
+            "MIN(CASE WHEN vdec.version_sort_key IS NOT NULL THEN vdec.version_sort_key END) AS entity_created_sort_key, "
+        )
+    else:
+        sql += "NULL AS entity_created_version_id, NULL AS entity_created_sort_key, "
+
+    if has_text_version:
+        title_actual_update_expr = (
+            "lower(trim(coalesce(vdtc.version_tag, vdtc.raw_version, ''))) "
+            "!= lower(trim(coalesce(vdtu.version_tag, vdtu.raw_version, '')))"
+        )
+        body_actual_update_expr = (
+            "lower(trim(coalesce(vdbc.version_tag, vdbc.raw_version, ''))) "
+            "!= lower(trim(coalesce(vdbu.version_tag, vdbu.raw_version, '')))"
+        )
+        sql += (
+            "MIN(CASE WHEN tm_title_version.created_version_id IS NOT NULL THEN tm_title_version.created_version_id END) AS title_created_version_id, "
+            "MIN(CASE WHEN vdtc.version_sort_key IS NOT NULL THEN vdtc.version_sort_key END) AS title_created_sort_key, "
+            "MIN(CASE WHEN tm_body_version.created_version_id IS NOT NULL THEN tm_body_version.created_version_id END) AS body_created_version_id, "
+            "MIN(CASE WHEN vdbc.version_sort_key IS NOT NULL THEN vdbc.version_sort_key END) AS body_created_sort_key, "
+            f"MAX(CASE WHEN tm_title_version.updated_version_id IS NOT NULL AND {title_actual_update_expr} "
+            "THEN tm_title_version.updated_version_id END) AS title_updated_version_id, "
+            f"MAX(CASE WHEN tm_title_version.updated_version_id IS NOT NULL AND {title_actual_update_expr} "
+            "THEN vdtu.version_sort_key END) AS title_updated_sort_key, "
+            f"MAX(CASE WHEN tm_body_version.updated_version_id IS NOT NULL AND {body_actual_update_expr} "
+            "THEN tm_body_version.updated_version_id END) AS body_updated_version_id, "
+            f"MAX(CASE WHEN tm_body_version.updated_version_id IS NOT NULL AND {body_actual_update_expr} "
+            "THEN vdbu.version_sort_key END) AS body_updated_sort_key "
+        )
+    else:
+        sql += (
+            "NULL AS title_created_version_id, NULL AS title_created_sort_key, "
+            "NULL AS body_created_version_id, NULL AS body_created_sort_key, "
+            "NULL AS title_updated_version_id, NULL AS title_updated_sort_key, "
+            "NULL AS body_updated_version_id, NULL AS body_updated_sort_key "
+        )
+
+    sql += (
+        "FROM text_source_entity e "
+        "JOIN textMap tm_title ON tm_title.hash = e.title_hash AND tm_title.lang = ? "
+    )
+    params.append(lang_code)
+
+    if has_entity_version:
+        sql += f"LEFT JOIN {_VERSION_DIM_TABLE} vdec ON vdec.id = e.created_version_id "
+    if has_text_version:
+        sql += (
+            "LEFT JOIN textMap tm_title_version ON tm_title_version.hash = e.title_hash AND tm_title_version.lang = ? "
+            "LEFT JOIN textMap tm_body_version ON tm_body_version.hash = e.text_hash AND tm_body_version.lang = ? "
+            f"LEFT JOIN {_VERSION_DIM_TABLE} vdtc ON vdtc.id = tm_title_version.created_version_id "
+            f"LEFT JOIN {_VERSION_DIM_TABLE} vdtu ON vdtu.id = tm_title_version.updated_version_id "
+            f"LEFT JOIN {_VERSION_DIM_TABLE} vdbc ON vdbc.id = tm_body_version.created_version_id "
+            f"LEFT JOIN {_VERSION_DIM_TABLE} vdbu ON vdbu.id = tm_body_version.updated_version_id "
+        )
+        params.extend([version_lang_code, version_lang_code])
+
+    sql += f"WHERE ({pair_clauses}) "
+    for eid, stc in unique_pairs:
+        params.extend([stc, eid])
+    if sub_category is not None:
+        sql += "AND e.sub_category = ? "
+        params.append(int(sub_category))
+    if keyword:
+        like_sql, like_params = _build_keyword_like_clause("tm_title.content", keyword, lang_code)
+        sql += f"AND {like_sql} "
+        params.extend(like_params)
+
+    sql += (
+        "GROUP BY e.entity_id, e.source_type_code), "
+        "catalog_final AS ("
+        "SELECT "
+        "base.entity_id, "
+        "base.source_type_code, "
+        "CASE "
+        "WHEN base.entity_created_version_id IS NOT NULL THEN base.entity_created_version_id "
+        "WHEN base.title_created_sort_key IS NULL THEN base.body_created_version_id "
+        "WHEN base.body_created_sort_key IS NULL THEN base.title_created_version_id "
+        "WHEN base.title_created_sort_key <= base.body_created_sort_key THEN base.title_created_version_id "
+        "ELSE base.body_created_version_id "
+        "END AS created_version_id, "
+        "CASE "
+        "WHEN base.title_updated_sort_key IS NULL THEN base.body_updated_version_id "
+        "WHEN base.body_updated_sort_key IS NULL THEN base.title_updated_version_id "
+        "WHEN base.title_updated_sort_key >= base.body_updated_sort_key THEN base.title_updated_version_id "
+        "ELSE base.body_updated_version_id "
+        "END AS updated_version_id "
+        "FROM catalog_base base) "
+        "SELECT cf.entity_id, cf.source_type_code, vdc.raw_version, vdu.raw_version "
+        "FROM catalog_final cf "
+        f"LEFT JOIN {_VERSION_DIM_TABLE} vdc ON vdc.id = cf.created_version_id "
+        f"LEFT JOIN {_VERSION_DIM_TABLE} vdu ON vdu.id = cf.updated_version_id"
+    )
+    rows = cursor.execute(sql, params).fetchall()
+    return {
+        (int(eid), int(stc)): (created_v, updated_v)
+        for eid, stc, created_v, updated_v in rows
+    }
+
+
 def _assemble_catalog_select_query(
     keyword: str,
     lang_code: int,
@@ -4124,6 +4716,7 @@ def _assemble_catalog_select_query(
     fts_match: str | None,
     fts_subquery: str | None = None,
 ) -> tuple[str, list]:
+    inline_versions = bool(has_version and (created or updated))
     base_sql, params = _build_catalog_entity_base_query(
         keyword,
         lang_code,
@@ -4134,9 +4727,10 @@ def _assemble_catalog_select_query(
         use_fts=use_fts,
         fts_match=fts_match,
         fts_subquery=fts_subquery,
+        include_versions=inline_versions,
     )
     total_col = ", COUNT(*) OVER() AS _total_count" if include_total else ""
-    if has_version:
+    if inline_versions:
         sql = (
             base_sql +
             "SELECT "
@@ -4241,7 +4835,27 @@ def selectCatalogEntities(
                 _execute_with_fallback(cursor, sql_fts, params_fts, sql_like, params_like)
             else:
                 cursor.execute(sql_like, params_like)
-            return cursor.fetchall()
+            rows = cursor.fetchall()
+            if rows and has_version and not created and not updated:
+                version_map = _hydrate_catalog_entity_versions(
+                    cursor,
+                    [(int(r[0]), int(r[1])) for r in rows],
+                    keyword,
+                    lang_code,
+                    sub_category,
+                )
+                rows = [
+                    (
+                        r[0],
+                        r[1],
+                        r[2],
+                        r[3],
+                        r[4],
+                        *version_map.get((int(r[0]), int(r[1])), (None, None)),
+                    )
+                    for r in rows
+                ]
+            return rows
         except Exception:
             return []
 
@@ -4309,10 +4923,29 @@ def selectCatalogEntitiesWithCount(
             else:
                 cursor.execute(sql_like, params_like)
             raw_rows = cursor.fetchall()
+            rows, total = _split_window_count_rows(raw_rows)
+            if rows and has_version and not created and not updated:
+                version_map = _hydrate_catalog_entity_versions(
+                    cursor,
+                    [(int(r[0]), int(r[1])) for r in rows],
+                    keyword,
+                    lang_code,
+                    sub_category,
+                )
+                rows = [
+                    (
+                        r[0],
+                        r[1],
+                        r[2],
+                        r[3],
+                        r[4],
+                        *version_map.get((int(r[0]), int(r[1])), (None, None)),
+                    )
+                    for r in rows
+                ]
         except Exception:
             return [], 0
 
-    rows, total = _split_window_count_rows(raw_rows)
     if total is not None:
         return rows, total
     if not offset or offset <= 0:
@@ -4345,6 +4978,8 @@ def countCatalogEntities(
     if not has_version and (created or updated):
         return 0
 
+    inline_versions = bool(has_version and (created or updated))
+
     def _build_count_sql(
         use_fts: bool,
         fts_match: str | None,
@@ -4360,8 +4995,9 @@ def countCatalogEntities(
             use_fts=use_fts,
             fts_match=fts_match,
             fts_subquery=fts_subquery,
+            include_versions=inline_versions,
         )
-        if has_version:
+        if inline_versions:
             sql += (
                 "SELECT COUNT(*) FROM catalog_final base "
                 f"LEFT JOIN {_VERSION_DIM_TABLE} vdc ON vdc.id = base.created_version_id "
@@ -5532,102 +6168,141 @@ def selectQuestByContentKeyword(
             + ") "
         )
 
-    def _build_query(
-        use_fts: bool,
-        fts_match: str | None = None,
-        fts_subquery: str | None = None,
-    ) -> tuple[str, list]:
-        tm_like_sql, tm_like_params = _build_keyword_like_clause("tm.content", keyword, langCode)
-        desc_filter_sql, desc_filter_params = _quest_text_not_excluded_clause("descText.content")
-        dialogue_filter_sql, dialogue_filter_params = _quest_text_not_excluded_clause("matched_tm.content")
-        params: list = []
-
-        if use_fts and fts_match:
-            subquery_sql = (
-                fts_subquery
-                or f"select rowid from {_TEXTMAP_FTS_TABLE} where {_TEXTMAP_FTS_TABLE} match ?"
-            )
-            matched_tm_cte = (
-                "with matched_tm as materialized ("
-                "select tm.hash, tm.content from textMap tm "
-                f"where tm.id in ({subquery_sql}) "
-                f"and tm.lang = ? and {tm_like_sql}"
-                "), "
-            )
-            params.extend([fts_match, langCode, *tm_like_params])
-        else:
-            matched_tm_cte = (
-                "with matched_tm as materialized ("
-                "select tm.hash, tm.content from textMap tm "
-                f"where tm.lang = ? and {tm_like_sql}"
-                "), "
-            )
-            params.extend([langCode, *tm_like_params])
-
-        match_sql_parts: list[str] = []
-        if has_desc:
-            match_sql_parts.append(
-                "select q.questId as questId, 0 as match_rank, descText.content as matched_text "
-                "from quest q "
-                "cross join textMap descText on q.descTextMapHash = descText.hash and descText.lang = ? "
-                "where q.descTextMapHash in (select hash from matched_tm) "
-                f"and {desc_filter_sql} "
-            )
-            params.extend([langCode, *desc_filter_params])
-
-        match_sql_parts.append(
-            "select qt.questId as questId, 1 as match_rank, matched_tm.content as matched_text "
-            "from matched_tm "
-            + _dialogue_join_from_tm("matched_tm")
-            + f"where {dialogue_filter_sql} "
-        )
-        params.extend(dialogue_filter_params)
-
-        sql = (
-            matched_tm_cte
-            + "matched as ("
-            + " union all ".join(match_sql_parts)
-            + "), ranked as ("
-            "select questId, match_rank as best_rank, matched_text, "
-            "row_number() over (partition by questId order by match_rank asc, matched_text asc) as rn "
-            "from matched"
-            ") "
-            f"select quest.questId, quest.titleTextMapHash, titleText.content, "
-            "ranked.matched_text as matched_text, "
-            f"{source_type_select} as source_type, {version_select}, ranked.best_rank "
-            "from ranked "
-            "cross join quest on ranked.questId = quest.questId "
-            "left join textMap titleText on quest.titleTextMapHash = titleText.hash and titleText.lang = ? "
-            "where ranked.rn = 1 "
-        )
-        params.append(langCode)
-        sql = _append_version_filter_clause(
-            sql,
-            params,
-            "quest",
-            created_version,
-            updated_version,
-            "quest",
-            langCode,
-        )
-        sql = _append_quest_source_type_filter_clause(sql, params, "quest", source_type)
-        sql += "order by ranked.best_rank, quest.questId limit 200"
-        return sql, params
-
-    sql_like, params_like = _build_query(use_fts=False)
+    desc_rows: list[tuple] = []
     with closing(conn.cursor()) as cursor:
+        if has_desc:
+            desc_like_sql, desc_like_params = _build_keyword_like_clause("descText.content", keyword, langCode)
+            desc_filter_sql, desc_filter_params = _quest_text_not_excluded_clause("descText.content")
+            sql_desc = (
+                "select quest.questId, quest.titleTextMapHash, titleText.content, "
+                "descText.content as matched_text, "
+                f"{source_type_select} as source_type, {version_select}, 0 as best_rank "
+                "from quest "
+                "cross join textMap descText on quest.descTextMapHash = descText.hash and descText.lang = ? "
+                "left join textMap titleText on quest.titleTextMapHash = titleText.hash and titleText.lang = ? "
+                f"where {desc_like_sql} and {desc_filter_sql} "
+            )
+            params_desc: list = [langCode, langCode, *desc_like_params, *desc_filter_params]
+            sql_desc = _append_version_filter_clause(
+                sql_desc,
+                params_desc,
+                "quest",
+                created_version,
+                updated_version,
+                "quest",
+                langCode,
+            )
+            sql_desc = _append_quest_source_type_filter_clause(sql_desc, params_desc, "quest", source_type)
+            sql_desc += "order by quest.questId limit 200"
+            desc_rows = cursor.execute(sql_desc, params_desc).fetchall()
+            if len(desc_rows) >= 200:
+                return desc_rows[:200]
+
+        remaining = 200 - len(desc_rows)
+        desc_quest_ids = [int(row[0]) for row in desc_rows]
+        exclude_desc_sql = ""
+        exclude_params: list = []
+        if desc_quest_ids:
+            placeholders = ",".join("?" for _ in desc_quest_ids)
+            exclude_desc_sql = f"and quest.questId not in ({placeholders}) "
+            exclude_params.extend(desc_quest_ids)
+
+        def _build_dialogue_query(
+            tm_table: str,
+            use_fts: bool,
+            fts_match: str | None = None,
+            fts_subquery: str | None = None,
+        ) -> tuple[str, list]:
+            tm_like_sql, tm_like_params = _build_keyword_like_clause("tm.content", keyword, langCode)
+            dialogue_filter_sql, dialogue_filter_params = _quest_text_not_excluded_clause("matched_tm.content")
+            params: list = []
+
+            if use_fts and fts_match:
+                subquery_sql = (
+                    fts_subquery
+                    or f"select rowid from {_TEXTMAP_FTS_TABLE} where {_TEXTMAP_FTS_TABLE} match ?"
+                )
+                matched_tm_cte = (
+                    "with matched_tm as materialized ("
+                    "select tm.hash, tm.content from textMap tm "
+                    f"where tm.id in ({subquery_sql}) "
+                    f"and tm.lang = ? and {tm_like_sql}"
+                    "), "
+                )
+                params.extend([fts_match, langCode, *tm_like_params])
+            else:
+                matched_tm_cte = (
+                    "with matched_tm as materialized ("
+                    f"select tm.hash, tm.content from {tm_table} tm "
+                    f"where tm.lang = ? and {tm_like_sql}"
+                    "), "
+                )
+                params.extend([langCode, *tm_like_params])
+
+            sql = (
+                matched_tm_cte
+                + "matched_dlg as ("
+                + "select qt.questId as questId, min(matched_tm.content) as matched_text "
+                + "from matched_tm "
+                + _dialogue_join_from_tm("matched_tm")
+                + f"where {dialogue_filter_sql} "
+                + "group by qt.questId"
+                + "), top_quests as ("
+                + "select quest.questId, matched_dlg.matched_text "
+                + "from matched_dlg "
+                + "cross join quest on matched_dlg.questId = quest.questId "
+                + "where 1=1 "
+                + exclude_desc_sql
+            )
+            params.extend(dialogue_filter_params)
+            params.extend(exclude_params)
+            sql = _append_version_filter_clause(
+                sql,
+                params,
+                "quest",
+                created_version,
+                updated_version,
+                "quest",
+                langCode,
+            )
+            sql = _append_quest_source_type_filter_clause(sql, params, "quest", source_type)
+            sql += (
+                "order by quest.questId limit ?) "
+                f"select quest.questId, quest.titleTextMapHash, titleText.content, "
+                "top_quests.matched_text as matched_text, "
+                f"{source_type_select} as source_type, {version_select}, 1 as best_rank "
+                "from top_quests "
+                "cross join quest on top_quests.questId = quest.questId "
+                "left join textMap titleText on quest.titleTextMapHash = titleText.hash and titleText.lang = ? "
+                "order by quest.questId"
+            )
+            params.extend([remaining, langCode])
+            return sql, params
+
+        sql_like, params_like = _build_dialogue_query("textMap", use_fts=False)
         fts_source = _resolve_textmap_fts_source(keyword, langCode, connection=cursor.connection)
         if fts_source is not None:
             fts_subquery, fts_match = fts_source
-            sql_fts, params_fts = _build_query(
+            sql_fts, params_fts = _build_dialogue_query(
+                "textMap",
                 use_fts=True,
                 fts_match=fts_match,
                 fts_subquery=fts_subquery,
             )
             _execute_with_fallback(cursor, sql_fts, params_fts, sql_like, params_like)
         else:
-            cursor.execute(sql_like, params_like)
-        return cursor.fetchall()
+            compact_table = (
+                compact_text_cache.resolve_compact_text_table(cursor.connection, langCode)
+                if config.getEnableTextMapFts()
+                else None
+            )
+            if compact_table is not None:
+                sql_compact, params_compact = _build_dialogue_query(compact_table, use_fts=False)
+                _execute_with_fallback(cursor, sql_compact, params_compact, sql_like, params_like)
+            else:
+                cursor.execute(sql_like, params_like)
+        dlg_rows = cursor.fetchall()
+        return desc_rows + dlg_rows
 
 
 def selectQuestByNpcSpeakerKeyword(

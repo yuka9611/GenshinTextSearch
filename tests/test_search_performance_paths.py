@@ -252,6 +252,7 @@ def _bind_helper_to_connection(monkeypatch, connection: sqlite3.Connection):
         {"column": {}, "table": {}, "fts": {"available": None, "tokenizer": None, "detail": None, "langs": {1, 4, 9}}},
     )
     monkeypatch.setattr(databaseHelper, "_VOICED_HASH_CACHE", {"key": None, "hashes": None})
+    monkeypatch.setattr(databaseHelper, "_KNOWN_SOURCE_HASH_CACHE", {"key": None, "hashes": None})
     monkeypatch.setattr(databaseHelper.config, "getEnableTextMapFts", lambda: True)
     monkeypatch.setattr(databaseHelper.config, "getFtsTokenizer", lambda: "trigram")
     monkeypatch.setattr(databaseHelper.config, "getResultLanguages", lambda: [1, 4])
@@ -799,3 +800,404 @@ def test_short_literal_fts_legacy_meta_and_safe_fallbacks(tmp_path, monkeypatch)
     mem_conn = sqlite3.connect(":memory:")
     assert short_literal_cache.resolve_short_fts_query(mem_conn, "旅行", 1) is None
     mem_conn.close()
+
+
+def test_compact_text_cache_accelerates_single_char_and_multi_term_with_parity(tmp_path, monkeypatch):
+    from dbBuild.build_compact_text_cache import build as build_compact_text
+    import compact_text_cache
+
+    compact_text_cache._clear_meta_cache()
+    db_file = tmp_path / "data.db"
+    setup_conn = sqlite3.connect(db_file)
+    _create_full_schema(setup_conn)
+    _seed_sample_data(setup_conn)
+    setup_conn.executemany(
+        "INSERT INTO textMap(hash, content, lang, created_version_id, updated_version_id) VALUES (?, ?, ?, ?, ?)",
+        [
+            (7001, "风", 1, 1, 1),
+            (7002, "风之翼展开", 1, 1, 2),
+            (7003, "微风拂过", 1, 2, 2),
+            (7004, "的", 1, 1, 1),
+            (7005, "天边的空岛之上有琴声", 1, 1, 1),
+            (7006, "Alpha note", 4, 1, 1),
+            (7007, "beta line", 4, 1, 2),
+            (7008, "旅人の詩", 9, 1, 1),
+            (7009, "風の記憶", 9, 1, 1),
+            (7010, "风的记忆", 2, 1, 1),
+        ],
+    )
+    setup_conn.execute("INSERT INTO dialogue(dialogueId, talkerType, talkerId, talkId, textHash, coopQuestId) VALUES (70, 'TALK_ROLE_NPC', 1001, 500, 7001, 0)")
+    setup_conn.execute("INSERT INTO voice(dialogueId, voicePath) VALUES (70, 'VO_7001.wem')")
+    setup_conn.execute("INSERT INTO quest_hash_map(questId, hash, source_type) VALUES (700, 7002, 'dialog')")
+    setup_conn.execute("INSERT INTO talk_dialogue_link(talkId, coopQuestId, dialogueId) VALUES (500, 0, 70)")
+    setup_conn.execute("INSERT INTO textMap_fts(textMap_fts) VALUES ('rebuild')")
+    setup_conn.commit()
+    setup_conn.close()
+
+    sidecar_file = tmp_path / "compact_text_cache.db"
+    stats = build_compact_text(db_file, sidecar_file)
+    assert stats["rows"] > 0
+
+    conn = sqlite3.connect(db_file)
+    try:
+        helper, _common = _bind_helper_to_connection(monkeypatch, conn)
+        assert compact_text_cache.warmup_compact_text(conn) is True
+
+        def capture_sql_and_run(fn):
+            trace_log: list[str] = []
+            conn.set_trace_callback(trace_log.append)
+            try:
+                res = fn()
+            finally:
+                conn.set_trace_callback(None)
+            selects = [
+                s for s in trace_log
+                if s.lstrip().upper().startswith(("WITH ", "SELECT "))
+                and "sqlite_master" not in s.lower()
+                and "pragma_" not in s.lower()
+                and "cache_meta" not in s.lower()
+            ]
+            plans = "\n".join(
+                str(row[3]).lower()
+                for sql_stmt in selects
+                for row in conn.execute("EXPLAIN QUERY PLAN " + sql_stmt).fetchall()
+            )
+            return res, "\n".join(selects).lower(), plans
+
+        queries = [
+            ("chs_wind", lambda: helper.selectTextMapFromKeywordPagedWithCount("风", 1, 2, 0)),
+            ("chs_wind_p2", lambda: helper.selectTextMapFromKeywordPagedWithCount("风", 1, 2, 2)),
+            ("chs_wind_oob", lambda: helper.selectTextMapFromKeywordPagedWithCount("风", 1, 2, 500)),
+            ("chs_de", lambda: helper.selectTextMapFromKeywordPagedWithCount("的", 1, 20, 0)),
+            ("chs_1char_multi", lambda: helper.selectTextMapFromKeywordPagedWithCount("天 琴", 1, 20, 0)),
+            ("en_a", lambda: helper.selectTextMapFromKeywordPagedWithCount("a", 4, 20, 0)),
+            ("jp_no", lambda: helper.selectTextMapFromKeywordPagedWithCount("の", 9, 20, 0)),
+            ("voice_with", lambda: helper.selectTextMapFromKeywordPagedWithCount("风", 1, 20, 0, voice_filter="with")),
+            ("voice_without", lambda: helper.selectTextMapFromKeywordPagedWithCount("风", 1, 20, 0, voice_filter="without")),
+            ("unknown_wind", lambda: helper.selectUnknownTextMapFromKeywordPagedWithCount("风", 1, 20, 0)),
+            ("quest_wind", lambda: helper.selectTextMapFromKeywordBySourceTypeWithCount("风", 1, "quest", 20, 0)),
+            ("dialogue_wind", lambda: helper.selectTextMapFromKeywordBySourceTypeWithCount("风", 1, "dialogue", 20, 0)),
+            ("ver_created", lambda: helper.selectTextMapFromKeywordPagedWithCount("风", 1, 20, 0, created_version="4.0")),
+            ("ver_updated", lambda: helper.selectTextMapFromKeywordPagedWithCount("风", 1, 20, 0, updated_version="4.0")),
+            ("cnt_all", lambda: helper.countTextMapFromKeyword("风", 1)),
+            ("cnt_voice", lambda: helper.countTextMapFromKeywordVoice("风", 1, "with")),
+            ("quest_content_1char", lambda: helper.selectQuestByContentKeyword("风", 1)),
+        ]
+
+        fast_results = {}
+        for label, fn in queries:
+            res, sql_text, plans = capture_sql_and_run(fn)
+            assert "genshin_compact.compact_text" in sql_text, f"{label} did not use genshin_compact.compact_text:\n{sql_text}"
+            assert "using primary key (lang=?)" in plans or "compact_text" in plans, (
+                f"{label} plan missing compact_text primary key scan:\n{plans}"
+            )
+            assert not re.search(r"textmap_lang_index\s*\(\s*lang=\?\s*\)", plans), (
+                f"{label} scanned all rows of textMap_lang_index:\n{plans}"
+            )
+            fast_results[label] = res
+
+        # Compare every result against Layer 1 main.textMap (sidecar disabled) AND SQL-only path.
+        monkeypatch.setattr(helper.config, "getEnableTextMapFts", lambda: False)
+        for label, fn in queries:
+            assert fn() == fast_results[label], f"Layer 1 parity mismatch for {label}"
+
+        # Disable voiced/known-source in-memory sets to verify against raw SQL path too.
+        monkeypatch.setattr(helper, "_get_voiced_text_hash_set", lambda *_a, **_kw: None)
+        monkeypatch.setattr(helper, "_get_known_primary_source_hash_set", lambda *_a, **_kw: None)
+        for label, fn in queries:
+            assert fn() == fast_results[label], f"SQL fallback parity mismatch for {label}"
+
+        # Non-indexed language (CHT=2) falls back to Layer 1 safely even with sidecar attached.
+        monkeypatch.setattr(helper.config, "getEnableTextMapFts", lambda: True)
+        cht_rows, cht_total = helper.selectTextMapFromKeywordPagedWithCount("风", 2, 20, 0)
+        assert cht_total == 1 and [r[0] for r in cht_rows] == [7010]
+    finally:
+        compact_text_cache._clear_meta_cache()
+        conn.close()
+
+
+def test_compact_text_cache_safe_fallbacks(tmp_path, monkeypatch):
+    from dbBuild.build_compact_text_cache import build as build_compact_text
+    import compact_text_cache
+
+    compact_text_cache._clear_meta_cache()
+    db_file = tmp_path / "data.db"
+    setup_conn = sqlite3.connect(db_file)
+    _create_full_schema(setup_conn)
+    _seed_sample_data(setup_conn)
+    setup_conn.execute("INSERT INTO textMap(hash, content, lang) VALUES (7100, '风铃', 1)")
+    setup_conn.commit()
+    setup_conn.close()
+
+    custom_sidecar = tmp_path / "alt" / "custom_compact.db"
+    build_compact_text(db_file, custom_sidecar)
+    monkeypatch.setenv("GTS_COMPACT_TEXT_PATH", str(custom_sidecar))
+
+    conn = sqlite3.connect(db_file)
+    try:
+        helper, _common = _bind_helper_to_connection(monkeypatch, conn)
+
+        assert compact_text_cache.resolve_compact_text_table(conn, 1) == "genshin_compact.compact_text"
+        assert compact_text_cache.resolve_compact_text_table(conn, 2) is None
+
+        # Non-empty WAL triggers fallback & detach.
+        wal_file = tmp_path / "data.db-wal"
+        wal_file.write_bytes(b"1234")
+        assert compact_text_cache.resolve_compact_text_table(conn, 1) is None
+        assert "genshin_compact" not in {r[1] for r in conn.execute("PRAGMA database_list")}
+        wal_file.unlink()
+
+        # Re-attaches cleanly after WAL clears, then invalidates on total_changes > 0.
+        assert compact_text_cache.resolve_compact_text_table(conn, 1) == "genshin_compact.compact_text"
+        conn.execute("INSERT INTO textMap(hash, content, lang) VALUES (7101, '风声', 1)")
+        assert conn.total_changes > 0
+        assert compact_text_cache.resolve_compact_text_table(conn, 1) is None
+        assert "genshin_compact" not in {r[1] for r in conn.execute("PRAGMA database_list")}
+    finally:
+        conn.close()
+
+    # Corrupted sidecar missing required columns falls back cleanly in resolve & _execute_with_fallback.
+    compact_text_cache._clear_meta_cache()
+    bad_conn = sqlite3.connect(custom_sidecar)
+    bad_conn.execute("DROP TABLE compact_text")
+    bad_conn.execute("CREATE TABLE compact_text(lang INTEGER, content TEXT)")
+    bad_conn.commit()
+    bad_conn.close()
+
+    conn2 = sqlite3.connect(db_file)
+    try:
+        helper, _common = _bind_helper_to_connection(monkeypatch, conn2)
+        assert compact_text_cache.resolve_compact_text_table(conn2, 1) is None
+
+        conn2.execute(
+            "ATTACH DATABASE ? AS genshin_compact",
+            (custom_sidecar.as_uri() + "?mode=ro&immutable=1",),
+        )
+        cur = conn2.cursor()
+        helper._execute_with_fallback(
+            cur,
+            "SELECT hash FROM genshin_compact.compact_text WHERE lang=?",
+            [1],
+            "SELECT COUNT(*) FROM textMap WHERE lang=?",
+            [1],
+        )
+        assert "genshin_compact" not in {r[1] for r in conn2.execute("PRAGMA database_list")}
+        cur.close()
+
+        # Missing sidecar degrades cleanly without error.
+        custom_sidecar.unlink()
+        compact_text_cache._clear_meta_cache()
+        assert compact_text_cache.resolve_compact_text_table(conn2, 1) is None
+        rows, total = helper.selectTextMapFromKeywordPagedWithCount("风", 1, 20, 0)
+        assert total == 5 and len(rows) == 5
+    finally:
+        compact_text_cache._clear_meta_cache()
+        conn2.close()
+
+    # Tampered metadata (has_fetter_voice != '1' or mismatched source_size) disables sidecar.
+    build_compact_text(db_file, custom_sidecar)
+    for meta_key, bad_val in (("has_fetter_voice", "0"), ("source_size", "999")):
+        tamper = sqlite3.connect(custom_sidecar)
+        tamper.execute("UPDATE cache_meta SET v=? WHERE k=?", (bad_val, meta_key))
+        tamper.commit()
+        tamper.close()
+
+        compact_text_cache._clear_meta_cache()
+        conn3 = sqlite3.connect(db_file)
+        try:
+            helper, _common = _bind_helper_to_connection(monkeypatch, conn3)
+            assert compact_text_cache.resolve_compact_text_table(conn3, 1) is None
+            rows, total = helper.selectTextMapFromKeywordPagedWithCount("风", 1, 20, 0)
+            assert total == 5 and len(rows) == 5
+        finally:
+            compact_text_cache._clear_meta_cache()
+            conn3.close()
+        build_compact_text(db_file, custom_sidecar, force=True)
+
+    mem_conn = sqlite3.connect(":memory:")
+    assert compact_text_cache.resolve_compact_text_table(mem_conn, 1) is None
+    mem_conn.close()
+
+
+def test_instr_substring_parity_and_special_chars(monkeypatch):
+    import databaseHelper as helper
+
+    clause_zh, params_zh = helper._build_keyword_like_clause("tm.content", "风", 1)
+    assert "instr(" in clause_zh and params_zh == ["风"]
+
+    clause_en1, params_en1 = helper._build_keyword_like_clause("tm.content", "A", 4)
+    assert "instr(" in clause_en1 and params_en1 == ["a", "A"]
+
+    clause_en2, params_en2 = helper._build_keyword_like_clause("tm.content", "ab", 4)
+    assert "LIKE" in clause_en2 and params_en2 == ["%ab%"]
+
+    conn = sqlite3.connect(":memory:")
+    conn.execute("CREATE TABLE items(id INTEGER PRIMARY KEY, content TEXT)")
+    samples = [
+        (1, None),
+        (2, ""),
+        (3, "100% pure_wind\\path"),
+        (4, "Alpha beta"),
+        (5, "BETA only"),
+        (6, "風の旅人"),
+        (7, "风起之地"),
+        (8, "Übung test"),
+        (9, "übung test"),
+    ]
+    conn.executemany("INSERT INTO items VALUES (?, ?)", samples)
+
+    for kw, lang in [
+        ("风", 1),
+        ("の", 9),
+        ("a", 4),
+        ("A", 4),
+        ("%", 4),
+        ("_", 4),
+        ("\\", 4),
+        ("a _%", 4),
+        ("风 起", 1),
+        ("Ü", 5),
+        ("ab", 4),
+    ]:
+        fast_sql, fast_params = helper._build_keyword_like_clause("content", kw, lang)
+        fast_ids = [
+            r[0] for r in conn.execute(f"SELECT id FROM items WHERE {fast_sql} ORDER BY id", fast_params)
+        ]
+
+        terms = helper.fts_tokenizer.split_search_terms(kw)
+        if len(terms) > 1:
+            like_sql = "(" + " AND ".join("content LIKE ? ESCAPE '\\'" for _ in terms) + ")"
+            like_params = [f"%{helper._escape_like(t)}%" for t in terms]
+        else:
+            exact, _fuzzy = helper._build_like_patterns(kw, lang)
+            like_sql, like_params = "(content LIKE ? ESCAPE '\\')", [exact]
+        like_ids = [
+            r[0] for r in conn.execute(f"SELECT id FROM items WHERE {like_sql} ORDER BY id", like_params)
+        ]
+        assert fast_ids == like_ids, f"Mismatch for kw={kw!r}: {fast_ids} vs {like_ids}"
+    conn.close()
+
+
+def test_quest_content_description_first_and_mixed_parity(monkeypatch):
+    conn = sqlite3.connect(":memory:")
+    _create_full_schema(conn)
+    _seed_sample_data(conn)
+    helper, _common = _bind_helper_to_connection(monkeypatch, conn)
+
+    # Case 1: mixed description (best_rank=0), dialogue-only (best_rank=1), excluded (test) desc falling back to dialogue.
+    conn.executemany(
+        "INSERT INTO textMap(hash, content, lang, created_version_id, updated_version_id) VALUES (?, ?, 1, 1, 1)",
+        [
+            (8001, "任务A标题",),
+            (8002, "风之描述A",),
+            (8003, "风之对白A",),
+            (8004, "任务B标题",),
+            (8005, "无关描述",),
+            (8006, "风之对白B",),
+            (8007, "（test）测试风描述",),
+        ],
+    )
+    conn.executemany(
+        "INSERT INTO quest(questId, titleTextMapHash, descTextMapHash, chapterId, source_type, created_version_id, updated_version_id) VALUES (?, ?, ?, 10, ?, 1, 1)",
+        [
+            (701, 8001, 8002, "WQ"),
+            (702, 8004, 8005, "AQ"),
+            (703, 8004, 8007, "WQ"),
+        ],
+    )
+    conn.executemany(
+        "INSERT INTO questTalk(questId, talkId, coopQuestId) VALUES (?, ?, 0)",
+        [(701, 501), (702, 502), (703, 503)],
+    )
+    conn.executemany(
+        "INSERT INTO dialogue(dialogueId, talkerType, talkerId, talkId, textHash, coopQuestId) VALUES (?, 'TALK_ROLE_NPC', 1001, ?, ?, 0)",
+        [(20, 501, 8003), (21, 502, 8006), (22, 503, 8006)],
+    )
+    conn.executemany(
+        "INSERT INTO talk_dialogue_link(talkId, coopQuestId, dialogueId) VALUES (?, 0, ?)",
+        [(501, 20), (502, 21), (503, 22)],
+    )
+
+    mixed_rows = helper.selectQuestByContentKeyword("风", 1)
+    assert [(r[0], r[7]) for r in mixed_rows] == [(700, 0), (701, 0), (702, 1), (703, 1)]
+    assert mixed_rows[1][3] == "风之描述A"
+
+    aq_rows = helper.selectQuestByContentKeyword("风", 1, source_type="AQ")
+    assert [(r[0], r[7]) for r in aq_rows] == [(700, 0), (702, 1)]
+
+    # Case 2: >=200 description matches triggers early return without scanning dialogues.
+    bulk_text = [(90000 + i, f"批量风描述{i}") for i in range(210)]
+    bulk_quests = [(1000 + i, 8001, 90000 + i, 10, "WQ", 1, 1) for i in range(210)]
+    conn.executemany(
+        "INSERT INTO textMap(hash, content, lang, created_version_id, updated_version_id) VALUES (?, ?, 1, 1, 1)",
+        bulk_text,
+    )
+    conn.executemany(
+        "INSERT INTO quest(questId, titleTextMapHash, descTextMapHash, chapterId, source_type, created_version_id, updated_version_id) VALUES (?, ?, ?, ?, ?, ?, ?)",
+        bulk_quests,
+    )
+
+    trace_log: list[str] = []
+    conn.set_trace_callback(trace_log.append)
+    try:
+        full_desc_rows = helper.selectQuestByContentKeyword("风", 1)
+    finally:
+        conn.set_trace_callback(None)
+    assert len(full_desc_rows) == 200
+    assert all(r[7] == 0 for r in full_desc_rows)
+    assert not any("matched_dlg" in sql for sql in trace_log)
+    conn.close()
+
+
+def test_catalog_deferred_version_hydration_parity(monkeypatch):
+    conn = sqlite3.connect(":memory:")
+    _create_full_schema(conn)
+    _seed_sample_data(conn)
+    conn.execute("ALTER TABLE text_source_entity ADD COLUMN created_version_id INTEGER")
+    # Entity 89: title in v4.0, body in v1.0, entity created_version_id NULL -> min is 1.0, updated is NULL (both created==updated)
+    # Entity 90: title v1.0->4.0, entity created_version_id 1 -> created 1.0, updated 4.0
+    # Entity 91: multi-title_hash where only one title_hash matches '风'
+    conn.executemany(
+        "INSERT INTO textMap(hash, content, lang, created_version_id, updated_version_id) VALUES (?, ?, 1, ?, ?)",
+        [
+            (9101, "风铃标题", 2, 2),
+            (9102, "风铃正文", 1, 1),
+            (9103, "风车标题", 1, 2),
+            (9104, "风车正文", 1, 1),
+            (9105, "风筝有效标题", 1, 2),
+            (9106, "风筝正文", 1, 1),
+        ],
+    )
+    conn.executemany(
+        "INSERT INTO text_source_entity(entity_id, source_type_code, title_hash, text_hash, sub_category, created_version_id) VALUES (?, ?, ?, ?, ?, ?)",
+        [
+            (89, 2, 9101, 9102, 1, None),
+            (90, 2, 9103, 9104, 1, 1),
+            (91, 3, 9105, 9106, 1, 1),
+            (91, 3, 999999, 9106, 1, 2),
+        ],
+    )
+    conn.execute("INSERT INTO textMap_fts(textMap_fts) VALUES ('rebuild')")
+    helper, _common = _bind_helper_to_connection(monkeypatch, conn)
+
+    deferred_rows, deferred_total = helper.selectCatalogEntitiesWithCount("风", 1, limit=20, offset=0)
+    deferred_simple = helper.selectCatalogEntities("风", 1, limit=20, offset=0)
+    assert deferred_rows == deferred_simple
+    assert deferred_total == 4
+
+    # Compare directly against inline full version-joined base query.
+    base_sql, base_params = helper._build_catalog_entity_base_query(
+        "风", 1, include_versions=True
+    )
+    full_sql = (
+        base_sql
+        + "SELECT base.entity_id, base.source_type_code, base.title_hash, base.sub_category, "
+        + "base.title_text, vdc.raw_version, vdu.raw_version "
+        + "FROM catalog_final base "
+        + "LEFT JOIN version_dim vdc ON vdc.id = base.created_version_id "
+        + "LEFT JOIN version_dim vdu ON vdu.id = base.updated_version_id "
+        + "ORDER BY length(coalesce(base.title_text, '')), coalesce(base.title_text, '') LIMIT 20 OFFSET 0"
+    )
+    full_rows = conn.execute(full_sql, base_params).fetchall()
+    assert deferred_rows == full_rows
+    conn.close()
