@@ -4384,6 +4384,7 @@ def _build_catalog_entity_base_query(
     fts_match: str | None = None,
     fts_subquery: str | None = None,
     include_versions: bool = True,
+    compact_table: str | None = None,
 ) -> tuple[str, list]:
     has_text_version = _has_version_dim() and _has_version_id_columns("textMap")
     has_entity_version = _has_version_dim() and _table_has_column("text_source_entity", "created_version_id")
@@ -4419,22 +4420,41 @@ def _build_catalog_entity_base_query(
             entity_filter_sql += "AND e0.sub_category = ? "
             params.append(int(sub_category))
 
-        sql = (
-            "WITH distinct_titles AS MATERIALIZED ("
-            "SELECT DISTINCT e0.title_hash "
-            "FROM text_source_entity e0 "
-            f"{entity_filter_sql}"
-            "), filtered_titles AS MATERIALIZED ("
-            "SELECT dt.title_hash AS title_hash, tm_title.content AS title_text "
-            "FROM distinct_titles dt "
-            "CROSS JOIN textMap tm_title ON tm_title.hash = dt.title_hash AND tm_title.lang = ? "
-        )
-        params.append(lang_code)
-        if keyword:
+        if keyword and compact_table:
             like_sql, like_params = _build_keyword_like_clause("tm_title.content", keyword, lang_code)
-            sql += f"WHERE {like_sql} "
+            sql = (
+                "WITH distinct_titles AS MATERIALIZED ("
+                "SELECT DISTINCT e0.title_hash "
+                "FROM text_source_entity e0 "
+                f"{entity_filter_sql}"
+                "), filtered_titles AS MATERIALIZED ("
+                "SELECT tm_title.hash AS title_hash, tm_title.content AS title_text "
+                f"FROM {compact_table} tm_title "
+                "WHERE tm_title.lang = ? "
+                f"AND (tm_title.flags & {compact_text_cache.FLAG_HAS_KNOWN_SOURCE}) != 0 "
+                "AND tm_title.hash IN (SELECT title_hash FROM distinct_titles) "
+                f"AND {like_sql} "
+                "), "
+            )
+            params.append(lang_code)
             params.extend(like_params)
-        sql += "), "
+        else:
+            sql = (
+                "WITH distinct_titles AS MATERIALIZED ("
+                "SELECT DISTINCT e0.title_hash "
+                "FROM text_source_entity e0 "
+                f"{entity_filter_sql}"
+                "), filtered_titles AS MATERIALIZED ("
+                "SELECT dt.title_hash AS title_hash, tm_title.content AS title_text "
+                "FROM distinct_titles dt "
+                "CROSS JOIN textMap tm_title ON tm_title.hash = dt.title_hash AND tm_title.lang = ? "
+            )
+            params.append(lang_code)
+            if keyword:
+                like_sql, like_params = _build_keyword_like_clause("tm_title.content", keyword, lang_code)
+                sql += f"WHERE {like_sql} "
+                params.extend(like_params)
+            sql += "), "
 
     if not include_versions:
         sql += (
@@ -4715,6 +4735,7 @@ def _assemble_catalog_select_query(
     use_fts: bool,
     fts_match: str | None,
     fts_subquery: str | None = None,
+    compact_table: str | None = None,
 ) -> tuple[str, list]:
     inline_versions = bool(has_version and (created or updated))
     base_sql, params = _build_catalog_entity_base_query(
@@ -4728,6 +4749,7 @@ def _assemble_catalog_select_query(
         fts_match=fts_match,
         fts_subquery=fts_subquery,
         include_versions=inline_versions,
+        compact_table=compact_table,
     )
     total_col = ", COUNT(*) OVER() AS _total_count" if include_total else ""
     if inline_versions:
@@ -4773,6 +4795,45 @@ def _assemble_catalog_select_query(
     return sql, params
 
 
+def _execute_catalog_query(
+    cursor: sqlite3.Cursor,
+    keyword: str,
+    lang_code: int,
+    build_query_fn,
+) -> None:
+    """Execute a catalog entity query via FTS, compact_text sidecar, or main textMap."""
+    sql_like, params_like = build_query_fn(use_fts=False, fts_match=None)
+    fts_source = (
+        _resolve_textmap_fts_source(keyword, lang_code, connection=cursor.connection)
+        if keyword
+        else None
+    )
+    if fts_source is not None:
+        fts_subquery, fts_match = fts_source
+        sql_fts, params_fts = build_query_fn(
+            use_fts=True,
+            fts_match=fts_match,
+            fts_subquery=fts_subquery,
+        )
+        _execute_with_fallback(cursor, sql_fts, params_fts, sql_like, params_like)
+        return
+    if keyword:
+        compact_table = (
+            compact_text_cache.resolve_compact_text_table(cursor.connection, lang_code)
+            if config.getEnableTextMapFts()
+            else None
+        )
+        if compact_table is not None:
+            sql_compact, params_compact = build_query_fn(
+                use_fts=False,
+                fts_match=None,
+                compact_table=compact_table,
+            )
+            _execute_with_fallback(cursor, sql_compact, params_compact, sql_like, params_like)
+            return
+    cursor.execute(sql_like, params_like)
+
+
 def selectCatalogEntities(
     keyword: str,
     lang_code: int,
@@ -4793,48 +4854,34 @@ def selectCatalogEntities(
     if not has_version and (created or updated):
         return []
 
-    sql_like, params_like = _assemble_catalog_select_query(
-        keyword,
-        lang_code,
-        source_type_code,
-        sub_category,
-        created_version,
-        updated_version,
-        has_version=has_version,
-        created=created,
-        updated=updated,
-        limit=limit,
-        offset=offset,
-        include_total=False,
-        use_fts=False,
-        fts_match=None,
-    )
+    def _build_query(
+        use_fts: bool,
+        fts_match: str | None,
+        fts_subquery: str | None = None,
+        compact_table: str | None = None,
+    ) -> tuple[str, list]:
+        return _assemble_catalog_select_query(
+            keyword,
+            lang_code,
+            source_type_code,
+            sub_category,
+            created_version,
+            updated_version,
+            has_version=has_version,
+            created=created,
+            updated=updated,
+            limit=limit,
+            offset=offset,
+            include_total=False,
+            use_fts=use_fts,
+            fts_match=fts_match,
+            fts_subquery=fts_subquery,
+            compact_table=compact_table,
+        )
 
     with closing(conn.cursor()) as cursor:
-        fts_source = _resolve_textmap_fts_source(keyword, lang_code, connection=cursor.connection) if keyword else None
         try:
-            if fts_source is not None:
-                fts_subquery, fts_match = fts_source
-                sql_fts, params_fts = _assemble_catalog_select_query(
-                    keyword,
-                    lang_code,
-                    source_type_code,
-                    sub_category,
-                    created_version,
-                    updated_version,
-                    has_version=has_version,
-                    created=created,
-                    updated=updated,
-                    limit=limit,
-                    offset=offset,
-                    include_total=False,
-                    use_fts=True,
-                    fts_match=fts_match,
-                    fts_subquery=fts_subquery,
-                )
-                _execute_with_fallback(cursor, sql_fts, params_fts, sql_like, params_like)
-            else:
-                cursor.execute(sql_like, params_like)
+            _execute_catalog_query(cursor, keyword, lang_code, _build_query)
             rows = cursor.fetchall()
             if rows and has_version and not created and not updated:
                 version_map = _hydrate_catalog_entity_versions(
@@ -4880,48 +4927,34 @@ def selectCatalogEntitiesWithCount(
     if not has_version and (created or updated):
         return [], 0
 
-    sql_like, params_like = _assemble_catalog_select_query(
-        keyword,
-        lang_code,
-        source_type_code,
-        sub_category,
-        created_version,
-        updated_version,
-        has_version=has_version,
-        created=created,
-        updated=updated,
-        limit=limit,
-        offset=offset,
-        include_total=True,
-        use_fts=False,
-        fts_match=None,
-    )
+    def _build_query(
+        use_fts: bool,
+        fts_match: str | None,
+        fts_subquery: str | None = None,
+        compact_table: str | None = None,
+    ) -> tuple[str, list]:
+        return _assemble_catalog_select_query(
+            keyword,
+            lang_code,
+            source_type_code,
+            sub_category,
+            created_version,
+            updated_version,
+            has_version=has_version,
+            created=created,
+            updated=updated,
+            limit=limit,
+            offset=offset,
+            include_total=True,
+            use_fts=use_fts,
+            fts_match=fts_match,
+            fts_subquery=fts_subquery,
+            compact_table=compact_table,
+        )
 
     with closing(conn.cursor()) as cursor:
-        fts_source = _resolve_textmap_fts_source(keyword, lang_code, connection=cursor.connection) if keyword else None
         try:
-            if fts_source is not None:
-                fts_subquery, fts_match = fts_source
-                sql_fts, params_fts = _assemble_catalog_select_query(
-                    keyword,
-                    lang_code,
-                    source_type_code,
-                    sub_category,
-                    created_version,
-                    updated_version,
-                    has_version=has_version,
-                    created=created,
-                    updated=updated,
-                    limit=limit,
-                    offset=offset,
-                    include_total=True,
-                    use_fts=True,
-                    fts_match=fts_match,
-                    fts_subquery=fts_subquery,
-                )
-                _execute_with_fallback(cursor, sql_fts, params_fts, sql_like, params_like)
-            else:
-                cursor.execute(sql_like, params_like)
+            _execute_catalog_query(cursor, keyword, lang_code, _build_query)
             raw_rows = cursor.fetchall()
             rows, total = _split_window_count_rows(raw_rows)
             if rows and has_version and not created and not updated:
@@ -4984,6 +5017,7 @@ def countCatalogEntities(
         use_fts: bool,
         fts_match: str | None,
         fts_subquery: str | None = None,
+        compact_table: str | None = None,
     ) -> tuple[str, list]:
         sql, params = _build_catalog_entity_base_query(
             keyword,
@@ -4996,6 +5030,7 @@ def countCatalogEntities(
             fts_match=fts_match,
             fts_subquery=fts_subquery,
             include_versions=inline_versions,
+            compact_table=compact_table,
         )
         if inline_versions:
             sql += (
@@ -5014,21 +5049,9 @@ def countCatalogEntities(
             params.append(updated)
         return sql, params
 
-    sql_like, params_like = _build_count_sql(use_fts=False, fts_match=None)
-
     with closing(conn.cursor()) as cursor:
-        fts_source = _resolve_textmap_fts_source(keyword, lang_code, connection=cursor.connection) if keyword else None
         try:
-            if fts_source is not None:
-                fts_subquery, fts_match = fts_source
-                sql_fts, params_fts = _build_count_sql(
-                    use_fts=True,
-                    fts_match=fts_match,
-                    fts_subquery=fts_subquery,
-                )
-                _execute_with_fallback(cursor, sql_fts, params_fts, sql_like, params_like)
-            else:
-                cursor.execute(sql_like, params_like)
+            _execute_catalog_query(cursor, keyword, lang_code, _build_count_sql)
             row = cursor.fetchone()
             return int(row[0]) if row else 0
         except Exception:
@@ -6231,10 +6254,15 @@ def selectQuestByContentKeyword(
                 )
                 params.extend([fts_match, langCode, *tm_like_params])
             else:
+                known_clause = (
+                    f"and (tm.flags & {compact_text_cache.FLAG_HAS_KNOWN_SOURCE}) != 0 "
+                    if tm_table != "textMap"
+                    else ""
+                )
                 matched_tm_cte = (
                     "with matched_tm as materialized ("
                     f"select tm.hash, tm.content from {tm_table} tm "
-                    f"where tm.lang = ? and {tm_like_sql}"
+                    f"where tm.lang = ? {known_clause}and {tm_like_sql}"
                     "), "
                 )
                 params.extend([langCode, *tm_like_params])

@@ -830,6 +830,7 @@ def test_compact_text_cache_accelerates_single_char_and_multi_term_with_parity(t
     setup_conn.execute("INSERT INTO voice(dialogueId, voicePath) VALUES (70, 'VO_7001.wem')")
     setup_conn.execute("INSERT INTO quest_hash_map(questId, hash, source_type) VALUES (700, 7002, 'dialog')")
     setup_conn.execute("INSERT INTO talk_dialogue_link(talkId, coopQuestId, dialogueId) VALUES (500, 0, 70)")
+    setup_conn.execute("INSERT INTO text_source_entity(entity_id, source_type_code, title_hash, text_hash, sub_category) VALUES (9001, 1, 7006, 7007, 0)")
     setup_conn.execute("INSERT INTO textMap_fts(textMap_fts) VALUES ('rebuild')")
     setup_conn.commit()
     setup_conn.close()
@@ -882,6 +883,10 @@ def test_compact_text_cache_accelerates_single_char_and_multi_term_with_parity(t
             ("cnt_all", lambda: helper.countTextMapFromKeyword("风", 1)),
             ("cnt_voice", lambda: helper.countTextMapFromKeywordVoice("风", 1, "with")),
             ("quest_content_1char", lambda: helper.selectQuestByContentKeyword("风", 1)),
+            ("catalog_a_en", lambda: helper.selectCatalogEntitiesWithCount("a", 4, limit=20)),
+            ("catalog_wind_chs", lambda: helper.selectCatalogEntitiesWithCount("风", 1, limit=20)),
+            ("catalog_wind_list", lambda: helper.selectCatalogEntities("风", 1, limit=20)),
+            ("catalog_wind_cnt", lambda: helper.countCatalogEntities("风", 1)),
         ]
 
         fast_results = {}
@@ -895,6 +900,9 @@ def test_compact_text_cache_accelerates_single_char_and_multi_term_with_parity(t
                 f"{label} scanned all rows of textMap_lang_index:\n{plans}"
             )
             fast_results[label] = res
+        assert fast_results["catalog_a_en"][1] >= 1
+        assert fast_results["catalog_wind_chs"][1] >= 1
+        assert fast_results["catalog_wind_cnt"] >= 1
 
         # Compare every result against Layer 1 main.textMap (sidecar disabled) AND SQL-only path.
         monkeypatch.setattr(helper.config, "getEnableTextMapFts", lambda: False)
